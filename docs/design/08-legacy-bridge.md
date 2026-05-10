@@ -1,10 +1,15 @@
 # 08. Legacy Bridge
 
-mssh refuses to talk to non-mssh peers by default. This is the right default — coexistence by default is what makes deprecation impossible. But there are real cases where a fresh deployment must connect to an existing host that does not yet speak mssh: legacy infrastructure mid-migration, third-party appliances, embedded devices awaiting firmware updates, etc.
+mssh interoperates with the classic SSH world in two distinct directions:
 
-The legacy bridge addresses this by allowing per-host opt-in to classic SSH. Critically, legacy is an **upgrade ramp**, not a sustaining mode.
+1. **Talking to a classic SSH server** that does not yet speak mssh — needed when the mssh client is the more modern side of the connection (a freshly-deployed mssh client reaching a legacy router, appliance, or unmigrated server).
+2. **Accepting a classic SSH client** that does not yet have an mssh cert — needed when the mssh server is the more modern side (a freshly-deployed mssh server accepting connections from users who haven't been enrolled yet).
 
-## What legacy mode is and is not
+Both directions are necessary for adoption. An organization rolling out mssh cannot upgrade every host on the same day, nor every user on the same day. The legacy bridge addresses both.
+
+The two directions are independently configured and have different forcing functions. Server-side compatibility (this server talking to legacy servers) is configured per-target via `LegacyHost`. Client-side compatibility (this server accepting classic clients) is configured via `AuthenticationMode` and `LegacyClientAccess`. See `15-ssh-key-compatibility.md` for the client-side story; this document focuses primarily on the server-side direction with a summary of the client-side at the end.
+
+## What server-side legacy mode is and is not
 
 Legacy mode is:
 
@@ -111,6 +116,21 @@ Even in legacy mode:
 - **No tunneling forwards (`tun`/`tap`) over legacy connections.** Channel plugins do not engage on legacy connections.
 - **No mid-session rotation over legacy.** Legacy is a static connection — established with a fixed key, runs until disconnect.
 - **No automatic legacy fallback.** A peer that *advertises* mssh but fails the mssh handshake is treated as broken, not legacy. Legacy mode only engages for peers that do not speak mssh at all.
+
+## The other direction: accepting classic clients
+
+This document has focused on the server-side direction (an mssh client reaching a classic server). The reverse direction — an mssh server accepting a classic SSH client — is governed by the `AuthenticationMode` directive defined in `15-ssh-key-compatibility.md`. A summary of how the two directions relate:
+
+| What you have                          | What's needed                                  |
+|----------------------------------------|------------------------------------------------|
+| mssh client → legacy server            | `LegacyHost` entry on the client side          |
+| Legacy client → mssh server            | `AuthenticationMode mssh-preferred` plus `LegacyClientAccess` on the server side |
+| mssh client → mssh server              | Default, no special configuration              |
+| Legacy client → legacy server          | Doesn't involve mssh                           |
+
+The two server-side configurations are independent. A given host might be configured to *reach* legacy peers (via `LegacyHost`) without being configured to *accept* legacy clients (`AuthenticationMode mssh-only`), or vice versa. The choice is the operator's per direction.
+
+Both directions share the same philosophical stance: backward compatibility is a sunset, not a sustaining state. Server-side enforces this with mandatory `Until` dates per legacy host. Client-side enforces it with `Until` on the `LegacyClientAccess` block. In both cases, the date is a forcing function — past it, the configuration stops working, and the operator must either renew the date with a fresh `Reason` or complete the migration of the affected hosts/users.
 
 ## The non-extension
 

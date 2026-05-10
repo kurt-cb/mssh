@@ -30,6 +30,24 @@ SSH has been remarkably durable — three decades of service, ubiquitous deploym
 
 ---
 
+## Compatibility: meeting SSH where it actually lives
+
+The single most important fact about SSH in 2026 is that almost nobody uses certificates. SSH public keys, on the other hand, are everywhere — in every developer's `~/.ssh/`, in every GitHub account, in every cloud dashboard, in CI runner secrets, in `authorized_keys` files on millions of servers. A protocol redesign that requires abandoning all of this is a protocol redesign that nobody adopts.
+
+mssh's answer: **the cert is a CA-attested wrapper around the user's existing public key, not a replacement for it.** Users enroll their existing SSH keys into the CA, which issues a cert binding the public key to the user's identity with policy extensions. The private key never moves. SSH agents, key files, and tooling continue to work unchanged. The same key that authenticates to GitHub continues to authenticate to GitHub.
+
+Servers can be configured along a spectrum:
+
+- **`mssh-only`** — Require cert-bearing auth. Recommended for production after enrollment is complete.
+- **`mssh-preferred`** — Accept either cert-bearing or bare public-key auth. Cert-bearing gets full policy enforcement; bare-key gets baseline access. The transitional posture during user enrollment.
+- **`classic-only`** — Accept only bare public-key auth. For testing and edge cases.
+
+This compatibility model is what makes a migration realistic. Organizations don't need a flag day. Users enroll on their own schedule. Servers tighten policy gradually as enrollment fills in. Coexistence is bounded by required `Until` dates — backward compatibility is a sunset, not an indefinite state.
+
+See `docs/design/15-ssh-key-compatibility.md` for the full migration model.
+
+---
+
 ## The mssh trust model
 
 The fundamental change: identity comes from certificates issued by a Certificate Authority, validated against a configured trust root, not from cached host keys or distributed authorized keys.
@@ -120,11 +138,15 @@ mssh is an SSH hardening, not a from-scratch rewrite. The on-wire protocol chang
 
 ## Migration path
 
-mssh and classic SSH coexist, with sunset dates. The mssh server can accept classic SSH connections from specifically-named hosts that have not yet been upgraded — but every legacy entry requires an explicit `Until` date and `Reason`. Past the date, the legacy entry stops working; the operator either upgrades the legacy host or extends the date with a fresh justification. Backward compatibility is a sunset, not an indefinite addition.
+mssh and classic SSH coexist, with sunset dates, in both directions: an mssh-aware host can reach legacy SSH servers (configured via `LegacyHost`), and an mssh-aware server can accept classic-SSH clients (configured via `AuthenticationMode` and `LegacyClientAccess`). Both directions require explicit `Until` dates and `Reason` strings; past the date, the legacy entry stops working, and the operator either renews the date or completes the migration.
 
-The protocol supports a defined "legacy onboarding" flow: when a legacy host is finally upgraded to mssh, it can submit a CSR signed by its existing classic SSH host key, proving continuity of identity. The CA issues an mssh cert; the legacy entry on peer hosts is removed; the migration is complete for that host.
+The two directions move on different schedules. Server-side hosts get upgraded as their operators have capacity. User enrollment happens as users have time to run the enrollment tool. An organization can be partway through both processes simultaneously — that's the normal state during a migration, not an exceptional one.
 
-For organizations with a large SSH footprint, the migration is gradual and per-host. There is no flag day. There is no requirement to migrate everyone simultaneously. The forcing functions (sunset dates, audit visibility, operational friction of legacy entries) push the migration along on the deployment's own schedule.
+The protocol supports a defined "legacy onboarding" flow for hosts: when a legacy host is finally upgraded, it submits a CSR signed by its existing classic SSH host key, proving continuity of identity. The CA issues an mssh cert; the legacy entry on peer hosts is removed; the migration is complete for that host.
+
+For user enrollment, the workflow is similarly continuous: the user's existing SSH key is wrapped in a cert by the CA. The same key continues to work for classic destinations (GitHub, unmigrated servers); the same key now also satisfies mssh-aware servers in cert-bearing mode. The user has not changed credentials, only added metadata.
+
+For organizations with a large SSH footprint, the migration is gradual along both axes. There is no flag day. There is no requirement to migrate everyone simultaneously. The forcing functions (sunset dates, audit visibility, operational friction of legacy entries) push the migration along on the deployment's own schedule.
 
 ---
 
@@ -171,26 +193,42 @@ Honest accounting:
 
 **Up-front:**
 - Set up a CA (an afternoon for the embedded CA; a project for production-scale).
-- Issue certs for each host and user (largely automatable from existing identity systems).
 - Distribute the trust root to every host (configuration management, one file per host).
-- Update sshd configuration to enable mssh (per host).
+- Update sshd configuration to enable mssh, typically starting in `mssh-preferred` mode (per host).
+
+**Per-user enrollment (the user-facing migration):**
+- Each user runs the enrollment tool against their existing SSH key. About 60 seconds per user, mostly waiting for 2FA. Self-service; no admin intervention needed for most users.
+- Users with unusual setups (multiple keys, hardware tokens, non-standard agents) may need help. Plan for ~5% of the user base needing direct support.
+- Total elapsed time for an organization of N users typically dominated by communication, not technology. Plan for weeks to months.
+
+**Per-host migration (the server-side change):**
+- Deploy mssh sshd. The binary replaces or augments classic sshd.
+- Configure trust root, `AuthenticationMode`, and any `LegacyHost` entries needed for outbound connections.
+- Tighten to `mssh-only` when enrollment coverage is sufficient.
 
 **Ongoing:**
-- Users obtain certs daily (5 seconds at session start with 2FA cached on smartcard; 30 seconds when 2FA needs to be re-presented).
+- Users obtain certs daily (5 seconds at session start with 2FA cached on smartcard; 30 seconds when 2FA needs to be re-presented). The underlying SSH key doesn't change.
 - Hosts rotate machine certs on schedule (automated, no human intervention).
 - Operators monitor the CA audit log for anomalies (any SIEM integration handles this).
 
 **One-time, gradual:**
-- Phase out legacy SSH entries as hosts upgrade. The sunset-date mechanism makes this organic.
+- Phase out `mssh-preferred` mode on individual hosts as their user base is fully enrolled.
+- Sunset `LegacyHost` entries as outbound peers upgrade. The forcing-function dates make this organic.
 
 **What goes away:**
-- Distributing `authorized_keys`. Gone.
-- Hunting down old SSH keys when someone leaves. Gone.
-- Host-key prompt fatigue. Gone.
+- Distributing `authorized_keys` *as the primary auth mechanism*. (It remains a fallback during `mssh-preferred` migration; eliminated entirely once an organization reaches `mssh-only`.)
+- Hunting down old SSH keys when someone leaves. Revocation at the CA handles it.
+- Host-key prompt fatigue. Gone — replaced by cert validation.
 - "Permission denied (publickey)" debugging marathons. Replaced with specific local errors.
-- Password auth as a residual concern. Gone.
+- Password auth as a residual concern. Gone immediately, regardless of migration state.
 
-The net is positive for any organization beyond a couple of hosts. The gains scale with the size of the SSH footprint — the bigger the fleet, the more authorized_keys management hurts and the more cert-based identity pays off.
+**What does not go away:**
+- The user's existing SSH key. They keep it. Forever, if they want.
+- Their key's enrollment in third-party services (GitHub, GitLab, cloud providers). Unaffected.
+- Their SSH agent. Unaffected.
+- Their `~/.ssh/config` aliases. Unaffected (apart from possibly removing `StrictHostKeyChecking no` workarounds that mssh makes unnecessary).
+
+The net is positive for any organization beyond a couple of hosts. The gains scale with the size of the SSH footprint — the bigger the fleet, the more authorized_keys management hurts and the more cert-based identity pays off. The compatibility model means the gains are realized gradually rather than requiring a flag day.
 
 ---
 

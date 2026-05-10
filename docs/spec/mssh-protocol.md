@@ -6,7 +6,7 @@
 
 ## Abstract
 
-This document specifies the wire protocol for mssh, a certificate-first variant of the Secure Shell (SSH) protocol. mssh retains the SSH transport layer of [RFC4253] and the connection protocol of [RFC4254], replacing the user authentication protocol of [RFC4252] with a mandatory X.509 certificate-based mutual authentication. This document defines the message formats, certificate profile, validation algorithms, and supporting protocols (CA REST API, authenticated channel plugin protocol) required for interoperable implementation.
+This document specifies the wire protocol for mssh, a certificate-first variant of the Secure Shell (SSH) protocol. mssh retains the SSH transport layer of [RFC4253], the connection protocol of [RFC4254], and the user authentication framing of [RFC4252], extending the `publickey` userauth method with new algorithm names that carry mssh certificates in place of bare public keys. This document defines the algorithm names, certificate profile, validation algorithms, hop chain attestation, and supporting protocols (CA REST API, authenticated channel plugin protocol) required for interoperable implementation.
 
 ## 1. Introduction
 
@@ -26,12 +26,14 @@ See `00-overview.md` in the mssh design document set for the complete glossary. 
 
 ### 1.3 Relationship to existing SSH protocols
 
-mssh uses SSH-TRANS [RFC4253] and the connection protocol [RFC4254] unchanged. The user authentication protocol [RFC4252] is replaced. The mssh-specific protocol elements are:
+mssh uses SSH-TRANS [RFC4253], the connection protocol [RFC4254], and the user authentication framing of [RFC4252] without structural changes. The mssh-specific protocol elements are:
 
-1. A replacement user authentication method (`mssh-cert`) defined in Section 4.
+1. Extended `publickey` algorithm names (`mssh-cert-*-v01`) that carry mssh certs, defined in Section 4.
 2. A new hop chain attestation message defined in Section 5.
 3. New rotation and time-extension messages defined in Section 6.
 4. New channel-open type and supporting messages for authenticated channels (Section 7).
+
+Implementations MAY accept classic bare-key `publickey` auth alongside the mssh-cert algorithms per operator configuration, providing a compatibility path for unenrolled users. Other auth methods (`password`, `keyboard-interactive`, `hostbased`, `gssapi-*`) MUST be refused unconditionally.
 
 All other SSH messages, semantics, and behaviors are inherited from the cited RFCs.
 
@@ -230,52 +232,54 @@ All others are forbidden.
 
 ## 4. User Authentication
 
-### 4.1 The mssh-cert method
+### 4.1 Method and algorithm names
 
-The single supported user authentication method is `mssh-cert`. After `SSH_MSG_SERVICE_ACCEPT` for `ssh-userauth`, the client MUST send `SSH_MSG_USERAUTH_REQUEST` with `method name = "mssh-cert"`.
+mssh user authentication uses the SSH `publickey` method as defined in [RFC4252] Section 7, with extended algorithm names that carry mssh certs in place of bare public keys. Implementations MUST support the following algorithm names:
 
-#### Message format
+| Algorithm name                | Underlying key      | Signature scheme       |
+|-------------------------------|---------------------|------------------------|
+| `mssh-cert-ed25519-v01`       | Ed25519             | Ed25519                |
+| `mssh-cert-ecdsa-p256-v01`    | ECDSA P-256         | ecdsa-sha2-nistp256    |
+| `mssh-cert-ecdsa-p384-v01`    | ECDSA P-384         | ecdsa-sha2-nistp384    |
+| `mssh-cert-rsa-sha256-v01`    | RSA (≥2048)         | rsa-sha2-256           |
+| `mssh-cert-rsa-sha512-v01`    | RSA (≥3072)         | rsa-sha2-512           |
 
-```
-byte      SSH_MSG_USERAUTH_REQUEST
-string    user name
-string    "ssh-connection"
-string    "mssh-cert"
-string    client cert            ; DER-encoded X.509
-string    cert chain             ; concatenation of DER-encoded X.509
-                                 ; intermediates, leaf-issuer first
-uint32    flags
-string    signature
-```
+The `-v01` suffix permits future algorithm version increments without retiring the older format.
 
-`flags` is a bit field:
-- bit 0 (`rotation-requested`): the client suggests the server initiate rotation, e.g., because the client is presenting a parent cert and wishes to rotate to a derived cert.
-- bit 1 (`hop-chain-follows`): the next message MUST be `SSH_MSG_USERAUTH_HOPCHAIN`.
-- bit 2 (`channel-request-follows`): the client intends to request channel opens after auth completes. Advisory.
-- bits 3-31: reserved, MUST be set to zero by senders and ignored by receivers.
+Implementations MAY accept bare-key `publickey` auth using the standard algorithm names (`ssh-ed25519`, `ecdsa-sha2-nistp256`, etc.) per local configuration. Bare-key auth does not engage mssh policy enforcement; it is a compatibility mode for unenrolled users. See `15-ssh-key-compatibility.md` for the deployment model.
 
-`signature` is computed as the SSH signature blob (per RFC 4252 Section 7) over the input:
+Other auth methods — `password`, `keyboard-interactive`, `hostbased`, `gssapi-*` — MUST be refused unconditionally.
+
+### 4.2 Cert blob format
+
+A `publickey` userauth request using one of the `mssh-cert-*-v01` algorithm names carries a cert blob in the "public key blob" field, encoded as:
 
 ```
-string    session identifier      ; per RFC 4253 Section 7.2
-byte      SSH_MSG_USERAUTH_REQUEST
-string    user name
-string    "ssh-connection"
-string    "mssh-cert"
-string    client cert
-string    cert chain
-uint32    flags
+string    "mssh-cert-v01"             ; format identifier
+string    cert serial number          ; hex string
+string    leaf cert DER               ; X.509 leaf
+uint32    chain length N              ; 0 ≤ N ≤ 8
+   N times:
+   string  intermediate cert DER      ; ordered leaf-issuer first
+uint32    flags                       ; bit 0: rotation-requested
+                                      ; bit 1: hop-chain-follows
+                                      ; bit 2: channel-request-follows
+                                      ; bits 3-31 reserved, MUST be zero
 ```
 
-The signature uses the algorithm of the client cert's subject public key, with the signature format per [RFC4253] for the corresponding algorithm.
+The `flags` field uses the bit assignments described in `04-handshake-and-hop-chain.md`.
 
-### 4.2 Server validation
+The userauth request signature is computed as in [RFC4252] Section 7, over the same bytes a classic SSH `publickey` signature would cover, using the private key corresponding to the cert's subject public key. The signature algorithm matches the algorithm name's signature scheme column above.
 
-The server MUST perform the validation steps enumerated in `04-handshake-and-hop-chain.md` Section "The mssh-cert method", in the order specified. The first failing check determines the failure; subsequent checks are not performed.
+### 4.3 Server validation
 
-On any validation failure, the server MUST send `SSH_MSG_USERAUTH_FAILURE` with no listed methods and the partial-success flag false, then disconnect after a linger of at least 500 ms and at most 5 s. The specific reason is logged server-side using a stable error code (see error registry in Section 9) but MUST NOT be transmitted to the client.
+The server MUST perform the validation steps enumerated in `04-handshake-and-hop-chain.md` Section "Server validation" under "The mssh-cert-* algorithm family", in the order specified. The first failing check determines the failure; subsequent checks are not performed.
 
-### 4.3 Server identity
+On any validation failure, the server MUST send `SSH_MSG_USERAUTH_FAILURE` listing only the methods the server supports for this user (typically `publickey` only) and the partial-success flag false. The specific reason is logged server-side using a stable error code (see error registry in Section 9) but MUST NOT be transmitted to the client.
+
+Servers MAY linger after auth failure for 500 ms to 5 s before disconnecting, to discourage scanning. Servers MUST NOT close the connection immediately after USERAUTH_FAILURE if other auth attempts are configured to be permissible — the client may legitimately retry. However, a client whose `mssh-cert-*` auth was rejected MUST NOT automatically downgrade to bare `publickey` auth; doing so silently downgrades security. Such retries require explicit client configuration.
+
+### 4.4 Server identity
 
 Following successful client cert validation, before sending `SSH_MSG_USERAUTH_SUCCESS`, the server MUST send `SSH_MSG_USERAUTH_SERVER_IDENTITY`:
 
@@ -304,7 +308,7 @@ The client MUST validate the server cert with the same checks the server applies
 
 On client-side validation failure, the client MUST close the connection. The client SHOULD log a specific error locally; it MUST NOT inform the server of the specific failure reason.
 
-### 4.4 Successful authentication
+### 4.5 Successful authentication
 
 On mutual success the server MUST send `SSH_MSG_USERAUTH_SUCCESS` (number 52, per [RFC4252]). The connection then proceeds to the connection protocol [RFC4254].
 
@@ -537,12 +541,13 @@ A complete worked example — a user connecting through one hop to a destination
 
 For implementers porting classic SSH code:
 
-1. **Replace the userauth method dispatch.** All non-`mssh-cert` methods are gone. The method table has exactly one entry (or two in legacy mode).
-2. **Add cert chain validation.** Replace `known_hosts` and `authorized_keys` lookups with X.509 chain validation against a configured trust root.
-3. **Add the mssh message handlers** (numbers 60-69 per Section 2).
+1. **Extend the `publickey` algorithm dispatch.** Add handlers for `mssh-cert-*-v01` algorithm names. The cert blob is parsed in place of a raw public key; everything else in the `publickey` flow (signature computation, signature verification) is unchanged. Reject `password`, `keyboard-interactive`, `hostbased`, and `gssapi-*` unconditionally regardless of configuration.
+2. **Add cert chain validation.** For mssh-cert algorithms, validate the cert chain against a configured trust root. For bare-key algorithms (if accepted), preserve the existing `authorized_keys` lookup path.
+3. **Add the mssh message handlers** (numbers 60-69 per Section 2) for hop chain, rotation, extension.
 4. **Wire up the CA REST client** for rotation and revocation.
 5. **Configure plugin sockets** for any channel types you want to support.
 6. **Replace the DNS path** with a DNSSEC-aware resolver call.
-7. **Remove password code paths** entirely, including in the configuration parser (configurations enabling password auth must produce a fatal error, not a silent ignore).
+7. **Remove password and other auth method code paths** entirely. Configurations enabling these must produce a fatal error, not a silent ignore.
+8. **Add `AuthenticationMode` configuration** to control whether bare-key auth is accepted alongside mssh-cert auth.
 
 The connection protocol layer ([RFC4254]) needs no changes. SFTP, SCP, port forwarding, agent forwarding, X11 — all work as before once auth completes.

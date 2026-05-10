@@ -13,6 +13,7 @@ mssh replaces both with X.509 certificate-based mutual authentication anchored t
 mssh also defines:
 
 - A **hop chain attestation** for multi-hop sessions through jumphosts, with end-to-end identity preservation that classic ProxyJump does not provide.
+- **First-class compatibility with existing SSH public keys.** A user's existing `id_ed25519` (or `id_rsa`, etc.) is the credential; the mssh cert is a CA-attested wrapper around it. Users keep their keys, their SSH agents, their tooling, their GitHub access. Servers can be configured to accept either cert-bearing or bare public-key auth during migration.
 - An **authenticated channel plugin protocol** (JSON-RPC over Unix socket) for application services like VPN, database proxies, kubernetes API gateways — sshd authenticates, plugins deliver, the security boundary is clean.
 - A **conformance test suite** that CAs must pass for their certs to be trusted at runtime, preventing CAs from drifting from the spec.
 - A **constrained profile** for embedded targets (Dropbear-class), with full mssh interop in about 360 KB.
@@ -30,13 +31,14 @@ For decision-makers and curious readers:
 For implementers and protocol engineers:
 
 - **[`docs/spec/mssh-protocol.md`](docs/spec/mssh-protocol.md)** — Normative wire specification, RFC-style.
-- **[`docs/design/`](docs/design/)** — Fifteen design documents covering rationale, architecture, threat model, and edge cases. Read in numerical order, or jump to specific topics.
+- **[`docs/design/`](docs/design/)** — Sixteen design documents covering rationale, architecture, threat model, and edge cases. Read in numerical order, or jump to specific topics.
 
 For operators evaluating adoption:
 
+- **[`docs/design/15-ssh-key-compatibility.md`](docs/design/15-ssh-key-compatibility.md)** — How mssh interoperates with the SSH keys you already have. Probably the most important doc for adoption decisions.
 - **[`docs/design/12-threat-model.md`](docs/design/12-threat-model.md)** — What mssh defends against and what it does not.
 - **[`docs/design/07-embedded-ca.md`](docs/design/07-embedded-ca.md)** — The minimal in-tree CA for small deployments.
-- **[`docs/design/08-legacy-bridge.md`](docs/design/08-legacy-bridge.md)** — Migration from classic SSH.
+- **[`docs/design/08-legacy-bridge.md`](docs/design/08-legacy-bridge.md)** — Migration from classic SSH (server-side and client-side directions).
 
 ## Repository layout
 
@@ -50,7 +52,7 @@ mssh/
 │   ├── exec/
 │   │   ├── overview.md              # Human-readable executive overview
 │   │   └── diagrams/                # SVGs embedded in the overview
-│   ├── design/                      # Detailed design rationale (15 docs)
+│   ├── design/                      # Detailed design rationale (16 docs)
 │   └── spec/
 │       └── mssh-protocol.md         # Normative protocol specification
 └── .github/                         # Issue templates, workflows (future)

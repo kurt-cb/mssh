@@ -132,3 +132,44 @@ For comparison, OpenSSH + OpenSSL on a typical embedded Linux is on the order of
 The conformance suite (`03-conformance.md`) is divided into mandatory tests (every implementation must pass) and CA-only tests (only CAs need to pass). Constrained implementations must pass the validation tests — accepting valid certs, rejecting invalid ones — but are exempt from the issuance and policy tests.
 
 A planned addition to the conformance harness is a "constrained profile" mode that runs only the relevant test subset and reports pass/fail accordingly. Mbed TLS and BearSSL reference builds are tested against this subset as part of the mssh reference distribution's CI.
+
+## Implementation languages
+
+The mssh protocol is implementation-language-agnostic. The wire format is defined in terms of bytes; the cert format is standard X.509; the cryptographic primitives are standard. Any language with a competent crypto library can implement mssh.
+
+The project's intent is to support multiple reference implementations rather than blessing exactly one.
+
+### Reference implementation: C with Mbed TLS
+
+The primary reference implementation targets C, linking Mbed TLS (Apache 2.0, compatible with mssh's license). This choice reflects:
+
+- **Embedded reach.** Mbed TLS is widely used in embedded space. A C implementation of mssh can be ported to Dropbear-class targets without language-portability gymnastics. Vendors who ship classic SSH today predominantly ship C; adoption is easier when the language matches.
+- **Library compatibility.** Mbed TLS, OpenSSL, and the other realistic crypto libraries are all C. A C implementation links directly without FFI overhead, marshalling, or impedance mismatches.
+- **Operational familiarity.** Engineers who maintain OpenSSH and Dropbear are C engineers. They can read and extend mssh in C without learning a new ecosystem.
+
+The C implementation is held to modern memory-safety practice, not 1999 C:
+
+- Bounded readers for every parser, with explicit length checks before every read.
+- No allocation in the authentication hot path. Static arenas sized at startup; out-of-arena is a fatal error, not silent corruption.
+- Fuzz targets for every parser. CI runs AFL or libFuzzer continuously. Coverage tracked.
+- Static analysis mandatory: clang-tidy, scan-build, and a third-party analyzer (Coverity, CodeQL) in CI.
+- ASan, UBSan, and MSan builds in CI on every PR.
+- The OpenSSH-style privsep model preserved: the network-facing code runs as an unprivileged child.
+
+This discipline matters more than the language choice. A C implementation written this way is substantially safer than OpenSSH's organically-grown codebase, which carries 25 years of accumulated technical debt.
+
+### Other reference implementations
+
+The project welcomes additional reference implementations in other languages. Two are explicitly anticipated:
+
+**Python.** Useful for prototyping, conformance testing, and education. Python is a natural choice for the CA's reference implementation (where embedded constraints don't apply) and for tools that exercise the protocol against C-based servers. The slow performance and large binary size of Python are not concerns for these uses. A Python implementation also serves as a "second opinion" that catches places where the spec is ambiguous — implementers in different languages frequently make different interpretations of the same spec text, and the disagreements are bug reports against the spec.
+
+**Rust.** Increasingly the language of choice for new security-critical infrastructure. Rust's memory safety story addresses the largest class of CVEs that have plagued C-based SSH implementations. The embedded story is improving — `no_std` Rust is real, embedded-hal is mature — though Dropbear-class targets (8 MB flash, 32 MB RAM) remain practically out of Rust's reach in v1. A Rust implementation for full-feature deployments is welcome and would be a meaningful contribution.
+
+The project's posture: ship a C reference that runs everywhere, encourage additional implementations in safer languages for full-featured deployments, accept that the embedded targets are C-dominated and design accordingly.
+
+### Interoperability is the test
+
+The conformance test suite is the contract between implementations. An implementation in any language that passes the suite is a conformant mssh implementation. The suite itself is language-agnostic — it consists of test vectors (binary blobs, expected behaviors, expected error codes) that any implementation can be evaluated against.
+
+For the first year of the project, the reference C implementation and the Python prototype will be developed in lockstep, with the test suite serving as the interoperability check between them. This catches both implementation bugs and spec ambiguities. Once the protocol has stabilized, the Python implementation may be retired or maintained as a teaching tool; the C implementation continues as production-grade.

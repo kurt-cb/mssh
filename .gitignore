@@ -1,0 +1,104 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+*.app
+*.test
+*.prof
+bin/
+build/
+dist/
+target/
+out/
+
+# Go
+*.exe~
+go.work.sum
+
+# Rust
+Cargo.lock
+**/*.rs.bk
+
+# C/C++
+*.obj
+*.lib
+*.pdb
+*.idb
+*.exp
+.depend
+.deps/
+*.gcno
+*.gcda
+*.gcov
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.sublime-workspace
+*.sublime-project
+.vs/
+
+# Generated docs
+_site/
+*.pdf
+*.html
+!docs/exec/diagrams/*.html
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+*.pid
+*.seed
+*.tgz
+*.tar.gz
+*.zip
+
+# Test artifacts
+coverage/
+*.cover
+*.lcov
+htmlcov/
+.coverage
+.pytest_cache/
+test-results/
+
+# Local CA state and certs (in case anyone tests locally in the repo)
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+*.crl
+ca-state/
+sshv3-test-ca/
+mssh-test-ca/
+!docs/**/*.pem
+!docs/**/*.crt
+!docs/**/*.csr
+
+# Mac/Windows debris
+.AppleDouble
+.LSOverride
+desktop.ini
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Node (in case of future tooling)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm

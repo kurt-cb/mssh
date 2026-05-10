@@ -1,6 +1,8 @@
 # 04. Handshake and Hop Chain
 
-The mssh wire protocol is SSH-TRANS as defined by RFC 4253, with the user authentication phase (RFC 4252) replaced. This document defines the modified authentication message exchange and the new hop chain attestation message. These are the only on-wire protocol changes in mssh.
+The mssh wire protocol is SSH-TRANS as defined by RFC 4253 and the SSH userauth state machine of RFC 4252, with extensions to the `publickey` method and new auxiliary messages for hop chain attestation and session lifecycle. This document defines the modified authentication message exchange and the new hop chain attestation message.
+
+The wire-level change is smaller than a casual reader might expect. mssh does not introduce a new auth method; it extends the existing `publickey` method with new algorithm names (e.g., `mssh-cert-ed25519-v01`) that carry certs in place of bare public keys. This lets mssh ride on the existing SSH userauth framing, lets a single client present either bare-key or cert-bearing auth to the same server, and gives clean fallback behavior when one party doesn't speak mssh. See `15-ssh-key-compatibility.md` for the rationale.
 
 ## Transport layer
 
@@ -8,52 +10,117 @@ Unchanged from classic SSH. KEX, key derivation, MACs, ciphers — all per RFC 4
 
 The transport-layer host key signature continues to bind the KEX result to a specific server private key. The difference from classic SSH is that the host key is no longer trusted via TOFU and `known_hosts`; it is trusted because the server presents a cert chain that binds the host key's public component to a CA-attested identity. See "Mutual authentication" below.
 
-## User authentication: replaced
+## User authentication: extended `publickey`
 
-Classic SSH negotiates among `password`, `publickey`, `keyboard-interactive`, `hostbased`, and others. mssh supports exactly one method:
+Classic SSH negotiates among `password`, `publickey`, `keyboard-interactive`, `hostbased`, and others. mssh keeps the same userauth state machine but restricts and extends it:
 
-- **`mssh-cert`** — Mutual cert-based authentication.
+- The `publickey` method is mandatory and is the only general-purpose auth method.
+- Within `publickey`, the algorithm name distinguishes between **bare public-key auth** (classic, e.g., `ssh-ed25519`) and **mssh cert auth** (extended, e.g., `mssh-cert-ed25519-v01`).
+- `password`, `keyboard-interactive`, `hostbased`, `gssapi-*`, and all other auth methods are rejected unconditionally.
 
-Any `SSH_MSG_USERAUTH_REQUEST` with a method name other than `mssh-cert` is rejected; the server sends `SSH_MSG_USERAUTH_FAILURE` listing only `mssh-cert` as an available method, then disconnects after a small linger if the client does not switch.
+This design is deliberate. By riding on the standard `publickey` framing, mssh inherits compatibility with the entire SSH ecosystem: existing client libraries, SSH agents, key files, and operational habits all continue to work. The cert is a wrapper around the user's existing public key, distinguished on the wire only by its algorithm name. See `15-ssh-key-compatibility.md` for the full compatibility model.
 
-`mssh-cert` is also offered in legacy mode for mssh-aware peers, with classic methods accepted as a fallback only when the connecting host is listed in `LegacyHost` configuration. See `08-legacy-bridge.md`.
+Whether a server accepts bare public-key auth, cert-bearing auth, or both is an operator decision per `AuthenticationMode` configuration:
 
-## The mssh-cert method
+- **`mssh-only`** — Server accepts only `mssh-cert-*` algorithm names. Bare public-key auth is rejected. This is the strict mode, recommended for production after enrollment is complete.
+- **`mssh-preferred`** — Server accepts both. Cert-bearing connections get full policy enforcement; bare public-key connections get baseline access per `LegacyClientAccess` configuration. Transitional mode during user enrollment.
+- **`classic-only`** — Server accepts only bare public-key auth. Cert algorithm names are unknown and produce normal "unsupported method" failures. Provided for testing and edge cases; not the recommended deployment.
 
-After KEX completes and a service request for `ssh-userauth` is acknowledged, the client sends:
+The hop chain attestation, server identity message, rotation messages, and other mssh-specific protocol elements defined later in this document and in `05-rotation-2fa-lifetime.md` apply only when cert-bearing auth is in use. Bare public-key connections behave like classic SSH connections with stricter algorithm restrictions.
+
+## The mssh-cert-* algorithm family
+
+mssh defines a family of algorithm names for cert-bearing authentication, one per supported underlying key algorithm:
+
+| Algorithm name              | Underlying key       | Signature                |
+|-----------------------------|----------------------|--------------------------|
+| `mssh-cert-ed25519-v01`     | Ed25519              | Ed25519                  |
+| `mssh-cert-ecdsa-p256-v01`  | ECDSA P-256          | ecdsa-sha2-nistp256      |
+| `mssh-cert-ecdsa-p384-v01`  | ECDSA P-384          | ecdsa-sha2-nistp384      |
+| `mssh-cert-rsa-sha256-v01`  | RSA (≥2048)          | rsa-sha2-256             |
+| `mssh-cert-rsa-sha512-v01`  | RSA (≥3072)          | rsa-sha2-512             |
+
+The `-v01` suffix permits future algorithm version increments without retiring the older format. Implementations MUST recognize all five names at minimum; future post-quantum additions will follow the same naming pattern (e.g., `mssh-cert-mldsa-65-v01`).
+
+A client presents the cert by embedding it in the standard `publickey` userauth request, using one of these algorithm names. The "public key blob" field, which classic SSH uses to carry a raw public key, instead carries the cert and its chain. The signature in the userauth request is computed exactly as in classic SSH — over the session id and request prefix — using the private key corresponding to the cert's subject public key.
+
+### Wire format: mssh cert userauth
 
 ```
 byte      SSH_MSG_USERAUTH_REQUEST
 string    user name
-string    service name           ; always "ssh-connection"
-string    method name            ; "mssh-cert"
-string    client cert            ; DER-encoded X.509 leaf
-string    cert chain             ; DER-encoded X.509 intermediates,
-                                 ; leaf-issuer first, root excluded
-uint32    flags                  ; bit 0: rotation-requested
-                                 ; bit 1: hop-chain-follows
-                                 ; bit 2: channel-request-follows
-                                 ; bits 3-31 reserved, MUST be zero
-string    signature              ; over session id || preceding fields
+string    "ssh-connection"
+string    "publickey"
+boolean   TRUE                        ; signature follows
+string    algorithm name              ; one of "mssh-cert-*-v01"
+string    cert blob                   ; encoded as below
+string    signature                   ; SSH wire format, computed as
+                                      ; in RFC 4252 §7 over the same
+                                      ; bytes a classic publickey
+                                      ; signature would cover
 ```
 
-The signature is computed over the SSH session identifier (per RFC 4252) concatenated with all preceding fields of this message, signed with the private key corresponding to the client cert's subject public key.
+The `cert blob` is encoded as nested SSH-format strings:
+
+```
+string    "mssh-cert-v01"             ; format identifier
+string    cert serial number          ; hex string, for log correlation
+string    leaf cert DER               ; X.509 leaf
+uint32    chain length N              ; 0 ≤ N ≤ 8
+   N times:
+   string  intermediate cert DER      ; ordered leaf-issuer first,
+                                      ; root excluded
+uint32    flags                       ; bit 0: rotation-requested
+                                      ; bit 1: hop-chain-follows
+                                      ; bit 2: channel-request-follows
+                                      ; bits 3-31 reserved, MUST be zero
+```
 
 If `hop-chain-follows` is set, the client (or the most recent mssh hop forwarding on its behalf) MUST send `SSH_MSG_USERAUTH_HOPCHAIN` (defined below) immediately after this message and before any server response. If `channel-request-follows` is set, the client intends to request one or more authenticated channels after auth succeeds (see `09-channel-plugin-interface.md`).
 
+### Server validation
+
 The server validates, in order:
 
-1. **Chain to trust root.** The cert chain terminates at a configured trust root. Path-building follows RFC 5280 §6.1 with the restrictions in `02-cert-profile.md`.
-2. **Profile conformance.** Every cert in the chain (including the leaf) conforms to its declared `mssh-profile`, with criticality, extensions, and constraints exactly as specified. Re-runs the issuance-time profile validation against the received bytes.
-3. **CA conformance attestation.** Every CA cert in the chain carries a valid `mssh-ca-conformance` extension. sshd's configured `TrustedAttestor` set must include the signer of each attestation.
-4. **Validity window.** The leaf's `notBefore` ≤ now ≤ `notAfter`. Wall clock skew tolerance is configurable but defaults to zero — clocks must be synchronized.
-5. **Source-address binding.** The leaf's `mssh-source-bind` includes the connecting peer's IP. For connections arriving via a hop chain, the relevant IP is the one in the hop's `next-hop hostname` resolution, not the final TCP peer address; see "Source binding and hops" below.
-6. **Time window.** If the leaf has `mssh-time-window`, the current time falls within an allowed window. If not within a window but within an extension-eligible band, the server records this for the rotation/extension logic in `05-rotation-2fa-lifetime.md`.
-7. **Cluster scope.** If the leaf has `mssh-cluster-scope`, the server is a member of one of the listed clusters. Cluster membership is locally configured on the server.
-8. **Revocation.** For full-profile certs, CRL or OCSP per the cert's distribution points. For constrained-profile certs, revocation is implied by the short validity window and no online check is performed.
-9. **Signature.** The signature in the auth message is valid under the leaf cert's public key.
+1. **Algorithm name recognized.** The algorithm is one of the supported `mssh-cert-*-v01` names. If not, the server returns the standard "unsupported method" failure, listing the methods it does support.
+2. **Cert blob parses.** The cert blob's format identifier is `mssh-cert-v01` and the nested structure is well-formed.
+3. **Chain to trust root.** The cert chain terminates at a configured trust root. Path-building follows RFC 5280 §6.1 with the restrictions in `02-cert-profile.md`.
+4. **Profile conformance.** Every cert in the chain (including the leaf) conforms to its declared `mssh-profile`, with criticality, extensions, and constraints exactly as specified. Re-runs the issuance-time profile validation against the received bytes.
+5. **CA conformance attestation.** Every CA cert in the chain carries a valid `mssh-ca-conformance` extension. sshd's configured `TrustedAttestor` set must include the signer of each attestation.
+6. **Validity window.** The leaf's `notBefore` ≤ now ≤ `notAfter`. Wall clock skew tolerance is configurable but defaults to zero — clocks must be synchronized.
+7. **Algorithm match.** The algorithm name's underlying key type matches the cert's subject public key type. A client presenting `mssh-cert-ed25519-v01` with an RSA cert is rejected as malformed.
+8. **Source-address binding.** The leaf's `mssh-source-bind` includes the connecting peer's IP. For connections arriving via a hop chain, the relevant IP is the one in the hop's `next-hop hostname` resolution, not the final TCP peer address; see "Source binding and hops" below.
+9. **Time window.** If the leaf has `mssh-time-window`, the current time falls within an allowed window. If not within a window but within an extension-eligible band, the server records this for the rotation/extension logic in `05-rotation-2fa-lifetime.md`.
+10. **Cluster scope.** If the leaf has `mssh-cluster-scope`, the server is a member of one of the listed clusters. Cluster membership is locally configured on the server.
+11. **Revocation.** For full-profile certs, CRL or OCSP per the cert's distribution points. For constrained-profile certs, revocation is implied by the short validity window and no online check is performed.
+12. **Signature.** The signature in the auth message is valid under the leaf cert's public key, computed over the same bytes a classic SSH publickey signature would cover.
 
-If any check fails, the server sends `SSH_MSG_USERAUTH_FAILURE` listing no methods (signaling no recovery) and disconnects after the linger. The specific failure reason is logged server-side with a stable error code from the registry in the protocol spec, but is **not** communicated to the client. This is deliberate: detailed failure feedback would be an oracle for an attacker probing what kind of cert the server expects.
+If any check fails, the server sends `SSH_MSG_USERAUTH_FAILURE` listing only the methods it accepts (typically `publickey` only) and the partial-success flag false. The specific failure reason is logged server-side with a stable error code from the registry in the protocol spec, but is **not** communicated to the client. This is deliberate: detailed failure feedback would be an oracle for an attacker probing what kind of cert the server expects.
+
+A client whose cert was rejected MUST NOT automatically retry with a bare public-key auth attempt; doing so would silently downgrade security. A retry with bare public-key auth requires explicit client configuration or user confirmation, and is meaningful only if the server is configured `mssh-preferred` or `classic-only`.
+
+### Bare public-key auth (when accepted)
+
+When a server's `AuthenticationMode` permits bare public-key auth (`mssh-preferred` or `classic-only`), classic SSH userauth applies unchanged: the client presents `ssh-ed25519` or similar; the server validates against `authorized_keys` per `LegacyClientAccess` configuration; the connection proceeds with baseline access. mssh-specific features (channel plugins, hop chain participation, in-session rotation, source binding, time windows) are not available to bare public-key connections.
+
+The server MUST log the auth mode in connection records so operators can distinguish cert-bearing from bare public-key connections at audit time.
+
+### The format distinction matters for parsing, not for identity
+
+A subtle but important point about what the algorithm-name distinction actually selects between.
+
+The cryptographic identity of a user is their public key — a curve point (Ed25519, ECDSA) or modulus/exponent pair (RSA). This key has the same bytes regardless of how it's transmitted. An Ed25519 public key sitting in a classic SSH `publickey` blob and the same key sitting inside the SubjectPublicKeyInfo of an mssh cert are *bit-for-bit identical at the cryptographic level*. The signature operations on each side of the connection are also identical: the same private key produces the same signature regardless of which wrapper the public key arrived in.
+
+What the algorithm name (`ssh-ed25519` vs `mssh-cert-ed25519-v01`) selects is **how the server parses the public-key blob field of the userauth request**:
+
+- `ssh-ed25519` — parse as a raw Ed25519 public key; authorize against `authorized_keys`.
+- `mssh-cert-ed25519-v01` — parse as a cert wrapping an Ed25519 public key; validate the cert chain, enforce extensions, then verify the signature against the cert's subject public key.
+
+In both cases, the signature is verified against the same public key bytes (extracted from either the raw blob or the cert's SubjectPublicKeyInfo). The cert isn't doing additional cryptographic work — it's carrying additional *policy* (validity window, source binding, channel grants, CA attestation). When that policy is absent (bare-key auth), the server falls back to its locally-configured policy (`authorized_keys`, source restrictions in sshd_config, etc.).
+
+This is why the same user can authenticate to both mssh and classic servers with the same private key. It's why a user's existing `authorized_keys` entries continue to work after they enroll in mssh. It's why format conversion utilities (`mssh-keygen --cert-to-pubkey`) are useful: the cert and the bare public-key representation describe the same underlying credential.
+
+The architectural point: certs are policy carriers, not identity carriers. Identity lives in the keypair. Choose your wrapping based on what policy you need to attest; the underlying key works the same either way. See `15-ssh-key-compatibility.md` for the operational implications.
 
 ## Mutual authentication
 

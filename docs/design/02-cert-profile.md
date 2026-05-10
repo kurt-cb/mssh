@@ -116,6 +116,20 @@ Subject public key algorithms (same set):
 
 PQ algorithms are not mandated in v1 but the cert format allows future algorithms to be added without changing the profile structure. A future mssh-profile version (`mssh-profile = 3`) is anticipated to add ML-DSA / Dilithium when the X.509 OID assignments stabilize.
 
+### Compatibility with existing SSH public keys
+
+The permitted algorithms above are the same algorithms used by classic SSH for public-key authentication. This is deliberate: a user's existing SSH public key — whatever its algorithm — can be wrapped in an mssh cert without modification.
+
+Specifically:
+
+- An Ed25519 SSH key (`ssh-ed25519`) corresponds directly to an Ed25519 subject public key in the cert. The same key bytes, the same algorithm, the same signing operations. The mssh cert merely adds CA attestation and policy.
+- An ECDSA P-256 SSH key (`ecdsa-sha2-nistp256`) corresponds directly to an ECDSA P-256 cert.
+- An RSA SSH key (`ssh-rsa`, `rsa-sha2-256`, `rsa-sha2-512`) corresponds to an RSA cert, with the cert's signature scheme matching the algorithm-name family chosen at issuance (`rsa-sha2-256` or `rsa-sha2-512`).
+
+A user enrolling an existing SSH key submits a PKCS#10 CSR carrying the public key portion of that key. The CA verifies proof-of-possession (the CSR is self-signed by the user's private key) and issues a cert binding the user's existing public key to their identity. The user's private key never leaves their machine.
+
+This compatibility is what makes mssh deployable. See `15-ssh-key-compatibility.md` for the full migration model.
+
 ## Validity windows
 
 The cert's outer Validity (`notBefore` to `notAfter`) MUST fall within these maximums:

@@ -17,22 +17,24 @@ An mssh client is the symmetric counterpart: presents a cert, validates the serv
 
 ## Goals
 
-- **Eliminate passwords from the SSH ecosystem.** Not deprecate. Remove.
-- **Make certificate-based access the easy path.** A small operator with two hosts should be able to bootstrap a working CA, issue certs to a handful of users, and have everything Just Work. An enterprise with thousands of hosts should be able to plug in their existing PKI through a defined interface.
+- **Eliminate passwords from the SSH ecosystem.** Not deprecate. Remove. Unconditionally, including in legacy modes.
+- **Be deployable without abandoning existing SSH keys.** Users keep their `id_ed25519` / `id_rsa` / etc. The mssh cert is a CA-attested wrapper around the user's existing public key, not a replacement. SSH agents, key files, third-party services (GitHub, etc.) all continue to work unchanged.
+- **Make certificate-based access the easy path.** A small operator with two hosts should be able to bootstrap a working CA, enroll a handful of users, and have everything Just Work. An enterprise with thousands of hosts should be able to plug in their existing PKI through a defined interface.
 - **Make multi-hop SSH safe.** Today, `ssh -J jump1,jump2 dest` gives the destination no way to verify the chain. mssh makes the chain part of the authenticated identity.
 - **Make access time-bounded by default.** Certs carry validity windows measured in hours to days, not years. Mid-session extensions are a first-class operation. Expired sessions terminate cleanly.
-- **Keep the on-wire protocol small.** One new message type for hop chain attestation. Everything else rides in X.509 extensions, which the existing handshake already knows how to carry.
+- **Keep the on-wire protocol small.** mssh rides on the existing SSH `publickey` userauth method with extended algorithm names; hop chain and lifecycle events add a handful of message types. The wire-level change is genuinely small.
 - **Stay implementable on small systems.** Dropbear-class implementations are a first-class target, not an afterthought. A constrained cert profile is defined explicitly to keep parser and validation code small.
 - **Defer extension to extension points.** Authenticated channels (VPN, database proxy, app gateways, etc.), LDAP/AD integration, advanced CA policy — all live behind defined interfaces, not in the core.
 
 ## Non-goals
 
-- A new transport protocol. mssh uses SSH-TRANS as defined in RFC 4253, with the auth layer replaced.
+- A new transport protocol. mssh uses SSH-TRANS as defined in RFC 4253. KEX, ciphers, MACs unchanged.
 - A new file transfer subsystem. SFTP and SCP are untouched.
 - A new VPN, database proxy, kubernetes gateway, or any other application-layer service. The authenticated-channel plugin protocol is defined; only a trivial `echo` reference plugin ships.
 - A new DNS validator. The system resolver is used.
 - A replacement for password authentication. There is no replacement. Passwords are gone.
-- Compatibility with classic SSH by default. Legacy mode exists as an upgrade ramp, not a long-term coexistence story.
+- A replacement for existing SSH keys. Existing keys are wrapped in certs, not replaced. The cert is metadata; the key remains the credential.
+- A flag-day migration. Coexistence with classic SSH is supported via the legacy bridge in both directions (server-side and client-side), with mandatory sunset dates so coexistence doesn't become permanent.
 
 ## Threat model summary
 
@@ -71,6 +73,7 @@ The design documents are numbered in the order they're best read:
 - `12-threat-model.md` — what mssh defends against
 - `13-name-resolution-and-identity.md` — how mssh handles non-DNS names and IPs
 - `14-debuggability.md` — operational visibility and the end of "permission denied (publickey)"
+- `15-ssh-key-compatibility.md` — how mssh works with the SSH keys you already have, and the user-enrollment migration story
 
 The normative wire-level specification is in `../spec/mssh-protocol.md`.
 
