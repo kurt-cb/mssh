@@ -1,0 +1,61 @@
+<svg width="100%" viewBox="0 0 800 400" xmlns="http://www.w3.org/2000/svg" role="img" font-family="system-ui, -apple-system, sans-serif">
+  <title>mssh session lifecycle</title>
+  <desc>A timeline showing the lifecycle of an mssh session: cert issuance with 2FA, connection, in-session rotation, and clean termination on expiry.</desc>
+
+  <defs>
+    <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="400" y="36" text-anchor="middle" font-size="18" font-weight="500" fill="#2C2C2A">Session lifecycle</text>
+  <text x="400" y="56" text-anchor="middle" font-size="13" fill="#5F5E5A">Short-lived certs, in-session rotation, deterministic termination</text>
+
+  <!-- Timeline axis -->
+  <line x1="60" y1="220" x2="740" y2="220" stroke="#888780" stroke-width="1"/>
+  <text x="60" y="245" font-size="11" fill="#5F5E5A">09:00</text>
+  <text x="740" y="245" text-anchor="end" font-size="11" fill="#5F5E5A">17:00</text>
+  <text x="400" y="265" text-anchor="middle" font-size="11" fill="#5F5E5A">time (8 hour cert)</text>
+
+  <!-- Event 1: Issue cert -->
+  <circle cx="120" cy="220" r="6" fill="#534AB7"/>
+  <line x1="120" y1="214" x2="120" y2="120" stroke="#7F77DD" stroke-width="0.5" stroke-dasharray="3 3"/>
+  <rect x="60" y="80" width="140" height="80" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.8"/>
+  <text x="130" y="102" text-anchor="middle" font-size="13" font-weight="500" fill="#26215C">1. Get cert</text>
+  <text x="130" y="120" text-anchor="middle" font-size="11" fill="#3C3489">User auths to CA</text>
+  <text x="130" y="135" text-anchor="middle" font-size="11" fill="#3C3489">2FA presented</text>
+  <text x="130" y="150" text-anchor="middle" font-size="11" fill="#3C3489">Cert issued (8h)</text>
+
+  <!-- Event 2: Connect -->
+  <circle cx="240" cy="220" r="6" fill="#185FA5"/>
+  <line x1="240" y1="214" x2="240" y2="120" stroke="#378ADD" stroke-width="0.5" stroke-dasharray="3 3"/>
+  <rect x="180" y="80" width="140" height="80" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.8"/>
+  <text x="250" y="102" text-anchor="middle" font-size="13" font-weight="500" fill="#042C53">2. Connect</text>
+  <text x="250" y="120" text-anchor="middle" font-size="11" fill="#0C447C">Present cert to server</text>
+  <text x="250" y="135" text-anchor="middle" font-size="11" fill="#0C447C">Server validates</text>
+  <text x="250" y="150" text-anchor="middle" font-size="11" fill="#0C447C">Mutual auth</text>
+
+  <!-- Event 3: Work + rotation (long span) -->
+  <rect x="270" y="210" width="280" height="20" rx="4" fill="#0F6E56" opacity="0.3"/>
+  <line x1="410" y1="214" x2="410" y2="320" stroke="#1D9E75" stroke-width="0.5" stroke-dasharray="3 3"/>
+  <rect x="340" y="320" width="140" height="60" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.8"/>
+  <text x="410" y="342" text-anchor="middle" font-size="13" font-weight="500" fill="#04342C">3. Rotate</text>
+  <text x="410" y="360" text-anchor="middle" font-size="11" fill="#085041">At ~75% lifetime</text>
+  <text x="410" y="374" text-anchor="middle" font-size="11" fill="#085041">New cert, same session</text>
+
+  <!-- "session work" label on the green bar -->
+  <text x="350" y="224" text-anchor="middle" font-size="11" font-weight="500" fill="#04342C">session work</text>
+
+  <!-- Event 4: Expiry -->
+  <circle cx="700" cy="220" r="6" fill="#A32D2D"/>
+  <line x1="700" y1="214" x2="700" y2="120" stroke="#E24B4A" stroke-width="0.5" stroke-dasharray="3 3"/>
+  <rect x="610" y="80" width="140" height="80" rx="8" fill="#FCEBEB" stroke="#A32D2D" stroke-width="0.8"/>
+  <text x="680" y="102" text-anchor="middle" font-size="13" font-weight="500" fill="#501313">4. Expiry</text>
+  <text x="680" y="120" text-anchor="middle" font-size="11" fill="#791F1F">Cert reaches notAfter</text>
+  <text x="680" y="135" text-anchor="middle" font-size="11" fill="#791F1F">30s grace period</text>
+  <text x="680" y="150" text-anchor="middle" font-size="11" fill="#791F1F">Session closes</text>
+
+  <!-- Bottom note -->
+  <text x="400" y="320" text-anchor="middle" font-size="11" fill="#5F5E5A" font-style="italic">No periodic re-validation. No keepalive renewal. One timer per session.</text>
+</svg>

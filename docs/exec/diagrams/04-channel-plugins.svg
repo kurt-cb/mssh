@@ -1,0 +1,69 @@
+<svg width="100%" viewBox="0 0 800 480" xmlns="http://www.w3.org/2000/svg" role="img" font-family="system-ui, -apple-system, sans-serif">
+  <title>Channel plugin pattern</title>
+  <desc>Diagram showing how mssh sshd delegates application-layer services (VPN, database proxy, kubernetes gateway) to separate plugin processes via a JSON-RPC protocol over Unix sockets.</desc>
+
+  <defs>
+    <marker id="arrow4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="400" y="36" text-anchor="middle" font-size="18" font-weight="500" fill="#2C2C2A">Authenticated channels</text>
+  <text x="400" y="56" text-anchor="middle" font-size="13" fill="#5F5E5A">sshd authenticates, plugins deliver — clean separation of concerns</text>
+
+  <!-- Client at left -->
+  <rect x="40" y="200" width="120" height="80" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.8"/>
+  <text x="100" y="226" text-anchor="middle" font-size="14" font-weight="500" fill="#26215C">Client</text>
+  <text x="100" y="244" text-anchor="middle" font-size="11" fill="#3C3489">User with cert</text>
+  <text x="100" y="260" text-anchor="middle" font-size="11" fill="#3C3489">granting channel</text>
+  <text x="100" y="274" text-anchor="middle" font-size="11" fill="#3C3489">policy</text>
+
+  <!-- sshd in middle -->
+  <rect x="270" y="170" width="180" height="140" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.8"/>
+  <text x="360" y="196" text-anchor="middle" font-size="14" font-weight="500" fill="#042C53">mssh sshd</text>
+  <text x="360" y="218" text-anchor="middle" font-size="11" fill="#0C447C">Authenticates user</text>
+  <text x="360" y="234" text-anchor="middle" font-size="11" fill="#0C447C">Validates cert chain</text>
+  <text x="360" y="250" text-anchor="middle" font-size="11" fill="#0C447C">Checks channel policy</text>
+  <text x="360" y="266" text-anchor="middle" font-size="11" fill="#0C447C">Hands scoped</text>
+  <text x="360" y="282" text-anchor="middle" font-size="11" fill="#0C447C">request to plugin</text>
+
+  <!-- Connection client to sshd -->
+  <line x1="160" y1="240" x2="268" y2="240" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow4)"/>
+  <text x="214" y="232" text-anchor="middle" font-size="10" fill="#5F5E5A">SSH</text>
+
+  <!-- Plugin processes on right (three examples) -->
+  <rect x="570" y="90" width="180" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.8"/>
+  <text x="660" y="115" text-anchor="middle" font-size="13" font-weight="500" fill="#04342C">echo plugin</text>
+  <text x="660" y="133" text-anchor="middle" font-size="11" fill="#085041">Reference implementation</text>
+
+  <rect x="570" y="172" width="180" height="56" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.8"/>
+  <text x="660" y="197" text-anchor="middle" font-size="13" font-weight="500" fill="#412402">tcp-proxy plugin</text>
+  <text x="660" y="215" text-anchor="middle" font-size="11" fill="#633806">Subnet TCP forwarding</text>
+
+  <rect x="570" y="254" width="180" height="56" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.8"/>
+  <text x="660" y="279" text-anchor="middle" font-size="13" font-weight="500" fill="#412402">vpn plugin</text>
+  <text x="660" y="297" text-anchor="middle" font-size="11" fill="#633806">WireGuard tunnel setup</text>
+
+  <rect x="570" y="336" width="180" height="56" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.8"/>
+  <text x="660" y="361" text-anchor="middle" font-size="13" font-weight="500" fill="#412402">k8s-api plugin</text>
+  <text x="660" y="379" text-anchor="middle" font-size="11" fill="#633806">Kubernetes proxy</text>
+
+  <!-- Arrows from sshd to plugins -->
+  <line x1="450" y1="220" x2="568" y2="118" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="450" y1="240" x2="568" y2="200" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="450" y1="260" x2="568" y2="282" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="3 3"/>
+  <line x1="450" y1="280" x2="568" y2="364" stroke="#5F5E5A" stroke-width="1" stroke-dasharray="3 3"/>
+
+  <!-- IPC label between sshd and plugins -->
+  <text x="510" y="170" text-anchor="middle" font-size="10" fill="#5F5E5A">JSON-RPC over</text>
+  <text x="510" y="184" text-anchor="middle" font-size="10" fill="#5F5E5A">Unix socket</text>
+
+  <!-- Bottom annotations -->
+  <rect x="40" y="410" width="720" height="58" rx="8" fill="#F1EFE8" stroke="#888780" stroke-width="0.5"/>
+  <text x="56" y="432" font-size="12" font-weight="500" fill="#2C2C2A">Why this matters:</text>
+  <text x="56" y="450" font-size="11" fill="#444441">• sshd never hosts application logic — it stays small and auditable</text>
+  <text x="380" y="450" font-size="11" fill="#444441">• Plugins run as separate processes with their own privileges</text>
+  <text x="56" y="464" font-size="11" fill="#444441">• Compromised plugin can't escalate beyond its grant</text>
+  <text x="380" y="464" font-size="11" fill="#444441">• v1 ships only the trivial echo plugin (everything else is example)</text>
+</svg>
