@@ -408,7 +408,7 @@ def _wrapper_yaml_fallback() -> str:
     )
 
 
-def _wrapper_yaml_enforce(ca_ip: str) -> str:
+def _wrapper_yaml_enforce(ca_ip: str, *, inner_mode: str = 'long-lived') -> str:
     return (
         'mode: enforce\n'
         f'listen:\n'
@@ -428,6 +428,7 @@ def _wrapper_yaml_enforce(ca_ip: str) -> str:
         f'inner:\n'
         f'  sshd_binary: /usr/sbin/sshd\n'
         f'  port_range: [49152, 65535]\n'
+        f'  mode: {inner_mode}\n'
         f'users:\n'
         f'  allowed: ["*"]\n'
         f'logging:\n'
@@ -654,16 +655,23 @@ def _msshd_restart_cmd(server: _Server) -> str:
 
 
 def _flip_script(target_mode: str, yaml: str, ips: dict,
-                 ca_ip: str) -> str:
+                 ca_ip: str, *, script_label: str | None = None) -> str:
     """Render a self-contained flip script that runs on the CA container.
 
+    ``target_mode`` is what the post-flip verify command should expect
+    (``enforce`` → use ``mssh``, ``fallback`` → use ``ssh -p MSSHD_PORT``).
+    ``script_label`` controls the filename and headline only — useful
+    when several enforce-mode variants (long-lived, per-connection)
+    share the same verify transport but ship as distinct files.
+
     Uses ssh root@<server> (root-admin's pubkey is in /root/authorized_keys
-    on every server) for the config-push step; verifies the new mode using
-    the transport that mode expects (mssh for enforce, ssh -p MSSHD_PORT
-    for fallback); reverts on verification failure.
+    on every server) for the config-push step; reverts on verification
+    failure.
 
     Models an actual operator workflow — no `lxc exec` anywhere.
     """
+    if script_label is None:
+        script_label = target_mode
     verify_cmd, verify_desc = ({
         'enforce':  ('mssh root-admin@$ip:$MSSHD_PORT -- whoami',
                      'mssh ↔ msshd (mTLS + CA-mediated)'),
@@ -677,11 +685,11 @@ def _flip_script(target_mode: str, yaml: str, ips: dict,
     server_table = '\n'.join(rows)
 
     return f'''#!/bin/sh
-# /home/root-admin/flip-to-{target_mode}.sh
+# /home/root-admin/flip-to-{script_label}.sh
 #
 # Operator-grade flip script. Runs on the CA container as root-admin.
 # For each server: backs up the current wrapper.yaml, pushes the
-# {target_mode}-mode config, restarts msshd, verifies via
+# {script_label} config, restarts msshd, verifies via
 # {verify_desc}, and reverts on failure.
 #
 # No `lxc exec` — only ssh (config push via the root@<server> backdoor
@@ -727,7 +735,7 @@ flip_one() {{
 
     # Verify with the post-flip transport.
     if {verify_cmd} 2>/dev/null | grep -q '^root-admin$'; then
-        echo "OK ({target_mode})"
+        echo "OK ({script_label})"
         return 0
     fi
     # Verify failed: revert.
@@ -741,7 +749,7 @@ flip_one() {{
 
 SERVERS_TABLE='{server_table}'
 
-echo "Flipping all servers to mode={target_mode}..."
+echo "Flipping all servers to: {script_label}..."
 echo "$SERVERS_TABLE" | while IFS='|' read -r name ip restart; do
     [ -z "$name" ] && continue
     # </dev/null protects the loop's pipe from being consumed by any
@@ -756,15 +764,28 @@ echo "  mssh alice@$(echo \"$SERVERS_TABLE\" | head -1 | cut -d'|' -f2):$MSSHD_P
 
 
 def _push_flip_scripts_to_ca(ips: dict, ca_ip: str) -> None:
-    """Generate the two flip scripts and push them to /home/root-admin/
-    on the CA container."""
-    enforce_yaml  = _wrapper_yaml_enforce(ca_ip)
-    fallback_yaml = _wrapper_yaml_fallback()
-    for target_mode, yaml in (('enforce', enforce_yaml),
-                              ('fallback', fallback_yaml)):
-        script = _flip_script(target_mode, yaml, ips, ca_ip)
+    """Generate the flip scripts and push them to /home/root-admin/
+    on the CA container.
+
+    Three operator-facing scripts:
+      - flip-to-enforce.sh       — enforce + long-lived inner (default)
+      - flip-to-per-connection.sh — enforce + per-connection inner (Phase 2)
+      - flip-to-fallback.sh      — pure TCP proxy to system sshd
+    """
+    enforce_yaml         = _wrapper_yaml_enforce(ca_ip)
+    enforce_perconn_yaml = _wrapper_yaml_enforce(ca_ip,
+                                                  inner_mode='per-connection')
+    fallback_yaml        = _wrapper_yaml_fallback()
+    targets = (
+        ('enforce',         enforce_yaml,         'enforce'),
+        ('per-connection',  enforce_perconn_yaml, 'enforce'),
+        ('fallback',        fallback_yaml,        'fallback'),
+    )
+    for label, yaml, verify_mode in targets:
+        script = _flip_script(verify_mode, yaml, ips, ca_ip,
+                              script_label=label)
         push_text(CA_NAME, script,
-                  f'/home/root-admin/flip-to-{target_mode}.sh',
+                  f'/home/root-admin/flip-to-{label}.sh',
                   mode='755',
                   owner=f'{SUPERUSER.username}:{SUPERUSER.username}')
 
@@ -987,8 +1008,11 @@ def _write_root_readme(container: str, ca_ip: str, stop_at_phase: int) -> None:
             'and flip msshd to enforce.'),
         2: ('Fully configured: msshd is in enforce mode and `mssh '
             'user@host:2200` works through the CA-mediated path. '
-            'Flip-to-fallback / flip-to-enforce scripts live on the CA '
-            'for switching between modes.'),
+            'Flip scripts live on the CA for switching between modes: '
+            'flip-to-fallback (system sshd takes over), flip-to-enforce '
+            '(default — long-lived inner sshd), flip-to-per-connection '
+            '(enforce + fresh inner sshd per session, config rendered '
+            'by the CA).'),
     }[stop_at_phase]
 
     body = f'''# mssh adhoc lab — manual-setup notes for {container}
@@ -1179,13 +1203,24 @@ flip_to_enforce                      # back to Phase 2
 
 ## Flipping modes — operator workflow
 
-`flip_to_enforce` and `flip_to_fallback` are shell functions that
-ssh to the CA as `root-admin` and run the actual flip scripts
-(`/home/root-admin/flip-to-{{enforce,fallback}}.sh` on the CA). The
-scripts loop over every server, push the new `wrapper.yaml`,
-restart msshd, verify via the post-flip transport (mssh for enforce,
-ssh -p 2200 for fallback), and revert that server's config if
-verification fails.
+`flip_to_enforce`, `flip_to_per_connection`, and `flip_to_fallback`
+are shell functions that ssh to the CA as `root-admin` and run the
+actual flip scripts (`/home/root-admin/flip-to-*.sh` on the CA).
+The scripts loop over every server, push the new `wrapper.yaml`,
+restart msshd, verify via the post-flip transport (mssh for the
+enforce variants, ssh -p 2200 for fallback), and revert that
+server's config if verification fails.
+
+The three enforce-shaped modes:
+
+  - **enforce** (default) — long-lived inner sshd, single hermetic
+    config rendered at msshd boot. Lowest overhead.
+  - **per-connection** — fresh inner sshd per session, config
+    rendered by the CA per (user, server, policy). ~50–100 ms
+    session-setup overhead. Unlocks per-user banner substitution
+    and OpenSSH-native enforcement of per-session policy.
+  - **fallback** — pure TCP proxy to the system sshd on port 22.
+    No CA call. Operator's break-glass when the CA is broken.
 
 No `lxc exec` anywhere — it's the same workflow a real operator
 would use against an internet-routable CA.
@@ -1360,6 +1395,11 @@ flip_to_enforce() {{
         "root-admin@$ca_IP" ./flip-to-enforce.sh
 }}
 
+flip_to_per_connection() {{
+    ssh -i "$ROOT_ADMIN_KEY" $_SSH_OPTS \\
+        "root-admin@$ca_IP" ./flip-to-per-connection.sh
+}}
+
 flip_to_fallback() {{
     ssh -i "$ROOT_ADMIN_KEY" $_SSH_OPTS \\
         "root-admin@$ca_IP" ./flip-to-fallback.sh
@@ -1369,7 +1409,8 @@ echo "adhoc env loaded. Try:"
 echo "  mssh_as alice acct whoami           # mssh through msshd (Phase 2)"
 echo "  ssh_as alice acct whoami            # plain ssh (Phase 0, always works)"
 echo "  flip_to_fallback                    # all servers → msshd fallback mode"
-echo "  flip_to_enforce                     # all servers → msshd enforce mode (default)"
+echo "  flip_to_enforce                     # all servers → msshd enforce + long-lived inner (default)"
+echo "  flip_to_per_connection              # all servers → msshd enforce + per-connection inner"
 '''
     path.write_text(body)
 
