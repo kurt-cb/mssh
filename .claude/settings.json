@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(lxc image list *)",
+      "Bash(lxc image info *)",
+      "Bash(lxc info *)",
+      "Bash(lxc list *)",
+      "Bash(lxc version)"
+    ]
+  }
+}

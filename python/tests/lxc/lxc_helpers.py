@@ -33,8 +33,21 @@ SSHRT_ALPINE  = 'mssh-lxc-alpine'
 ALL_SSH_HOSTS = [SSHRT_U1, SSHRT_U2, SSHRT_U3, SSHRT_ALPINE]
 ALL_CONTAINERS = [CA_HOST] + ALL_SSH_HOSTS
 
-UBUNTU_IMAGE = 'images:ubuntu/22.04'
-ALPINE_IMAGE = 'images:alpine/3.21'
+# Upstream image sources used by ensure_fixed_images() to build the local
+# `mssh-*-fixed` aliases. The official `ubuntu:22.04` cloud image runs
+# cloud-init + apt-daily.timer + unattended-upgrades on first boot and is
+# the reason a fresh container can fail wait_for_apt_quiescent. The local
+# fixed image is prebaked with those services disabled.
+UBUNTU_IMAGE_UPSTREAM = 'ubuntu:22.04'
+ALPINE_IMAGE_UPSTREAM = 'images:alpine/3.21'
+
+# Local image aliases the tests reference. Built once by ensure_fixed_images()
+# and reused across runs. Rebuild with MSSH_REBUILD_FIXED=1 in the env.
+UBUNTU_FIXED_ALIAS = 'mssh-ubuntu-fixed'
+ALPINE_FIXED_ALIAS = 'mssh-alpine-fixed'
+
+UBUNTU_IMAGE = UBUNTU_FIXED_ALIAS
+ALPINE_IMAGE = ALPINE_FIXED_ALIAS
 
 CA_PORT = 8443
 
@@ -118,13 +131,16 @@ def wait_for_apt_quiescent(container: str, max_wait: int = 120) -> None:
     deterministic, then wait for any in-flight apt-daily or
     unattended-upgrades to finish (so we can take the dpkg lock cleanly).
 
-    Fresh Ubuntu containers run `apt-daily.timer`, `apt-daily-upgrade.timer`,
-    `unattended-upgrades`, `apport`, and `ubuntu-report` on first boot.
-    Racing them produces exit 100 ('Could not get lock
-    /var/lib/dpkg/lock-frontend'). For a throwaway test container we
-    don't need any of these services; the safest fix is to disable them
-    proactively. Subsequent calls on an already-prepared container are
-    a fast no-op.
+    Fresh Ubuntu cloud containers run `apt-daily.timer`,
+    `apt-daily-upgrade.timer`, `unattended-upgrades`, `apport`, and
+    `ubuntu-report` on first boot. Racing them produces exit 100
+    ('Could not get lock /var/lib/dpkg/lock-frontend').
+
+    Containers launched from ``mssh-ubuntu-fixed`` (the prebaked alias
+    built by ensure_fixed_images()) already have these services masked,
+    so this function returns near-instantly. The disable-and-wait logic
+    below remains as a safety net for callers that target the upstream
+    image directly.
 
     Idempotent: re-running on a prepared container is harmless.
     """
@@ -227,6 +243,253 @@ def lxc_available() -> bool:
         return r.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+# ---------------------------------------------------------------------------
+# Fixed base images: prebake Ubuntu + Alpine into local aliases
+# ---------------------------------------------------------------------------
+#
+# The official `ubuntu:22.04` cloud image runs cloud-init on first boot,
+# which in turn fires apt-get update, writes netplan config, sets up the
+# default `ubuntu` user, and triggers unattended-upgrades. None of that is
+# load-bearing for these test containers — LXD provides networking, we
+# never log in as `ubuntu`, and we run our own apt-get. But cloud-init's
+# first-boot apt activity is what races wait_for_apt_quiescent.
+#
+# The fix: `lxc init` (not `launch`) so the container exists but isn't
+# started, push `/etc/cloud/cloud-init.disabled` into the rootfs along
+# with a minimal netplan config, then `lxc start`. cloud-init sees the
+# disable marker and exits immediately; no first-boot apt-get happens.
+# We then mask apt-daily / unattended-upgrades / apport / motd-news to
+# defang the periodic timers, pre-warm the apt cache, and publish.
+# Subsequent test containers launched from the alias are quiescent from
+# boot.
+#
+# Alpine is staged the same way (`mssh-alpine-fixed`) even though it has
+# no cloud-init or apt-daily equivalent — the local alias gives operators
+# a stable starting point they can edit (add test tools, patch configs)
+# and republish without changing test code.
+
+
+def _image_exists(alias: str) -> bool:
+    """Return True if a local image with the given alias is present."""
+    r = subprocess.run(['lxc', 'image', 'info', alias],
+                       capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def _build_ubuntu_fixed() -> None:
+    """Prebake `mssh-ubuntu-fixed` from `ubuntu:22.04`.
+
+    Disables cloud-init *in the rootfs before first start* so first-boot
+    apt-get activity never happens. Then masks the remaining periodic
+    services (apt-daily, unattended-upgrades, apport) for good measure.
+    ~1 minute one-time cost — the cloud-init wait is gone.
+    """
+    tmp = 'mssh-prebake-ubuntu'
+    subprocess.run(['lxc', 'delete', '--force', tmp], capture_output=True)
+
+    # `lxc init` creates the container without starting it. We modify the
+    # rootfs before any service can run, so cloud-init never fires its
+    # first-boot apt-get + netplan write. Avoids the race that motivated
+    # wait_for_apt_quiescent in the first place.
+    print(f'  initializing {UBUNTU_IMAGE_UPSTREAM} as {tmp}',
+          file=sys.stderr, flush=True)
+    lxc('init', UBUNTU_IMAGE_UPSTREAM, tmp,
+        '--config', 'security.privileged=true', timeout=300)
+
+    try:
+        # cloud-init does nothing load-bearing on these test containers:
+        # LXD provides the network interface; we don't pass user-data; the
+        # default `ubuntu` user is never used; and we run our own apt-get
+        # update in the prebake. The empty `/etc/cloud/cloud-init.disabled`
+        # marker is cloud-init's official "skip every stage" signal.
+        # https://cloudinit.readthedocs.io/en/latest/howto/disable_cloud_init.html
+        print('  disabling cloud-init in the rootfs',
+              file=sys.stderr, flush=True)
+        push_text(tmp, '', '/etc/cloud/cloud-init.disabled')
+
+        # With cloud-init off, nothing writes /etc/netplan/50-cloud-init.yaml,
+        # so we drop in a minimal netplan ourselves so eth0 still gets a
+        # DHCP lease from the LXD bridge on first boot.
+        push_text(tmp,
+                  'network:\n'
+                  '  version: 2\n'
+                  '  ethernets:\n'
+                  '    eth0:\n'
+                  '      dhcp4: true\n',
+                  '/etc/netplan/01-mssh-prebake.yaml')
+
+        print('  starting container', file=sys.stderr, flush=True)
+        lxc('start', tmp, timeout=120)
+        # Networking only — no cloud-init to wait on.
+        get_ip(tmp)
+
+        print('  masking apt-daily / unattended-upgrades / apport / motd-news',
+              file=sys.stderr, flush=True)
+        lxc_exec(tmp, 'sh', '-c', r"""
+            set +e
+            systemctl stop  apt-daily.timer apt-daily-upgrade.timer \
+                           apt-daily.service apt-daily-upgrade.service \
+                           unattended-upgrades.service apport.service \
+                           motd-news.timer motd-news.service \
+                           2>/dev/null
+            systemctl mask apt-daily.timer apt-daily-upgrade.timer \
+                           apt-daily.service apt-daily-upgrade.service \
+                           unattended-upgrades.service \
+                           apport.service \
+                           motd-news.timer motd-news.service \
+                           2>/dev/null
+            DEBIAN_FRONTEND=noninteractive apt-get purge -y -q \
+                           unattended-upgrades apport 2>/dev/null
+            # Pre-warm the apt cache so per-test package installs don't fetch.
+            DEBIAN_FRONTEND=noninteractive apt-get update -q 2>/dev/null
+            # Enable verbose sshd logging so /var/log/auth.log captures
+            # enough detail to diagnose authentication failures during the
+            # test phases.
+            if [ -f /etc/ssh/sshd_config ]; then
+                sed -i 's/^#*LogLevel .*/LogLevel VERBOSE/' /etc/ssh/sshd_config
+            fi
+            exit 0
+        """, check=False, timeout=300)
+
+        print('  stopping container', file=sys.stderr, flush=True)
+        lxc('stop', tmp, timeout=120)
+        print(f'  publishing as {UBUNTU_FIXED_ALIAS}',
+              file=sys.stderr, flush=True)
+        lxc('publish', tmp, '--alias', UBUNTU_FIXED_ALIAS, timeout=600)
+    finally:
+        subprocess.run(['lxc', 'delete', '--force', tmp], capture_output=True)
+
+
+def _build_alpine_fixed() -> None:
+    """Prebake `mssh-alpine-fixed` from the upstream Alpine image.
+
+    Alpine has no apt-daily equivalent; the prebake just refreshes the apk
+    cache and provides a local alias the operator can edit-and-republish to
+    bake in test tools.
+    """
+    tmp = 'mssh-prebake-alpine'
+    subprocess.run(['lxc', 'delete', '--force', tmp], capture_output=True)
+
+    print(f'  launching {ALPINE_IMAGE_UPSTREAM} as {tmp}',
+          file=sys.stderr, flush=True)
+    lxc('launch', ALPINE_IMAGE_UPSTREAM, tmp,
+        '--config', 'security.privileged=true', timeout=300)
+
+    try:
+        get_ip(tmp)
+        print('  refreshing apk cache', file=sys.stderr, flush=True)
+        lxc_exec(tmp, 'apk', 'update', check=False, timeout=120)
+        # Enable verbose sshd logging if openssh is present; harmless if not.
+        lxc_exec(tmp, 'sh', '-c',
+                 "if [ -f /etc/ssh/sshd_config ]; then "
+                 "sed -i 's/^#*LogLevel .*/LogLevel VERBOSE/' "
+                 "/etc/ssh/sshd_config; fi",
+                 check=False, timeout=30)
+
+        print('  stopping container', file=sys.stderr, flush=True)
+        lxc('stop', tmp, timeout=120)
+        print(f'  publishing as {ALPINE_FIXED_ALIAS}',
+              file=sys.stderr, flush=True)
+        lxc('publish', tmp, '--alias', ALPINE_FIXED_ALIAS, timeout=600)
+    finally:
+        subprocess.run(['lxc', 'delete', '--force', tmp], capture_output=True)
+
+
+def ensure_fixed_images(rebuild: bool = False) -> None:
+    """Build local `mssh-ubuntu-fixed` and `mssh-alpine-fixed` if missing.
+
+    Idempotent: subsequent calls are near-zero cost once both aliases exist.
+    Pass ``rebuild=True`` (or set ``MSSH_REBUILD_FIXED=1`` in the env) to
+    delete and rebuild both — useful after editing the prebake recipe or
+    after manually patching either local image and wanting to start clean.
+    """
+    if rebuild or os.environ.get('MSSH_REBUILD_FIXED') == '1':
+        for alias in (UBUNTU_FIXED_ALIAS, ALPINE_FIXED_ALIAS):
+            subprocess.run(['lxc', 'image', 'delete', alias],
+                           capture_output=True)
+
+    if not _image_exists(UBUNTU_FIXED_ALIAS):
+        print(f'Building {UBUNTU_FIXED_ALIAS} (one-time prebake, ~2 min)',
+              file=sys.stderr, flush=True)
+        _build_ubuntu_fixed()
+    if not _image_exists(ALPINE_FIXED_ALIAS):
+        print(f'Building {ALPINE_FIXED_ALIAS} (one-time prebake, ~1 min)',
+              file=sys.stderr, flush=True)
+        _build_alpine_fixed()
+
+
+# ---------------------------------------------------------------------------
+# pull_diagnostics: snapshot useful log files out of each container
+# ---------------------------------------------------------------------------
+
+
+DIAGNOSTICS_DIR_DEFAULT = 'adhoc-diagnostics'
+
+# Log files we try to pull from every container. Missing files are skipped
+# silently — Ubuntu containers have auth.log/syslog, Alpine has messages,
+# only some containers have ssh-rt-auth-server.log or snoopy.log.
+_DIAGNOSTIC_LOG_PATHS = [
+    '/var/log/auth.log',
+    '/var/log/syslog',
+    '/var/log/messages',
+    '/var/log/ssh-rt-auth-server.log',
+    '/var/log/mssh/msshd.log',
+    '/root/systemlogs/snoopy.log',
+]
+
+
+def pull_diagnostics(containers: list[str],
+                     dest_dir: Path | str | None = None) -> Path:
+    """Snapshot log files from each container into a local directory.
+
+    For each container, fetches journalctl output + well-known log files
+    into ``<dest_dir>/<container>/``. Best-effort: silently skips containers
+    that no longer exist and log files that aren't present.
+
+    Returns the destination directory path so callers can print it.
+    """
+    if dest_dir is None:
+        dest_dir = Path(os.getcwd()) / DIAGNOSTICS_DIR_DEFAULT
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    for container in containers:
+        # Skip containers that aren't running (e.g. failed before launch).
+        r = subprocess.run(['lxc', 'info', container],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            continue
+
+        cdir = dest_dir / container
+        cdir.mkdir(parents=True, exist_ok=True)
+
+        # journalctl: capture sshd + msshd + ssh-rt-auth-* units when
+        # available. Alpine images without systemd just write empty.
+        r = lxc_exec(container, 'sh', '-c',
+                     'command -v journalctl >/dev/null 2>&1 && '
+                     'journalctl --no-pager '
+                     '-u ssh -u sshd -u msshd '
+                     '-u ssh-rt-auth-ca -u ssh-rt-auth-server '
+                     '2>/dev/null || true',
+                     check=False, timeout=60)
+        (cdir / 'journalctl.log').write_text(r.stdout or '')
+
+        # Process list snapshot (helps diagnose "is sshd even running").
+        r = lxc_exec(container, 'sh', '-c',
+                     'ps auxf 2>/dev/null || ps -ef 2>/dev/null || true',
+                     check=False, timeout=10)
+        (cdir / 'processes.txt').write_text(r.stdout or '')
+
+        # Well-known log files. Best-effort pull; missing files just skip.
+        for remote in _DIAGNOSTIC_LOG_PATHS:
+            try:
+                pull_file(container, remote, cdir / Path(remote).name)
+            except subprocess.CalledProcessError:
+                pass
+
+    return dest_dir
 
 
 # ---------------------------------------------------------------------------

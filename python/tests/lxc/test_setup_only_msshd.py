@@ -57,7 +57,8 @@ for _name in ('lxc_helpers', 'log_helpers'):
 
 from lxc_helpers import (
     ALPINE_IMAGE, UBUNTU_IMAGE,
-    get_ip, lxc, lxc_exec, push_file, push_source, push_text,
+    ensure_fixed_images, get_ip, lxc, lxc_exec, pull_diagnostics,
+    push_file, push_source, push_text,
     wait_for_apt_quiescent, wait_for_port,
 )
 from log_helpers import banner, section
@@ -1047,6 +1048,12 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
 
     banner('msshd adhoc lab — Phase 0 → 1 → 2')
 
+    # Build the local mssh-ubuntu-fixed / mssh-alpine-fixed images on first
+    # run. Subsequent runs reuse the local aliases and skip cloud-init's
+    # apt-daily churn. Rebuild with MSSH_REBUILD_FIXED=1 to pick up edits.
+    section('Ensuring local fixed base images')
+    ensure_fixed_images()
+
     # ---- 0. Tear down + launch fresh -----------------------------------
     section('Deleting any pre-existing adhoc containers')
     for c in ALL_CONTAINERS:
@@ -1058,6 +1065,17 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
             '--config', 'security.privileged=true', timeout=300)
     lxc('launch', UBUNTU_IMAGE, CA_NAME,
         '--config', 'security.privileged=true', timeout=300)
+
+    # Capture log + state snapshots from every container at teardown,
+    # whether the test passes or fails. Setup-only tests leave the lab
+    # running, so this is useful in both cases: on failure for postmortem,
+    # on success as a baseline for comparing against later interactive runs.
+    def _capture_diagnostics() -> None:
+        diag_dir = invocation_cwd / 'adhoc-diagnostics'
+        pull_diagnostics(ALL_CONTAINERS, diag_dir)
+        print(f'\n  Diagnostics snapshot in {diag_dir}/\n',
+              file=sys.stderr, flush=True)
+    request.addfinalizer(_capture_diagnostics)
 
     ips = {c: get_ip(c) for c in ALL_CONTAINERS}
     section('Container IPs')
