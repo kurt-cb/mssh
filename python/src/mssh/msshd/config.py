@@ -53,10 +53,22 @@ class CAConfig:
     emergency_cert: str = ''
 
 
+INNER_MODE_LONG_LIVED = 'long-lived'
+INNER_MODE_PER_CONNECTION = 'per-connection'
+VALID_INNER_MODES = (INNER_MODE_LONG_LIVED, INNER_MODE_PER_CONNECTION)
+
+
 @dataclass
 class InnerConfig:
     sshd_binary: str = '/usr/sbin/sshd'
     port_range: tuple[int, int] = (49152, 65535)
+    # 'long-lived'    (default) — one inner sshd at msshd boot, single
+    #                  hermetic config, no per-session policy variability.
+    # 'per-connection'         — fresh sshd per session, config rendered
+    #                  by the CA. Honors per-session FROMCA_* policy
+    #                  directly via OpenSSH. Opt-in for now; switches to
+    #                  default in a future release once shaken out.
+    mode: str = INNER_MODE_LONG_LIVED
 
 
 @dataclass
@@ -153,6 +165,7 @@ class WrapperConfig:
             inner=InnerConfig(
                 sshd_binary=str(inner.get('sshd_binary') or '/usr/sbin/sshd'),
                 port_range=(int(port_range[0]), int(port_range[1])),
+                mode=str(inner.get('mode') or INNER_MODE_LONG_LIVED),
             ),
             users=UsersConfig(
                 allowed=list(users.get('allowed') or []),
@@ -182,6 +195,11 @@ class WrapperConfig:
         if self.mode not in VALID_MODES:
             raise ValueError(
                 f'mode must be one of {VALID_MODES}, got {self.mode!r}')
+
+        if self.inner.mode not in VALID_INNER_MODES:
+            raise ValueError(
+                f'inner.mode must be one of {VALID_INNER_MODES}, '
+                f'got {self.inner.mode!r}')
 
         if not (1 <= self.listen.external_port <= 65535):
             raise ValueError(

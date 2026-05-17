@@ -181,3 +181,30 @@ def test_banner_values_coerced_to_strings(tmp_path):
         '  values: {port: 2200, enforced: true}\n')
     cfg = WrapperConfig.load(cfg_path)
     assert cfg.banner.values == {'port': '2200', 'enforced': 'True'}
+
+
+# ---------------------------------------------------------------------------
+# inner.mode (Phase 2b)
+# ---------------------------------------------------------------------------
+
+
+def test_inner_mode_defaults_to_long_lived(tmp_path):
+    cfg_path = _write(tmp_path, 'w.yaml', 'mode: fallback\n')
+    cfg = WrapperConfig.load(cfg_path)
+    assert cfg.inner.mode == 'long-lived'
+
+
+def test_inner_mode_per_connection_loads(tmp_path):
+    cfg_path = _write(tmp_path, 'w.yaml',
+        'mode: fallback\ninner: {mode: per-connection}\n')
+    cfg = WrapperConfig.load(cfg_path)
+    assert cfg.inner.mode == 'per-connection'
+    cfg.validate()                                # should pass
+
+
+def test_inner_mode_invalid_value_rejected(tmp_path):
+    cfg_path = _write(tmp_path, 'w.yaml',
+        'mode: fallback\ninner: {mode: bogus}\n')
+    cfg = WrapperConfig.load(cfg_path)
+    with pytest.raises(ValueError, match='inner.mode must be one of'):
+        cfg.validate()

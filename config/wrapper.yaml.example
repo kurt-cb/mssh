@@ -53,9 +53,24 @@ inner:
   # Override to pin a specific version.
   sshd_binary: /usr/sbin/sshd
   # Wrapper allocates the inner sshd's port dynamically in this range.
+  # In per-connection mode each session takes a port from this pool;
+  # max concurrent sessions is min(port-range-size,
+  # performance.max_concurrent_sessions).
   port_range: [49152, 65535]
-  # NO sshd_config knob here — the inner config is hermetic. See
-  # design/mssh-detailed-wrapper.md §5.2.
+  # Inner sshd lifecycle mode (default: long-lived):
+  #   long-lived     One inner sshd at msshd boot, hermetic config,
+  #                  no per-session policy variability. The
+  #                  inner_sshd_config the CA emits is ignored.
+  #                  Lowest overhead; matches pre-1.1 behavior.
+  #   per-connection Fresh sshd per session. Config rendered by the
+  #                  CA per (user, server, policy) tuple; OpenSSH
+  #                  enforces ForceCommand / SetEnv / etc. natively.
+  #                  Unlocks per-user banner substitution.
+  #                  ~50–100 ms session-establish overhead.
+  mode: long-lived
+  # NO sshd_config knob here in long-lived mode — the inner config is
+  # hermetic. In per-connection mode, the config comes from the CA's
+  # template store (mssh-admin template …).
 
 users:
   # Which Unix users the wrapper will drop into. Connections requesting
