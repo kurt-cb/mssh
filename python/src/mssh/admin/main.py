@@ -411,5 +411,205 @@ def audit(ctx, type_, decision, username, srv, limit):
     _output(ctx, out.get('entries', []))
 
 
+# ---------------------------------------------------------------------------
+# template — per-scope inner sshd_config templates (Phase 1d)
+# ---------------------------------------------------------------------------
+
+@cli.group('template')
+def template_group():
+    """Manage CA-side inner sshd config templates."""
+
+
+def _resolve_scope(scope: str, name: str | None) -> tuple[str, str | None]:
+    if scope not in ('default', 'group', 'server'):
+        raise click.UsageError(
+            "--scope must be one of: default, group, server")
+    if scope in ('group', 'server') and not name:
+        raise click.UsageError(f'--scope {scope} requires --name')
+    if scope == 'default' and name:
+        raise click.UsageError("--scope default doesn't take --name")
+    return scope, name
+
+
+@template_group.command('list')
+@click.pass_context
+def template_list_cmd(ctx):
+    """Show all stored templates (built-in + default + groups + servers)."""
+    c = _make_client(ctx)
+    out = _handle_call(c.template_list)
+    _output(ctx, out.get('templates', {}))
+
+
+@template_group.command('show')
+@click.option('--scope', default='default',
+              help='default | group | server | effective')
+@click.option('--name',
+              help='Required for scope=group/server/effective.')
+@click.option('--kind', default='openssh')
+@click.pass_context
+def template_show(ctx, scope, name, kind):
+    """Print the template for a scope to stdout. For scope=effective the
+    output is what would actually be used at session time (after
+    walking per-server → per-group → default → built-in precedence)."""
+    c = _make_client(ctx)
+    if scope == 'effective':
+        if not name:
+            raise click.UsageError('--scope effective requires --name')
+        out = _handle_call(c.template_effective, name, kind=kind)
+        click.echo(f'# source={out["source"]} '
+                   f'detail={out.get("source_detail") or "-"}',
+                   err=True)
+        click.echo(out['content'], nl=False)
+        return
+    out = _handle_call(c.template_list)
+    tpls = out.get('templates', {})
+    if scope == 'default':
+        content = tpls.get('default', {}).get(kind)
+    elif scope == 'group':
+        _resolve_scope('group', name)
+        content = (tpls.get('groups', {}).get(name) or {}).get(kind)
+    elif scope == 'server':
+        _resolve_scope('server', name)
+        content = (tpls.get('servers', {}).get(name) or {}).get(kind)
+    else:
+        raise click.UsageError(
+            "--scope must be one of: default, group, server, effective")
+    if content is None:
+        click.echo(f'(no override for scope={scope} name={name} '
+                   f'kind={kind}; showing built-in)', err=True)
+        click.echo(tpls.get('builtin', {}).get(kind, ''), nl=False)
+    else:
+        click.echo(content, nl=False)
+
+
+@template_group.command('set')
+@click.option('--scope', required=True, help='default | group | server')
+@click.option('--name', help='Required for scope=group/server.')
+@click.option('--kind', default='openssh')
+@click.option('--content-file', type=click.Path(exists=False),
+              help='Read template from this file. Use - for stdin.')
+@click.pass_context
+def template_set_cmd(ctx, scope, name, kind, content_file):
+    """Set the template at this scope from a file or stdin."""
+    scope, name = _resolve_scope(scope, name)
+    if not content_file:
+        raise click.UsageError('--content-file is required')
+    if content_file == '-':
+        content = click.get_text_stream('stdin').read()
+    else:
+        p = Path(content_file)
+        if not p.exists():
+            raise click.UsageError(f'no such file: {content_file}')
+        content = p.read_text()
+    c = _make_client(ctx)
+    out = _handle_call(c.template_set, scope, kind, content, scope_name=name)
+    _output(ctx, out)
+
+
+@template_group.command('unset')
+@click.option('--scope', required=True, help='default | group | server')
+@click.option('--name', help='Required for scope=group/server.')
+@click.option('--kind', default='openssh')
+@click.pass_context
+def template_unset_cmd(ctx, scope, name, kind):
+    """Remove the template override at this scope (revert to the
+    next-level fallback). Idempotent."""
+    scope, name = _resolve_scope(scope, name)
+    c = _make_client(ctx)
+    out = _handle_call(c.template_unset, scope, kind, scope_name=name)
+    _output(ctx, out)
+
+
+@template_group.command('edit')
+@click.option('--scope', required=True, help='default | group | server')
+@click.option('--name', help='Required for scope=group/server.')
+@click.option('--kind', default='openssh')
+@click.pass_context
+def template_edit(ctx, scope, name, kind):
+    """Open the current template in $EDITOR; save back on exit.
+
+    For default: starts from the existing override or the built-in.
+    For group / server: starts from the current effective template (so
+    the editor opens the directives that are actually in force, ready
+    to override). Saving with no changes is a no-op.
+    """
+    import subprocess
+    import tempfile
+    scope, name = _resolve_scope(scope, name)
+    c = _make_client(ctx)
+
+    if scope == 'default':
+        snapshot = _handle_call(c.template_list).get('templates', {})
+        current = (snapshot.get('default', {}).get(kind)
+                   or snapshot.get('builtin', {}).get(kind, ''))
+    elif scope == 'server':
+        eff = _handle_call(c.template_effective, name, kind=kind)
+        current = eff['content']
+    else:  # group
+        snapshot = _handle_call(c.template_list).get('templates', {})
+        current = ((snapshot.get('groups', {}).get(name) or {}).get(kind)
+                   or snapshot.get('default', {}).get(kind)
+                   or snapshot.get('builtin', {}).get(kind, ''))
+
+    editor = os.environ.get('VISUAL') or os.environ.get('EDITOR') or 'vi'
+    with tempfile.NamedTemporaryFile(
+            mode='w', suffix='.sshd_config.template', delete=False) as f:
+        f.write(current)
+        tmp_path = f.name
+    try:
+        rc = subprocess.call([editor, tmp_path])
+        if rc != 0:
+            click.echo(f'editor exited {rc}; not saving', err=True)
+            return
+        new_content = Path(tmp_path).read_text()
+        if new_content == current:
+            click.echo('no changes; not saving.', err=True)
+            return
+        out = _handle_call(c.template_set, scope, kind, new_content,
+                           scope_name=name)
+        _output(ctx, out)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+@template_group.command('diff')
+@click.argument('server_name')
+@click.option('--kind', default='openssh')
+@click.option('--against', default='builtin',
+              help='What to diff against: builtin | default')
+@click.pass_context
+def template_diff(ctx, server_name, kind, against):
+    """Show how a server's effective template differs from baseline.
+
+    Useful for audits — "which hosts are special, and why?"
+    """
+    import difflib
+    c = _make_client(ctx)
+    eff = _handle_call(c.template_effective, server_name, kind=kind)
+    snapshot = _handle_call(c.template_list).get('templates', {})
+    if against == 'builtin':
+        baseline = snapshot.get('builtin', {}).get(kind, '')
+        baseline_label = f'builtin/{kind}'
+    elif against == 'default':
+        baseline = (snapshot.get('default', {}).get(kind)
+                    or snapshot.get('builtin', {}).get(kind, ''))
+        baseline_label = f'default/{kind}'
+    else:
+        raise click.UsageError("--against must be 'builtin' or 'default'")
+    eff_label = f'{eff["source"]}/{eff.get("source_detail") or kind}'
+    diff_lines = difflib.unified_diff(
+        baseline.splitlines(keepends=True),
+        eff['content'].splitlines(keepends=True),
+        fromfile=baseline_label,
+        tofile=f'{server_name} ({eff_label})',
+    )
+    diff_text = ''.join(diff_lines)
+    if not diff_text:
+        click.echo(f"(no difference between {server_name}'s effective "
+                   f'template and {baseline_label})')
+    else:
+        click.echo(diff_text, nl=False)
+
+
 if __name__ == '__main__':
     sys.exit(cli())  # pragma: no cover

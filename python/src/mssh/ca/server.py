@@ -336,6 +336,46 @@ def register_routes(app: Flask) -> None:
             app.config['ADMIN_CTX'], adm, filters)
         return jsonify(payload), status
 
+    # ---- Templates ----
+    @app.post('/v1/admin/template/set')
+    def _template_set():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.template_set(
+            app.config['ADMIN_CTX'], adm, body)
+        return jsonify(payload), status
+
+    @app.post('/v1/admin/template/unset')
+    def _template_unset():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.template_unset(
+            app.config['ADMIN_CTX'], adm, body)
+        return jsonify(payload), status
+
+    @app.get('/v1/admin/template/list')
+    def _template_list():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        status, payload = admin_handlers.template_list(
+            app.config['ADMIN_CTX'], adm)
+        return jsonify(payload), status
+
+    @app.get('/v1/admin/template/effective/<server_name>')
+    def _template_effective(server_name):
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        kind = request.args.get('kind') or 'openssh'
+        status, payload = admin_handlers.template_effective(
+            app.config['ADMIN_CTX'], adm, server_name, kind)
+        return jsonify(payload), status
+
 
 # ---------------------------------------------------------------------------
 # Werkzeug request handler that surfaces the mTLS peer cert via environ.

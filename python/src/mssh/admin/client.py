@@ -120,3 +120,35 @@ class CAClient:
     # ---- audit ----
     def audit(self, **filters) -> dict[str, Any]:
         return self._request('GET', '/v1/admin/audit', params=filters)
+
+    # ---- templates ----
+    def template_set(self, scope: str, kind: str, content: str, *,
+                     scope_name: str | None = None) -> dict[str, Any]:
+        """Set or replace a template at the given scope.
+
+        ``scope`` is one of 'default', 'group', 'server'. ``scope_name``
+        is required for 'group' and 'server' (the group name or the
+        server canonical name) and ignored for 'default'.
+        """
+        body: dict[str, Any] = {'scope': scope, 'kind': kind, 'content': content}
+        if scope_name is not None:
+            body['scope_name'] = scope_name
+        return self._request('POST', '/v1/admin/template/set', json=body)
+
+    def template_unset(self, scope: str, kind: str, *,
+                       scope_name: str | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {'scope': scope, 'kind': kind}
+        if scope_name is not None:
+            body['scope_name'] = scope_name
+        return self._request('POST', '/v1/admin/template/unset', json=body)
+
+    def template_list(self) -> dict[str, Any]:
+        """Return every template the CA knows about."""
+        return self._request('GET', '/v1/admin/template/list')
+
+    def template_effective(self, server_name: str,
+                           kind: str = 'openssh') -> dict[str, Any]:
+        """Return the effective (post-precedence) template for a server."""
+        return self._request(
+            'GET', f'/v1/admin/template/effective/{server_name}',
+            params={'kind': kind})

@@ -12,10 +12,12 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from . import cert_minter
+from . import templates as _templates
 from .audit import AuditLog
 from .enrollment import Admin, Enrollment, EnrollmentError, KeyBinding
 from .identity_parser import (CertIdentity, IdentityParseError, PubkeyIdentity,
                               parse_identity)
+from .render import TemplateError, validate_template
 
 
 # Role permissions: maps action key -> set of allowed roles.
@@ -35,6 +37,13 @@ _PERMISSIONS = {
     'admin.remove':     {'superuser'},
     'admin.list':       {'superuser', 'auditor'},
     'audit.read':       {'superuser', 'server-admin', 'user-admin', 'auditor'},
+    # Templates: writes are server-admin scope (or superuser); reads are
+    # available to user-admin + auditor too (they need to verify policy
+    # ↔ template alignment).
+    'template.set':     {'superuser', 'server-admin'},
+    'template.unset':   {'superuser', 'server-admin'},
+    'template.list':    {'superuser', 'server-admin', 'user-admin', 'auditor'},
+    'template.show':    {'superuser', 'server-admin', 'user-admin', 'auditor'},
 }
 
 
@@ -452,4 +461,128 @@ def audit_read(ctx: AdminContext, admin: Admin,
         'status': 'ok',
         'total': len(filtered),
         'entries': filtered[offset:offset + limit],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Templates (Phase 1d of per-connection inner sshd)
+# ---------------------------------------------------------------------------
+
+_VALID_TEMPLATE_SCOPES = ('default', 'group', 'server')
+
+
+def _parse_template_scope(body: dict) -> tuple[str, str | None, str] | tuple[int, dict]:
+    """Pull scope / scope_name / kind out of a request body. Returns either
+    a 3-tuple (scope, scope_name, kind) or an error response tuple."""
+    scope = body.get('scope')
+    if scope not in _VALID_TEMPLATE_SCOPES:
+        return _err(400, 'bad_request',
+                    f'scope must be one of {_VALID_TEMPLATE_SCOPES}')
+    kind = body.get('kind') or 'openssh'
+    scope_name = body.get('scope_name')
+    if scope in ('group', 'server'):
+        if not scope_name:
+            return _err(400, 'bad_request',
+                        f'scope={scope!r} requires scope_name')
+    else:
+        scope_name = None
+    return scope, scope_name, kind
+
+
+def template_set(ctx: AdminContext, admin: Admin,
+                 body: dict) -> tuple[int, dict]:
+    """Set or replace a template at the given scope.
+
+    Body: {scope, scope_name?, kind, content}.
+    Validates the template against the v1 marker schema before saving;
+    refuses if any markers are unknown so operators don't write configs
+    that will fail to render at session time.
+    """
+    if (err := _check('template.set', admin)):
+        return err
+    parsed = _parse_template_scope(body)
+    if isinstance(parsed, tuple) and len(parsed) == 2:
+        return parsed                                       # type: ignore[return-value]
+    scope, scope_name, kind = parsed                        # type: ignore[misc]
+    content = body.get('content')
+    if not isinstance(content, str):
+        return _err(400, 'bad_request', 'content must be a string')
+
+    issues = validate_template(content)
+    if issues:
+        return _err(400, 'invalid_template',
+                    f'template has unknown markers or syntax errors: '
+                    + '; '.join(issues))
+
+    try:
+        if scope == 'default':
+            _templates.set_default_template(ctx.enrollment, kind, content)
+        elif scope == 'group':
+            _templates.set_group_template(ctx.enrollment, scope_name, kind, content)
+        elif scope == 'server':
+            _templates.set_server_template(ctx.enrollment, scope_name, kind, content)
+    except EnrollmentError as e:
+        return _err(404, 'not_found', str(e))
+
+    _audit_admin(ctx, admin, 'template.set',
+                 {'scope': scope, 'scope_name': scope_name, 'kind': kind,
+                  'content_bytes': len(content)},
+                 'ok')
+    return 200, {'status': 'ok', 'scope': scope,
+                 'scope_name': scope_name, 'kind': kind}
+
+
+def template_unset(ctx: AdminContext, admin: Admin,
+                   body: dict) -> tuple[int, dict]:
+    """Remove a template override at the given scope.
+
+    Removing the default reverts to the built-in. Removing a group or
+    server override reverts to its next-level fallback. Idempotent —
+    removing a non-existent override is a no-op success.
+    """
+    if (err := _check('template.unset', admin)):
+        return err
+    parsed = _parse_template_scope(body)
+    if isinstance(parsed, tuple) and len(parsed) == 2:
+        return parsed                                       # type: ignore[return-value]
+    scope, scope_name, kind = parsed                        # type: ignore[misc]
+    if scope == 'default':
+        _templates.unset_default_template(ctx.enrollment, kind)
+    elif scope == 'group':
+        _templates.unset_group_template(ctx.enrollment, scope_name, kind)
+    elif scope == 'server':
+        _templates.unset_server_template(ctx.enrollment, scope_name, kind)
+    _audit_admin(ctx, admin, 'template.unset',
+                 {'scope': scope, 'scope_name': scope_name, 'kind': kind},
+                 'ok')
+    return 200, {'status': 'ok'}
+
+
+def template_list(ctx: AdminContext, admin: Admin) -> tuple[int, dict]:
+    """Return every template the CA knows about (built-in + stored)."""
+    if (err := _check('template.list', admin)):
+        return err
+    return 200, {'status': 'ok',
+                 'templates': _templates.list_templates(ctx.enrollment)}
+
+
+def template_effective(ctx: AdminContext, admin: Admin,
+                       server_name: str, kind: str) -> tuple[int, dict]:
+    """Return the template that would actually be used for (server, kind),
+    plus the source (server / group / default / builtin) so callers can
+    compute a meaningful diff against the default."""
+    if (err := _check('template.show', admin)):
+        return err
+    try:
+        content, source, detail = _templates.get_effective_template(
+            ctx.enrollment, server_name, kind=kind)
+    except EnrollmentError as e:
+        return _err(400, 'bad_request', str(e))
+    return 200, {
+        'status': 'ok',
+        'server': server_name,
+        'kind': kind,
+        'source': source,
+        'source_detail': detail,
+        'content': content,
     }
