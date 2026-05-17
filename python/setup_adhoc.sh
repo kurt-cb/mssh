@@ -9,7 +9,7 @@
 . ../.venv/bin/activate
 
 TIER="${1:-msshd}"
-
+LEVEL=INFO
 case "$TIER" in
     msshd)
         TEST_FILE=tests/lxc/test_setup_only_msshd.py
@@ -18,6 +18,7 @@ case "$TIER" in
     debug|debug_sshd|asyncssh)
         TEST_FILE=tests/lxc/test_setup_only.py
         MARKER=setup_only
+        LEVEL=DEBUG
         ;;
     *)
         echo "Unknown tier: $TIER (expected: msshd | debug)" >&2
@@ -26,7 +27,7 @@ case "$TIER" in
 esac
 
 echo "Provisioning $TIER lab via $TEST_FILE"
-pytest "$TEST_FILE" -v -m "$MARKER"
+pytest "$TEST_FILE" -s --log-file=pytest.log --log-cli-level=$LEVEL -v -m "$MARKER"
 RC=$?
 
 if [ "$RC" != "0" ]; then
@@ -36,8 +37,14 @@ fi
 
 # shell out
 echo "Shell-ing out with adhoc-env setup; ADHOC_TEST_ENV.md has details."
-bash -c 'source ./adhoc-env.sh; unset PROMPT_COMMAND; export PS1="adhoc> "; exec bash'
+cat > adhoc-rc.sh <<EOF
+source ./adhoc-env.sh
+export PS1="adhoc> "
+unset PROMPT_COMMAND
+EOF
+
+bash --rcfile ./adhoc-rc.sh -i
 
 ./cleanup_containers.sh
-rm -f ADHOC_TEST_ENV.md adhoc-env.sh
+rm -f ADHOC_TEST_ENV.md adhoc-env.sh adhoc-rc.sh
 exit 0
