@@ -116,8 +116,10 @@ def test_bad_request(ctx):
 
 
 def _body(test_key, *, source_ip='10.0.0.1', source_port=12345,
-          timestamp=None, channels=None) -> dict:
-    return {
+          timestamp=None, channels=None,
+          protocol_version=None, inner_sshd_kind=None,
+          inner_sshd_version=None, msshd_version=None) -> dict:
+    body = {
         'identity': {
             'type': 'pubkey',
             'data': _b64(test_key.public_blob),
@@ -127,5 +129,129 @@ def _body(test_key, *, source_ip='10.0.0.1', source_port=12345,
             'source_port': source_port,
             'timestamp': timestamp or _ts_now(),
         },
-        **({'requested_channels': channels} if channels is not None else {}),
     }
+    if channels is not None:
+        body['requested_channels'] = channels
+    if protocol_version is not None:
+        body['protocol_version'] = protocol_version
+    if inner_sshd_kind is not None:
+        body['inner_sshd_kind'] = inner_sshd_kind
+    if inner_sshd_version is not None:
+        body['inner_sshd_version'] = inner_sshd_version
+    if msshd_version is not None:
+        body['msshd_version'] = msshd_version
+    return body
+
+
+# ---------------------------------------------------------------------------
+# Phase 1c: protocol-version handshake + inner_sshd_config in the response
+# ---------------------------------------------------------------------------
+
+
+def test_response_always_includes_protocol_version(ctx, test_key):
+    """The CA's protocol_version is always emitted, even for 1.0 clients."""
+    _basic_setup(ctx, test_key)
+    status, body = handle_authorize(ctx, 'CN=srv1', _body(test_key))
+    assert status == 200
+    # 1.0 client doesn't get inner_sshd_config; but always sees the CA's
+    # protocol_version so it can detect upgrades.
+    assert 'protocol_version' in body
+    assert body['protocol_version'] == '1.1'
+
+
+def test_omits_inner_sshd_config_for_pre_1_1_clients(ctx, test_key):
+    """A request without protocol_version (treated as 1.0) and one
+    explicitly at 1.0 both omit inner_sshd_config in the response."""
+    _basic_setup(ctx, test_key)
+
+    status1, body1 = handle_authorize(ctx, 'CN=srv1', _body(test_key))
+    assert 'inner_sshd_config' not in body1
+
+    status2, body2 = handle_authorize(
+        ctx, 'CN=srv1', _body(test_key, protocol_version='1.0'))
+    assert 'inner_sshd_config' not in body2
+
+
+def test_includes_inner_sshd_config_for_1_1_clients(ctx, test_key):
+    """At protocol 1.1+, the response carries a rendered sshd_config."""
+    _basic_setup(ctx, test_key)
+    status, body = handle_authorize(
+        ctx, 'CN=srv1',
+        _body(test_key, protocol_version='1.1',
+              inner_sshd_kind='openssh',
+              inner_sshd_version='9.6p1',
+              msshd_version='0.1.0'))
+    assert status == 200
+    assert 'inner_sshd_config' in body
+    rendered = body['inner_sshd_config']
+    # LOCAL_ markers are left for msshd's pass.
+    assert '{LOCAL_PORT}' in rendered
+    assert '{LOCAL_HOST_KEY}' in rendered
+    # FROMCA_ markers should be substituted from policy.
+    # alice's basic-setup policy grants 'session' and 'direct-tcpip' channels;
+    # the channel name we render-from is 'tcp-forwarding' — not granted by
+    # this policy, so the directive should be 'no'.
+    assert 'AllowTcpForwarding        no' in rendered
+    # And the well-known disabled-by-default directives are present.
+    assert 'PermitRootLogin                  no' in rendered
+
+
+def test_per_server_template_drives_rendered_output(ctx, test_key):
+    """Setting a per-server template at the CA changes what gets rendered
+    for that server."""
+    from mssh.ca.templates import set_server_template
+    _basic_setup(ctx, test_key)
+    custom = (
+        '# custom for srv1\n'
+        'Port {LOCAL_PORT}\n'
+        'ForceCommand {FROMCA_FORCE_COMMAND:none}\n'
+    )
+    set_server_template(ctx.enrollment, 'srv1', 'openssh', custom)
+    status, body = handle_authorize(
+        ctx, 'CN=srv1', _body(test_key, protocol_version='1.1'))
+    assert status == 200
+    # Rendered output starts with the custom template's first line.
+    rendered = body['inner_sshd_config']
+    assert rendered.startswith('# custom for srv1')
+
+
+def test_audit_records_client_version_fields(ctx, test_key):
+    """The audit log captures client version info for fleet-version
+    inventory (mssh-admin status surfaces it)."""
+    _basic_setup(ctx, test_key)
+    handle_authorize(
+        ctx, 'CN=srv1',
+        _body(test_key, protocol_version='1.1',
+              inner_sshd_kind='openssh',
+              inner_sshd_version='9.6p1',
+              msshd_version='0.1.0'))
+    entries = ctx.audit.read_all()
+    granted = [e for e in entries if e.get('decision') == 'granted']
+    assert granted
+    client = granted[-1].get('client') or {}
+    assert client['protocol_version'] == '1.1'
+    assert client['inner_sshd_kind'] == 'openssh'
+    assert client['inner_sshd_version'] == '9.6p1'
+    assert client['msshd_version'] == '0.1.0'
+
+
+def test_render_error_does_not_block_cert_issuance(ctx, test_key):
+    """If the template has a bug, the CA still issues a cert (msshd will
+    handle the fallback path) but records the error in audit."""
+    from mssh.ca.templates import set_default_template
+    _basic_setup(ctx, test_key)
+    # Bogus template: unknown FROMCA marker → render raises TemplateError.
+    set_default_template(ctx.enrollment, 'openssh',
+                         '# bogus\nFoo {FROMCA_BOGUS_THING}\n')
+    status, body = handle_authorize(
+        ctx, 'CN=srv1', _body(test_key, protocol_version='1.1'))
+    # Cert still issued.
+    assert status == 200
+    assert body['status'] == 'granted'
+    assert 'cert' in body
+    # No rendered config in response.
+    assert 'inner_sshd_config' not in body
+    # Audit captures the error.
+    entries = ctx.audit.read_all()
+    granted = [e for e in entries if e.get('decision') == 'granted']
+    assert granted[-1].get('inner_sshd_config_error', '').startswith('render_failed')

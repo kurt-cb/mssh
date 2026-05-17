@@ -12,6 +12,9 @@ from typing import Any
 
 from cryptography.hazmat.primitives import serialization
 
+from .. import PROTOCOL_VERSION
+from . import render as _render
+from . import templates as _templates
 from .audit import AuditLog
 from .cert_minter import mint_authorization_cert
 from .enrollment import Enrollment
@@ -56,6 +59,21 @@ def _deny(audit: AuditLog, reason: str, detail: str, *,
     return status, {'status': 'denied', 'reason': reason, 'detail': detail}
 
 
+def _protocol_supports_inner_config(client_proto: str) -> bool:
+    """True if ``client_proto`` (the version the msshd client claims) is at
+    least 1.1 — the version that introduced ``inner_sshd_config`` in the
+    authz response. Older clients ignore the field, so for backward
+    compatibility we don't emit it for them (smaller responses, less audit
+    noise)."""
+    try:
+        major_s, minor_s = client_proto.split('.', 1)
+        major = int(major_s)
+        minor = int(minor_s.split('.')[0])  # drop any patch suffix
+    except (ValueError, AttributeError):
+        return False
+    return (major, minor) >= (1, 1)
+
+
 def _error(audit: AuditLog, reason: str, detail: str) -> tuple[int, dict]:
     audit.write({
         'timestamp': _now().strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -95,6 +113,16 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
     requested_channels = body.get('requested_channels')
     if requested_channels is not None and not isinstance(requested_channels, list):
         return _error(ctx.audit, 'bad_request', 'requested_channels must be a list')
+
+    # Wire-protocol negotiation. Older msshd / shim clients don't send these
+    # fields; we treat absence as protocol 1.0 and emit a 1.0-shaped response
+    # (no inner_sshd_config). Clients at >=1.1 also send the inner-sshd kind
+    # + version so the CA can pick the right template and refuse to emit
+    # directives the host's sshd can't handle.
+    client_proto = str(body.get('protocol_version') or '1.0')
+    inner_sshd_kind = body.get('inner_sshd_kind') or 'openssh'
+    inner_sshd_version = body.get('inner_sshd_version') or ''
+    msshd_version = body.get('msshd_version') or ''
 
     try:
         identity_blob = base64.b64decode(identity_b64, validate=True)
@@ -179,8 +207,31 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
     cert_der = cert.public_bytes(serialization.Encoding.DER)
     cert_b64 = base64.b64encode(cert_der).decode('ascii')
 
-    # 7. Audit + respond.
-    ctx.audit.write({
+    # 7. Render the per-session inner sshd_config (protocol >= 1.1 only).
+    inner_sshd_config: str | None = None
+    inner_sshd_config_error: str | None = None
+    if _protocol_supports_inner_config(client_proto):
+        try:
+            template, _src, _detail = _templates.get_effective_template(
+                ctx.enrollment, server.name, kind=inner_sshd_kind)
+            fromca_values = _render.fromca_values_from_evaluation(result)
+            # Render FROMCA_ markers now; leave LOCAL_ markers for msshd.
+            inner_sshd_config = _render.render(
+                template,
+                fromca_values=fromca_values,
+                leave_unsubstituted={'LOCAL'},
+            )
+        except _render.TemplateError as e:
+            # Don't deny the session over a template bug — emit the cert
+            # without an inner_sshd_config and record the error in audit.
+            # msshd will refuse the session at its own validation step
+            # (sshd -t) and the operator will see the audit entry.
+            inner_sshd_config_error = f'render_failed: {e}'
+        except Exception as e:                              # noqa: BLE001
+            inner_sshd_config_error = f'render_failed: {type(e).__name__}: {e}'
+
+    # 8. Audit + respond.
+    audit_entry: dict[str, Any] = {
         'timestamp': _now().strftime('%Y-%m-%dT%H:%M:%SZ'),
         'type': 'authorization',
         'decision': 'granted',
@@ -209,13 +260,23 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
             'source_bound': True,
             'force_command': result.merged_force_command,
         },
-    })
+        'client': {
+            'protocol_version': client_proto,
+            'msshd_version': msshd_version,
+            'inner_sshd_kind': inner_sshd_kind,
+            'inner_sshd_version': inner_sshd_version,
+        },
+    }
+    if inner_sshd_config_error:
+        audit_entry['inner_sshd_config_error'] = inner_sshd_config_error
+    ctx.audit.write(audit_entry)
 
-    return 200, {
+    response: dict[str, Any] = {
         'status': 'granted',
         'cert': cert_b64,
         'serial': serial_hex,
         'not_after': not_after.strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'protocol_version': PROTOCOL_VERSION,
         'policy_summary': {
             'channels': result.merged_channels,
             'source_bound': True,
@@ -224,3 +285,6 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
             'environment': result.merged_environment,
         },
     }
+    if inner_sshd_config is not None:
+        response['inner_sshd_config'] = inner_sshd_config
+    return 200, response
