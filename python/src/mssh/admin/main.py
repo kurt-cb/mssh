@@ -141,6 +141,70 @@ def init(ca_dir, bootstrap_admin, tls_server_cn, tls_server_san):
 
 
 # ---------------------------------------------------------------------------
+# status / next — adoption-state introspection
+# ---------------------------------------------------------------------------
+
+def _build_state_client(ctx, ca_dir):
+    """Best-effort CAClient builder for status/next. Returns None if we
+    can't construct one — state.detect_state() reports the gap as one of
+    its checks rather than crashing."""
+    from .client import CAClient
+    from . import state as _state
+
+    # First try the global --ca-url / --admin-cert / etc. options.
+    try:
+        return _make_client(ctx)
+    except click.UsageError:
+        pass
+
+    # Fall back to bootstrap creds inside ca_dir, if it exists.
+    if not ca_dir:
+        return None
+    ca_dir = Path(ca_dir)
+    if not ca_dir.is_dir():
+        return None
+    url = _state.ca_url_from_config(ca_dir)
+    cert = ca_dir / 'bootstrap-admin-cert.pem'
+    key = ca_dir / 'bootstrap-admin-key.pem'
+    root = ca_dir / 'tls-ca-cert.pem'
+    if not (url and cert.exists() and key.exists() and root.exists()):
+        return None
+    return CAClient(base_url=url, admin_cert=str(cert),
+                    admin_key=str(key), ca_cert=str(root))
+
+
+@cli.command()
+@click.option('--ca-dir', type=click.Path(),
+              help='CA directory to inspect (default: try config-defined dir).')
+@click.option('--no-legacy-detect', is_flag=True,
+              help='Skip detection of existing sshd_config / authorized_keys '
+                   'on the local host.')
+@click.pass_context
+def status(ctx, ca_dir, no_legacy_detect):
+    """Show current deployment state — what's set up, what's not."""
+    from . import state as _state
+    ca_dir_path = Path(ca_dir) if ca_dir else None
+    client = _build_state_client(ctx, ca_dir_path)
+    s = _state.detect_state(ca_dir=ca_dir_path, ca_client=client,
+                            detect_legacy=not no_legacy_detect)
+    click.echo(_state.render_status(s))
+
+
+@cli.command(name='next')
+@click.option('--ca-dir', type=click.Path())
+@click.option('--no-legacy-detect', is_flag=True)
+@click.pass_context
+def next_cmd(ctx, ca_dir, no_legacy_detect):
+    """Show only the next step in adoption — what to do right now."""
+    from . import state as _state
+    ca_dir_path = Path(ca_dir) if ca_dir else None
+    client = _build_state_client(ctx, ca_dir_path)
+    s = _state.detect_state(ca_dir=ca_dir_path, ca_client=client,
+                            detect_legacy=not no_legacy_detect)
+    click.echo(_state.render_next(s))
+
+
+# ---------------------------------------------------------------------------
 # server commands
 # ---------------------------------------------------------------------------
 
