@@ -250,6 +250,52 @@ in its endpoint list. Existing established SSH sessions are
 For zero-downtime CA work, run two CA instances behind your DNS
 and rolling-restart them.
 
+### Customize the per-server pre-auth banner
+
+Each msshd shows a banner before the user authenticates. Default is
+a generic "mediated by mssh" message. Customize by pointing
+`banner.template_path` in `wrapper.yaml` at a text file and listing
+substitution values:
+
+```yaml
+# /etc/mssh/wrapper.yaml
+banner:
+  template_path: /etc/mssh/banner.txt
+  values:
+    server: srv-acct-01
+    group: accounting
+    owner_email: ops@example.com
+```
+
+```text
+# /etc/mssh/banner.txt
+─── Welcome to {server} ({group}) ───
+For access questions: {owner_email}
+```
+
+Tokens not present in `values` are left literal so a typo doesn't
+crash msshd; a missing or malformed template logs a warning and
+falls back to the default banner.
+
+Per-user substitution (`{user}`, CA-decision details) is not
+supported today — the inner sshd is long-lived and shares its
+banner across sessions. See
+[design/future-ideas.md §1](../design/future-ideas.md) for the
+per-connection-sshd path that enables per-session banners.
+
+### Check deployment state at any time
+
+```bash
+mssh-admin status           # full state dump with ✓/✗ per check
+mssh-admin next             # only the next step to do
+```
+
+`status` walks the adoption journey — CA bootstrap, service running,
+admins enrolled, servers enrolled, users with keys, users with
+policies — and prints `✓` or `✗` per check. `next` prints only the
+first failing check plus a suggested command, useful while
+onboarding a new server or user.
+
 ---
 
 ## Troubleshooting

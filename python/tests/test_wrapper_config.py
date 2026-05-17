@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from mssh.msshd.config import (MODE_ENFORCE, MODE_FALLBACK, WrapperConfig)
+from mssh.msshd.config import (
+    BannerConfig, MODE_ENFORCE, MODE_FALLBACK, WrapperConfig,
+)
 
 
 def _write(tmp_path: Path, name: str, body: str) -> Path:
@@ -138,3 +140,44 @@ def test_example_yaml_loads(tmp_path):
     # Example is in fallback mode by design; validate without
     # check_permissions (the example's paths are placeholders).
     cfg.validate()
+
+
+# ---------------------------------------------------------------------------
+# Banner config
+# ---------------------------------------------------------------------------
+
+
+def test_banner_defaults_empty(tmp_path):
+    cfg_path = _write(tmp_path, 'w.yaml', 'mode: fallback\n')
+    cfg = WrapperConfig.load(cfg_path)
+    assert cfg.banner.template_path == ''
+    assert cfg.banner.values == {}
+
+
+def test_banner_loaded_from_yaml(tmp_path):
+    cfg_path = _write(tmp_path, 'w.yaml',
+        'mode: fallback\n'
+        'banner:\n'
+        '  template_path: /etc/mssh/banner.txt\n'
+        '  values:\n'
+        '    server: srv-acct-01\n'
+        '    group: accounting\n'
+        '    owner_email: ops@example.com\n')
+    cfg = WrapperConfig.load(cfg_path)
+    assert cfg.banner.template_path == '/etc/mssh/banner.txt'
+    assert cfg.banner.values == {
+        'server': 'srv-acct-01',
+        'group': 'accounting',
+        'owner_email': 'ops@example.com',
+    }
+
+
+def test_banner_values_coerced_to_strings(tmp_path):
+    # YAML numbers and bools must be coerced; we don't want a typo in
+    # the config to surface as a TypeError during banner rendering.
+    cfg_path = _write(tmp_path, 'w.yaml',
+        'mode: fallback\n'
+        'banner:\n'
+        '  values: {port: 2200, enforced: true}\n')
+    cfg = WrapperConfig.load(cfg_path)
+    assert cfg.banner.values == {'port': '2200', 'enforced': 'True'}

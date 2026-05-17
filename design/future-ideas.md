@@ -1130,6 +1130,10 @@ shipping a real release becomes a priority.
 
 ## 17. Per-session banner with variable substitution
 
+**Status:** v1 (operator-templated, startup substitution) is **landed**.
+Per-user / per-session substitution remains future work — see "What's
+not done" below.
+
 ### Idea
 
 msshd serves a static hardcoded banner today via the hermetic inner
@@ -1137,6 +1141,37 @@ sshd's `Banner` directive (see `config/sshd_config.template` and
 `python/src/mssh/msshd/inner.py:_DEFAULT_BANNER`). Per-session
 dynamic content would make this much more useful as an immediate
 "what's happening with this session" indicator.
+
+### What's done (v1)
+
+Operators can point `banner.template_path` in `wrapper.yaml` at a
+text file and supply a `values` map; msshd substitutes `{key}`
+tokens at startup and writes the rendered file as the inner sshd's
+Banner. Missing tokens are left literal; missing or malformed
+templates fall back to the default banner with a warning log (msshd
+does not refuse to start). See
+[docs/operations.md § customize the per-server pre-auth banner](../docs/operations.md#customize-the-per-server-pre-auth-banner)
+for the operator workflow.
+
+This gives operators per-server / per-group banner customization
+without changing the existing long-lived-inner-sshd architecture.
+
+### What's not done
+
+  - **Per-user / per-session substitution.** The inner sshd is
+    long-lived and shares its banner across sessions, so `{user}`
+    can't change between connections without writing the banner
+    file concurrently — a race. Per-connection inner sshd (§1) is
+    the path; once that lands, msshd can render the banner per-
+    session with full CA-decision context, including `{user}` and
+    a `$MSSH_AUTH_DATA`-style summary.
+  - **CA-stored banner templates + admin CLI.** Templates live in
+    `wrapper.yaml` on each msshd today. Storing them centrally in
+    the CA's enrollment record (per-server or per-server-group)
+    and exposing `mssh-admin server banner set/show` would make
+    fleet-wide updates a one-command operation. Out of scope for
+    v1; revisit when the CA gains arbitrary per-server metadata
+    storage.
 
 Target template:
 
@@ -1173,6 +1208,228 @@ $ADMIN_HELP — how to modify this banner via mssh-admin on the CA.
     cleanup + template substitution.
   - CA enrollment schema + admin endpoints: ~120 lines.
   - mssh-admin CLI commands: ~60 lines.
+
+---
+
+## 18. Self-service "why was I denied" report
+
+### Idea
+
+A user who is already authenticated to a host (or to their
+workstation) but who is hitting unexpected denies should be able to
+ask the CA "why?" without bothering an admin. Today the audit log
+has the answer but it's gated behind admin-level credentials.
+
+Concrete shape: `mssh-admin auth-failures-report` (or
+`mssh whatfailed`, scoped to the calling user's own identity, not
+admin-grade). The CA exposes a per-user audit endpoint that
+returns the last N denies for the caller's enrolled identity,
+with the structured `denied_reason` for each.
+
+### Wins
+
+  - **Reduces admin burden.** "Why can't I get in?" is one of the
+    most common operator-support questions. Self-serve answers
+    cut that traffic.
+  - **Composes with [[mssh-admin-status-next]].** `status` shows
+    the deployment is healthy from the CA's view; `auth-failures-
+    report` shows why a specific user's recent connection attempt
+    failed. Together: a complete diagnostic loop.
+  - **Re-uses existing audit infrastructure.** No new storage; the
+    CA already records every decision.
+
+### Implementation sketch
+
+  - New CA endpoint: `GET /v1/user/<self>/recent-denies`. mTLS
+    client cert identifies the calling user; no admin role
+    required. Returns the last N (cap ~50) decisions where
+    `decision == "deny"` and the caller's identity matches.
+  - Response is the structured `denied_reason` field plus a
+    human-readable rendering ("CIDR mismatch: your source was
+    10.0.5.4, policy `analyst-policy` allows 10.0.0.0/16").
+  - `mssh-admin auth-failures-report` (CLI) or built into
+    `mssh next` so users see denies in their own status walk.
+  - Anti-enumeration: the endpoint never reveals *other* users'
+    denies, and rate-limits aggressively so it can't be used to
+    probe policy.
+
+### Cons / open questions
+
+  - Timing-side-channel: a user could probe "is policy X attached
+    to my account" by triggering connections and watching the
+    deny reasons. Mitigate by collapsing similar reasons in the
+    output (e.g. "policy denied" rather than naming the specific
+    policy that denied).
+  - User cert revocation: once a user is revoked, can they still
+    call this endpoint? Probably not — revocation should be all-
+    or-nothing for cert-bearing endpoints.
+
+### LOC estimate
+
+  - CA endpoint + identity scoping: ~150 lines.
+  - CLI command: ~50 lines.
+  - Tests covering policy / CIDR / time-window denies: ~200 lines.
+
+---
+
+## 19. Bash auto-completion scripts for mssh* commands
+
+**Status:** Defer until v1 release readiness — bash completion is a
+polish item, not a blocker. Worth ~30 minutes when we're packaging
+a deliverable.
+
+### Idea
+
+Ship per-command bash (and zsh, fish) completion scripts for
+`mssh`, `mssh-admin`, `mssh-ca`, `msshd`, and `msshd-admin`. Each
+CLI is Click-based (except `msshd` itself), and Click already
+generates shell completion via the `_<PROG>_COMPLETE=bash_source`
+environment variable.
+
+### Implementation sketch
+
+  - For each Click-based command, ship a generated completion
+    script under `scripts/completion/`:
+    `mssh-admin.bash`, `mssh-admin.zsh`, `mssh-admin.fish`, etc.
+  - Generated once at packaging time by running e.g.
+    `_MSSH_ADMIN_COMPLETE=bash_source mssh-admin > mssh-admin.bash`.
+  - Distro packages install these into the standard locations
+    (`/etc/bash_completion.d/`, `/usr/share/zsh/site-functions/`,
+    `/usr/share/fish/vendor_completions.d/`).
+  - The non-Click `mssh` client and `msshd` daemon need
+    hand-written completion (small surface — `mssh` is mostly
+    `user@host`; `msshd` is mostly `--config <path>`).
+  - Validate by `complete -p` round-trip in a CI test.
+
+### LOC estimate
+
+  - Generated scripts: zero hand-written LOC for Click-based.
+  - Hand-written completion for `mssh` + `msshd`: ~50 lines each.
+  - Packaging glue: ~30 lines.
+
+### Composes with
+
+  - §15 (install_mssh.sh) — installs the completion scripts.
+  - §16 (distro packaging) — `.deb`/`.rpm` Drop-In Place via
+    debhelper / rpm scriptlets.
+
+---
+
+## 20. End-to-end migration test with auto-generated playbook
+
+**Status:** Substantial — the most ambitious test we'd build. High
+value: validates the full migration story, produces an artifact
+that doubles as both a verification gate AND a teaching aid for
+operators (and for Claude) on how to perform the upgrade.
+
+### Idea
+
+A single LXC test that simulates a realistic legacy SSH deployment,
+walks through the full migration to mssh enforce mode, and emits a
+`migration_test_execution.md` artifact recording every command
+executed, every output observed, total wall-clock time, and a
+final summary "X admin-commands needed, estimated Y minutes per
+server."
+
+### Test scenario
+
+  - **Initial state — legacy fleet.** Randomized seed populates:
+    - 5–10 SSH hosts (mix of Ubuntu + Alpine) with their own
+      sshd, known_hosts, and authorized_keys.
+    - 15–25 users with randomized SSH keypairs distributed
+      across hosts via authorized_keys (realistic sparsity:
+      not every user on every host).
+    - 2–3 **external** hosts — SSH servers outside the mssh
+      fleet that some users still need access to. Their host
+      keys live in user known_hosts but they're never enrolled
+      in the CA. Validates "mssh doesn't break my non-mssh
+      flows."
+    - Per-user `~/.ssh/config` with aliases for some hosts.
+  - **Validation phase 0.** Every documented user → host pair
+    works via `ssh user@host`. External hosts work. This
+    establishes the access baseline the migration must preserve.
+  - **Migration walk.** The test drives the migration step by
+    step, recording each `mssh-admin` invocation:
+      1. CA bootstrap (`mssh-admin init`).
+      2. Server enrollment (`mssh-admin server add` × N).
+      3. User enrollment + key import (`user add` + `user key add`).
+      4. Policy attachment derived from observed
+         authorized_keys distribution.
+      5. Drop msshd in fallback mode on each server.
+      6. Flip each server to enforce.
+      7. Roll out client config (`~/.mssh/`).
+  - **Validation phase N (post-migration).** Re-run the full
+    access matrix via `mssh` instead of `ssh`. External hosts
+    still work via raw `ssh`. `~/.ssh/` is empty (or contains
+    only what's needed for external hosts). Every previously
+    successful (user, host) pair is still successful.
+  - **Failure injection (optional, v2).** Revoke a user
+    mid-flow. Disable a server. Confirm denies are clean and
+    the audit log captures them.
+
+### Generated artifact
+
+`migration_test_execution.md` — a chronological log of every
+command executed and its result, structured like:
+
+```
+## Phase 1.3: enrol user alice
+    $ mssh-admin user add --user alice --key /artifacts/alice.pub
+    user_added: alice
+    key fingerprint: SHA256:…
+
+    Cumulative: 7 admin commands, 00:01:42 elapsed.
+
+## Phase 2.1: drop msshd on srv-acct-01 in fallback mode
+    $ systemctl enable --now msshd
+    ... output ...
+    Cumulative: 12 admin commands, 00:03:18 elapsed.
+```
+
+The trailing summary section reports total command count, total
+wall-clock time, and an estimated per-server / per-user effort.
+
+### Wins
+
+  - **Validates the migration end-to-end.** Catches regressions
+    in any of the dozen-plus moving pieces.
+  - **Doubles as documentation.** The generated playbook is the
+    operator-facing migration runbook — auto-updated every CI
+    run. Beats hand-written drift-prone docs.
+  - **Teaches Claude.** When asked "how do I migrate srv-X",
+    Claude can read the playbook as its source of truth, not
+    risk hallucinating commands.
+  - **Quantifies migration burden.** "X commands, Y minutes per
+    server" is the number that wins or loses adoption
+    conversations.
+
+### Cons / open questions
+
+  - Big test, big LOC. Probably ~1000 lines new code +
+    significant new LXC scenario infrastructure.
+  - Test runtime: realistic full-flow with 5–10 hosts is going
+    to be 10–30 minutes per run. Acceptable for nightly CI, not
+    for pre-commit.
+  - The "external hosts that will never be part of mssh" piece
+    is novel — needs careful design so it doesn't accidentally
+    get sucked into mssh enrollment.
+
+### Composes with
+
+  - §13 (legacy capture + dual-enforce) — the test exercises the
+    same scrape-and-translate path, with real legacy config.
+  - §9 (migration runbook doc) — the test's output IS the
+    runbook, freshly generated each run.
+  - [[mssh-admin-status-next]] — the test verifies `status`
+    correctly walks the adoption journey end-to-end.
+
+### LOC estimate
+
+  - LXC scenario builder (legacy fleet + randomized users):
+    ~400 lines.
+  - Migration walker + step recorder: ~300 lines.
+  - Validation matrix (pre + post): ~200 lines.
+  - Markdown emitter: ~100 lines.
 
 ---
 

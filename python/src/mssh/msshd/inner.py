@@ -43,14 +43,48 @@ _DEFAULT_BANNER = """\
   Welcome — this session is mediated by mssh.
 
   Authorization was issued by the mssh CA. Your access is
-  logged centrally. Per-session context (user, server, group,
-  CA authorization details) will appear here once variable
-  substitution lands — see design/future-ideas.md.
+  logged centrally.
 
-  To customize this banner, contact your administrator
-  (mssh-admin server banner — coming).
+  To customize this banner, set banner.template_path in
+  wrapper.yaml; see docs/operations.md § per-server banner.
 ─────────────────────────────────────────────────────────────
 """
+
+
+class _SafeDict(dict):
+    """Dict that returns ``{key}`` literally for missing keys, so a
+    typo in the banner template doesn't crash msshd at startup."""
+    def __missing__(self, key):  # noqa: D401
+        return '{' + key + '}'
+
+
+def _render_banner(template_path: str, values: dict[str, str]) -> str:
+    """Read the banner template and substitute ``{key}`` tokens.
+
+    Returns the default banner if ``template_path`` is empty or
+    unreadable — we'd rather show a generic banner than fail to start
+    the inner sshd. Logs at warning level if the path was set but the
+    file is missing, so operators see why their customization didn't
+    take effect.
+    """
+    if not template_path:
+        return _DEFAULT_BANNER
+    p = Path(template_path)
+    try:
+        raw = p.read_text()
+    except (FileNotFoundError, PermissionError, OSError) as e:
+        log.warning('banner template %s unreadable (%s); falling back '
+                    'to default', template_path, e)
+        return _DEFAULT_BANNER
+    try:
+        return raw.format_map(_SafeDict(values))
+    except (ValueError, IndexError) as e:
+        # format_map can raise on malformed format-strings (e.g. stray
+        # braces). Surface as a warning + fall back so operators can fix
+        # without msshd refusing to start.
+        log.warning('banner template %s has a formatting error (%s); '
+                    'falling back to default', template_path, e)
+        return _DEFAULT_BANNER
 
 
 def _find_template() -> Path:
@@ -168,11 +202,14 @@ class InnerSshd:
         self._port = _allocate_port(lo, hi)
         log.info('inner sshd will bind 127.0.0.1:%d', self._port)
 
-        # 4. Write the pre-auth banner file. Hardcoded content for
-        #    now; per-session ({user}, {server}, {group},
-        #    $MSSH_AUTH_DATA) substitution is planned (future-ideas.md).
+        # 4. Render and write the pre-auth banner file. Operators can
+        #    point banner.template_path at a custom file in wrapper.yaml
+        #    with {server}/{group}/operator-supplied {key} tokens; we
+        #    substitute once at startup. Per-user substitution requires
+        #    per-connection inner sshd (future-ideas.md §1).
         banner_path = self.state_dir / 'banner'
-        banner_path.write_text(_DEFAULT_BANNER)
+        banner_path.write_text(_render_banner(
+            self.cfg.banner.template_path, self.cfg.banner.values))
         os.chmod(banner_path, 0o0644)
 
         # 5. Render the hermetic config.

@@ -83,3 +83,19 @@ performance:
   # workloads only. See design/ssh-rt-auth-detailed-wrapper.md §4.
   inner_cipher_none: false
   max_concurrent_sessions: 200
+
+# Optional: per-server pre-auth banner customization. msshd reads the
+# template once at startup, substitutes {key} tokens from `values`,
+# and feeds the result to the hermetic inner sshd's Banner directive.
+# Missing tokens are left literal; missing or malformed templates fall
+# back to the default banner (msshd will not refuse to start).
+#
+# Per-user / per-session substitution is not supported today (would
+# require per-connection inner sshd — see future-ideas.md §1).
+#
+# banner:
+#   template_path: /etc/mssh/banner.txt
+#   values:
+#     server: srv-acct-01
+#     group: accounting
+#     owner_email: ops@example.com

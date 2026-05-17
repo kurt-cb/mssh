@@ -78,6 +78,24 @@ class PerformanceConfig:
 
 
 @dataclass
+class BannerConfig:
+    """Pre-auth banner customization.
+
+    ``template_path``: optional path to a text file whose contents are
+    shown to users at SSH-Banner time. ``{key}`` tokens are substituted
+    with strings from ``values``. Missing tokens are left literal so a
+    typo in the template doesn't crash msshd.
+
+    Per-user / per-session substitution (e.g. ``{user}``) is not
+    supported today — the inner sshd is long-lived and shares its banner
+    file across all sessions. See future-ideas.md §1 (per-connection
+    inner sshd) for the path to per-user substitution.
+    """
+    template_path: str = ''
+    values: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class WrapperConfig:
     mode: str = MODE_FALLBACK
     fallback: FallbackConfig = field(default_factory=FallbackConfig)
@@ -88,6 +106,7 @@ class WrapperConfig:
     users: UsersConfig = field(default_factory=UsersConfig)
     logging_: LoggingConfig = field(default_factory=LoggingConfig)
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
+    banner: BannerConfig = field(default_factory=BannerConfig)
 
     @classmethod
     def load(cls, path: str | Path) -> 'WrapperConfig':
@@ -149,6 +168,12 @@ class WrapperConfig:
                 inner_cipher_none=bool(perf.get('inner_cipher_none')),
                 max_concurrent_sessions=int(
                     perf.get('max_concurrent_sessions') or 200),
+            ),
+            banner=BannerConfig(
+                template_path=str((data.get('banner') or {})
+                                  .get('template_path') or ''),
+                values={str(k): str(v) for k, v in
+                        ((data.get('banner') or {}).get('values') or {}).items()},
             ),
         )
 
