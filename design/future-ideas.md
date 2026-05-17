@@ -935,6 +935,11 @@ Propose two things that compose:
 
 ## 14. Tutorial / walkthrough doc for the adhoc lab
 
+**Status:** **Landed** as [docs/TUTORIAL.md](../docs/TUTORIAL.md).
+Sections for unimplemented features (gated mode §6.5.1,
+debug_sshd swap-in §11, legacy capture §13) are noted as "not yet"
+in the tutorial; add exercises for each when those features land.
+
 ### Idea
 
 The adhoc msshd lab already provisions Phase 0 → 1 → 2 with operator
