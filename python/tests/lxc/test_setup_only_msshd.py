@@ -826,6 +826,15 @@ def _render_ansible_hosts_ini(ips: dict, prefix: str) -> str:
         block('accounting', [(ACCT_NAME, ips[ACCT_NAME])]),
         block('hr', [(HR_NAME, ips[HR_NAME])]),
         block('engineering', [(ENG_NAME, ips[ENG_NAME])]),
+        # Convenience parent group used by site.yml so a plain
+        # `ansible-playbook site.yml` actually matches hosts. Every
+        # OS group rolls up into proxy_clients by default.
+        '[proxy_clients:children]',
+        'ubuntu_servers',
+        'alpine_servers',
+        'debian',
+        'fedora_servers',
+        '',
         '[all:vars]',
         'ansible_user=root',
         # Relative to this hosts.ini's directory so the same inventory

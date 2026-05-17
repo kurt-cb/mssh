@@ -1,35 +1,49 @@
 ---
-- name: "Task 1: System Hosts File"
+# Task file (NOT a standalone playbook). Pulled in by site.yml's
+# `include_tasks: task*.yml` glob. To run only this task set:
+#
+#   cd ~/ansible-project
+#   ansible-playbook site.yml --tags squid
+#
+# Running `ansible-playbook task_squid.yml` directly will fail with
+# "'ansible.builtin.lineinfile' is not a valid attribute for a Play"
+# because the top-level structure here is a task list, not a play.
+
+- name: "squid: /etc/hosts entry"
   ansible.builtin.lineinfile:
     path: /etc/hosts
     regexp: "^{{ proxy_ip }}\\s+"
     line: "{{ proxy_ip }} {{ proxy_hostname }}"
     state: present
+  tags: [squid]
 
-- name: "Task 1: System Environment (Debian/RedHat)"
+- name: "squid: system environment (Debian/RedHat)"
   ansible.builtin.blockinfile:
     path: /etc/environment
     block: |
       http_proxy="http://{{ proxy_hostname }}:{{ proxy_port }}/"
       https_proxy="http://{{ proxy_hostname }}:{{ proxy_port }}/"
   when: ansible_os_family in ["Debian", "RedHat"]
+  tags: [squid]
 
-- name: "Task 1: APT proxy (Ubuntu)"
+- name: "squid: APT proxy (Ubuntu/Debian)"
   ansible.builtin.blockinfile:
     path: /etc/apt/apt.conf.d/99proxy
     create: true
     block: 'Acquire::http::Proxy "http://{{ proxy_hostname }}:{{ proxy_port }}/";'
   when: ansible_os_family == "Debian"
+  tags: [squid]
 
-- name: "Task 1: DNF proxy (RedHat)"
+- name: "squid: DNF proxy (RedHat)"
   ansible.builtin.ini_file:
     path: /etc/dnf/dnf.conf
     section: main
     option: proxy
     value: "http://{{ proxy_hostname }}:{{ proxy_port }}"
   when: ansible_os_family == "RedHat"
+  tags: [squid]
 
-- name: "Task 1: Profile proxy (Alpine)"
+- name: "squid: profile proxy (Alpine)"
   ansible.builtin.blockinfile:
     path: /etc/profile.d/proxy.sh
     create: true
@@ -38,3 +52,4 @@
       export http_proxy="http://{{ proxy_hostname }}:{{ proxy_port }}/"
       export https_proxy="http://{{ proxy_hostname }}:{{ proxy_port }}/"
   when: ansible_os_family == "Alpine"
+  tags: [squid]
