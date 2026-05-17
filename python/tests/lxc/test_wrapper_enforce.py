@@ -253,43 +253,43 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
     lxc_exec(CA_NAME, 'sh', '-c',
              'PYTHONPATH=/app/src python3 -c "'
              'from mssh.ca.cert_minter import bootstrap_ca; '
-             f"bootstrap_ca('/etc/ssh-rt-auth/ca', "
+             f"bootstrap_ca('/etc/mssh/ca', "
              f"tls_server_sans=['DNS:localhost','IP:127.0.0.1','IP:{ca_ip}'])"
              '"', timeout=120)
     lxc_exec(CA_NAME, 'sh', '-c',
              'python3 -c "'
              'import yaml; '
-             "open('/etc/ssh-rt-auth/ca/enrollment.yaml','w').write("
+             "open('/etc/mssh/ca/enrollment.yaml','w').write("
              "yaml.safe_dump({'admins': {'bootstrap-admin': "
              "{'role':'superuser','mtls_subject':'CN=bootstrap-admin',"
              "'enrolled_at':'','enrolled_by':'init'}}}))"
              '"')
     push_text(CA_NAME,
               f'listen: 0.0.0.0:{CA_PORT}\n'
-              'signing_key: /etc/ssh-rt-auth/ca/signing-key.pem\n'
-              'signing_cert: /etc/ssh-rt-auth/ca/signing-cert.pem\n'
-              'tls_cert: /etc/ssh-rt-auth/ca/tls-server-cert.pem\n'
-              'tls_key:  /etc/ssh-rt-auth/ca/tls-server-key.pem\n'
-              'client_ca_cert: /etc/ssh-rt-auth/ca/tls-ca-cert.pem\n'
+              'signing_key: /etc/mssh/ca/signing-key.pem\n'
+              'signing_cert: /etc/mssh/ca/signing-cert.pem\n'
+              'tls_cert: /etc/mssh/ca/tls-server-cert.pem\n'
+              'tls_key:  /etc/mssh/ca/tls-server-key.pem\n'
+              'client_ca_cert: /etc/mssh/ca/tls-ca-cert.pem\n'
               'identity_trust_roots: []\n'
-              'enrollment: {path: /etc/ssh-rt-auth/ca/enrollment.yaml}\n'
-              'audit: {path: /var/log/ssh-rt-auth/audit.jsonl}\n'
+              'enrollment: {path: /etc/mssh/ca/enrollment.yaml}\n'
+              'audit: {path: /var/log/mssh/audit.jsonl}\n'
               'defaults: {max_cert_validity_seconds: 3600, '
               'timestamp_drift_seconds: 600}\n'
               'cert_generation: {key_type: ec, '
               'server_cert_validity_days: 30, '
               'admin_cert_validity_days: 30}\n',
-              '/etc/ssh-rt-auth/ca-config.yaml')
+              '/etc/mssh/ca-config.yaml')
     push_text(CA_NAME,
-              '[Unit]\nDescription=ssh-rt-auth CA\nAfter=network.target\n'
+              '[Unit]\nDescription=mssh CA\nAfter=network.target\n'
               '[Service]\nWorkingDirectory=/app\nEnvironment="PYTHONPATH=/app/src"\n'
               'ExecStart=/usr/bin/python3 -m mssh.ca.server --config '
-              '/etc/ssh-rt-auth/ca-config.yaml\nRestart=on-failure\n'
+              '/etc/mssh/ca-config.yaml\nRestart=on-failure\n'
               '[Install]\nWantedBy=multi-user.target\n',
-              '/etc/systemd/system/ssh-rt-auth-ca.service')
-    lxc_exec(CA_NAME, 'mkdir', '-p', '/var/log/ssh-rt-auth')
+              '/etc/systemd/system/mssh-ca.service')
+    lxc_exec(CA_NAME, 'mkdir', '-p', '/var/log/mssh')
     lxc_exec(CA_NAME, 'systemctl', 'daemon-reload')
-    lxc_exec(CA_NAME, 'systemctl', 'start', 'ssh-rt-auth-ca')
+    lxc_exec(CA_NAME, 'systemctl', 'start', 'mssh-ca')
     wait_for_port(CA_NAME, CA_PORT, max_wait=60)
 
     # ---- 2. Pull admin creds + enroll target as a server ------------------
@@ -297,7 +297,7 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
     for n in ('bootstrap-admin-cert.pem', 'bootstrap-admin-key.pem',
               'tls-ca-cert.pem', 'signing-cert.pem'):
         subprocess.run(['lxc', 'file', 'pull',
-                        f'{CA_NAME}/etc/ssh-rt-auth/ca/{n}',
+                        f'{CA_NAME}/etc/mssh/ca/{n}',
                         str(creds_dir / n)],
                        check=True, capture_output=True)
     os.chmod(creds_dir / 'bootstrap-admin-key.pem', 0o600)
@@ -357,31 +357,31 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
 
     # Push everything into the target.
     lxc_exec(TARGET_NAME, 'mkdir', '-p',
-             '/etc/ssh-rt-auth',
-             '/var/lib/ssh-rt-auth',
-             '/var/lib/ssh-rt-auth/inner-sshd',
-             '/var/log/ssh-rt-auth')
+             '/etc/mssh',
+             '/var/lib/mssh',
+             '/var/lib/mssh/inner-sshd',
+             '/var/log/mssh')
 
     # Wrapper's TLS server cert + key (presented to mssh clients).
     push_file(TARGET_NAME, pki['wrapper_server_cert_path'],
-              '/etc/ssh-rt-auth/wrapper-server.crt', mode='644')
+              '/etc/mssh/wrapper-server.crt', mode='644')
     push_file(TARGET_NAME, pki['wrapper_server_key_path'],
-              '/etc/ssh-rt-auth/wrapper-server.key', mode='600')
+              '/etc/mssh/wrapper-server.key', mode='600')
     # User-CA trust root (verifies mssh client certs).
     push_file(TARGET_NAME, pki['user_ca_path'],
-              '/etc/ssh-rt-auth/user-ca.pub', mode='644')
+              '/etc/mssh/user-ca.pub', mode='644')
     # Wrapper's CA mTLS material (presented when calling the CA).
     push_file(TARGET_NAME, wrapper_mtls_cert,
-              '/etc/ssh-rt-auth/wrapper-mtls.crt', mode='644')
+              '/etc/mssh/wrapper-mtls.crt', mode='644')
     push_file(TARGET_NAME, wrapper_mtls_key,
-              '/etc/ssh-rt-auth/wrapper-mtls.key', mode='600')
+              '/etc/mssh/wrapper-mtls.key', mode='600')
     push_file(TARGET_NAME, creds_dir / 'tls-ca-cert.pem',
-              '/etc/ssh-rt-auth/server-mtls-ca.pub', mode='644')
+              '/etc/mssh/server-mtls-ca.pub', mode='644')
     # Wrapper's local user-CA (signs inner OpenSSH certs).
     push_file(TARGET_NAME, str(wrapper_user_ca_priv),
-              '/var/lib/ssh-rt-auth/wrapper-user-ca', mode='600')
+              '/var/lib/mssh/wrapper-user-ca', mode='600')
     push_file(TARGET_NAME, str(wrapper_user_ca_pub),
-              '/var/lib/ssh-rt-auth/inner-sshd/wrapper-user-ca.pub',
+              '/var/lib/mssh/inner-sshd/wrapper-user-ca.pub',
               mode='644')
 
     # wrapper.yaml (enforce mode).
@@ -392,14 +392,14 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
               f'  external_port: {WRAPPER_PORT}\n'
               f'  interfaces: []\n'
               f'tls:\n'
-              f'  server_cert: /etc/ssh-rt-auth/wrapper-server.crt\n'
-              f'  server_key:  /etc/ssh-rt-auth/wrapper-server.key\n'
-              f'  user_ca_pubkey: /etc/ssh-rt-auth/user-ca.pub\n'
+              f'  server_cert: /etc/mssh/wrapper-server.crt\n'
+              f'  server_key:  /etc/mssh/wrapper-server.key\n'
+              f'  user_ca_pubkey: /etc/mssh/user-ca.pub\n'
               f'ca:\n'
               f'  endpoints: [https://{ca_ip}:{CA_PORT}]\n'
-              f'  client_cert: /etc/ssh-rt-auth/wrapper-mtls.crt\n'
-              f'  client_key:  /etc/ssh-rt-auth/wrapper-mtls.key\n'
-              f'  ca_pubkey:   /etc/ssh-rt-auth/server-mtls-ca.pub\n'
+              f'  client_cert: /etc/mssh/wrapper-mtls.crt\n'
+              f'  client_key:  /etc/mssh/wrapper-mtls.key\n'
+              f'  ca_pubkey:   /etc/mssh/server-mtls-ca.pub\n'
               f'  timeout_seconds: 5\n'
               f'inner:\n'
               f'  sshd_binary: /usr/sbin/sshd\n'
@@ -409,18 +409,18 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
               f'logging:\n'
               f'  level: info\n'
               f'  destination: stderr\n'
-              f'  audit_destination: file:/var/log/ssh-rt-auth/wrapper-audit.jsonl\n',
-              '/etc/ssh-rt-auth/wrapper.yaml')
+              f'  audit_destination: file:/var/log/mssh/wrapper-audit.jsonl\n',
+              '/etc/mssh/wrapper.yaml')
 
     # systemd unit.
     push_text(TARGET_NAME,
-              '[Unit]\nDescription=ssh-rt-auth wrapper\n'
+              '[Unit]\nDescription=mssh wrapper\n'
               'After=network-online.target\n'
               '[Service]\nWorkingDirectory=/app\n'
               'Environment="PYTHONPATH=/app/src"\n'
-              'Environment="SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/ssh-rt-auth"\n'
+              'Environment="SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh"\n'
               'ExecStart=/usr/bin/python3 -m mssh.msshd '
-              '--config /etc/ssh-rt-auth/wrapper.yaml\n'
+              '--config /etc/mssh/wrapper.yaml\n'
               'Restart=on-failure\n'
               'StandardError=journal\n'
               '[Install]\nWantedBy=multi-user.target\n',
@@ -466,7 +466,7 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
         print('--- wrapper journal ---', file=sys.stderr)
         print(rj.stdout or '', file=sys.stderr)
         # Dump the CA audit log to help debug.
-        ra = lxc_exec(CA_NAME, 'cat', '/var/log/ssh-rt-auth/audit.jsonl',
+        ra = lxc_exec(CA_NAME, 'cat', '/var/log/mssh/audit.jsonl',
                       check=False)
         print('--- CA audit ---', file=sys.stderr)
         print(ra.stdout or '', file=sys.stderr)
@@ -476,7 +476,7 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
         f'expected "alice" in stdout: {r.stdout!r}'
 
     section('Verifying CA audit log has the grant')
-    ra = lxc_exec(CA_NAME, 'cat', '/var/log/ssh-rt-auth/audit.jsonl')
+    ra = lxc_exec(CA_NAME, 'cat', '/var/log/mssh/audit.jsonl')
     assert 'granted' in (ra.stdout or ''), \
         f'no granted entries in CA audit log:\n{ra.stdout}'
 

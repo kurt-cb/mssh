@@ -1,7 +1,7 @@
 # Session retrospective — issues encountered and how they were fixed
 
 This document captures every non-trivial bug or design wrinkle we hit while
-building the ssh-rt-auth PoC, the test infrastructure, and the LXC suite. The
+building the mssh PoC, the test infrastructure, and the LXC suite. The
 goal is so a future maintainer (or future-me) doesn't re-fall into the same
 holes.
 
@@ -80,7 +80,7 @@ Grouped by area. Each entry has:
 
 ### 3.1 PoC server only emitted a banner and disconnected
 - **Symptom:** `ssh user@host` showed
-  `ssh-rt-auth: authorized session / user=alice / Connection closed.`
+  `mssh: authorized session / user=alice / Connection closed.`
   and exited. User asked "did this fail?"
 - **Cause:** The original `_SshrtAuthSession.session_started()` wrote the
   banner via `chan.write()` and immediately called `chan.exit(0)`. There
@@ -190,7 +190,7 @@ Grouped by area. Each entry has:
      **inside the container, as that Unix user**.
   3. Pull the pubkey out via `lxc file pull`.
   4. Register at the CA via `CAClient.user_add` /
-     `CAClient.user_key_add` (the equivalent of `ssh-rt-admin user add`).
+     `CAClient.user_key_add` (the equivalent of `mssh-admin user add`).
   5. Distribute the privkey to every other container the user can SSH
      from.
   The realistic flow is documented in `ADHOC_TEST_ENV.md` § 9.5–9.7.
@@ -217,7 +217,7 @@ Grouped by area. Each entry has:
   whoever holds TCP port 2222 — no regex involved.
 
 ### 6.2 pidfile approach captured the wrong PID
-- **Symptom:** `kill $(cat /run/ssh-rt-auth-server.pid)` reliably "succeeded"
+- **Symptom:** `kill $(cat /run/mssh-server.pid)` reliably "succeeded"
   but the AsyncSSH process kept running.
 - **Cause:** `$!` after a backgrounded `nohup python …` may refer to the
   nohup wrapper on some shells. Killing nohup doesn't kill its child.
@@ -395,17 +395,17 @@ The right shape for production is to split the OpenSSH shim into two
 pieces:
 
 ```
-sshd → AuthorizedKeysCommand → ssh-rt-authd-cli  (tiny client, ~5 ms)
+sshd → AuthorizedKeysCommand → mssh-shimd-cli  (tiny client, ~5 ms)
                                        │
                                        ▼  Unix domain socket
-                              ssh-rt-authd  (long-lived Python daemon)
+                              mssh-shimd  (long-lived Python daemon)
                                 ├── persistent mTLS session pool to CA
                                 ├── in-memory hot cache (LRU)
                                 └── SqliteCertCache (write-through;
                                     persists across daemon restarts)
 ```
 
-- **Transport:** Unix domain socket at `/run/ssh-rt-auth/authd.sock`
+- **Transport:** Unix domain socket at `/run/mssh/authd.sock`
   with mode 0660, owner `root:mssh`. Filesystem permissions are the
   auth — no in-protocol handshake needed.
 - **Wire format:** newline-delimited JSON, one request → one response.

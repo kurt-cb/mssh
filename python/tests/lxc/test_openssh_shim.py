@@ -1,6 +1,6 @@
 """OpenSSH shim prototype — end-to-end test against unmodified ``sshd``.
 
-This is the spike that answers "can ssh-rt-auth plug into stock OpenSSH
+This is the spike that answers "can mssh plug into stock OpenSSH
 without a sshd patch?". It wires our ``shim/openssh_shim.py`` into
 ``sshd_config``'s ``AuthorizedKeysCommand`` directive and runs three SSH
 attempts:
@@ -20,9 +20,9 @@ Architecture:
     | ssh alice@127.0.0.1
     v
   stock OpenSSH sshd (port 22, inside container)
-    | AuthorizedKeysCommand=/usr/local/bin/ssh-rt-auth-openssh-shim
+    | AuthorizedKeysCommand=/usr/local/bin/mssh-openssh-shim
     v
-  ssh-rt-auth-openssh-shim (Python, runs as user ``mssh``)
+  mssh-openssh-shim (Python, runs as user ``mssh``)
     | mTLS POST /v1/authorize
     v
   CA container
@@ -32,8 +32,8 @@ Opt-in marker: ``-m openssh_shim``.
 
 Container names:
 
-  mssh-openssh-ca       — CA + ssh-rt-admin
-  mssh-openssh-target   — stock sshd + ssh-rt-auth-openssh-shim
+  mssh-openssh-ca       — CA + mssh-admin
+  mssh-openssh-target   — stock sshd + mssh-openssh-shim
 """
 from __future__ import annotations
 
@@ -152,43 +152,43 @@ def test_openssh_shim_end_to_end(request, tmp_path_factory):
     lxc_exec(CA_NAME, 'sh', '-c',
              'PYTHONPATH=/app/src python3 -c "'
              'from mssh.ca.cert_minter import bootstrap_ca; '
-             f"bootstrap_ca('/etc/ssh-rt-auth/ca', "
+             f"bootstrap_ca('/etc/mssh/ca', "
              f"tls_server_sans=['DNS:localhost','IP:127.0.0.1',"
              f"'IP:{ca_ip}'])\"",
              timeout=120)
     lxc_exec(CA_NAME, 'sh', '-c',
              'python3 -c "'
              'import yaml; '
-             "open('/etc/ssh-rt-auth/ca/enrollment.yaml','w').write("
+             "open('/etc/mssh/ca/enrollment.yaml','w').write("
              "yaml.safe_dump({'admins': {'bootstrap-admin': "
              "{'role':'superuser','mtls_subject':'CN=bootstrap-admin',"
              "'enrolled_at':'','enrolled_by':'init'}}}))\"")
     push_text(CA_NAME,
               f'listen: 0.0.0.0:{CA_PORT}\n'
-              'signing_key: /etc/ssh-rt-auth/ca/signing-key.pem\n'
-              'signing_cert: /etc/ssh-rt-auth/ca/signing-cert.pem\n'
-              'tls_cert: /etc/ssh-rt-auth/ca/tls-server-cert.pem\n'
-              'tls_key:  /etc/ssh-rt-auth/ca/tls-server-key.pem\n'
-              'client_ca_cert: /etc/ssh-rt-auth/ca/tls-ca-cert.pem\n'
+              'signing_key: /etc/mssh/ca/signing-key.pem\n'
+              'signing_cert: /etc/mssh/ca/signing-cert.pem\n'
+              'tls_cert: /etc/mssh/ca/tls-server-cert.pem\n'
+              'tls_key:  /etc/mssh/ca/tls-server-key.pem\n'
+              'client_ca_cert: /etc/mssh/ca/tls-ca-cert.pem\n'
               'identity_trust_roots: []\n'
-              'enrollment: {path: /etc/ssh-rt-auth/ca/enrollment.yaml}\n'
-              'audit: {path: /var/log/ssh-rt-auth/audit.jsonl}\n'
+              'enrollment: {path: /etc/mssh/ca/enrollment.yaml}\n'
+              'audit: {path: /var/log/mssh/audit.jsonl}\n'
               'defaults: {max_cert_validity_seconds: 3600, '
               'timestamp_drift_seconds: 600}\n'
               'cert_generation: {key_type: ec, '
               'server_cert_validity_days: 30, '
               'admin_cert_validity_days: 30}\n',
-              '/etc/ssh-rt-auth/ca-config.yaml')
+              '/etc/mssh/ca-config.yaml')
     push_text(CA_NAME,
-              '[Unit]\nDescription=ssh-rt-auth CA\nAfter=network.target\n'
+              '[Unit]\nDescription=mssh CA\nAfter=network.target\n'
               '[Service]\nWorkingDirectory=/app\nEnvironment="PYTHONPATH=/app/src"\n'
               'ExecStart=/usr/bin/python3 -m mssh.ca.server --config '
-              '/etc/ssh-rt-auth/ca-config.yaml\nRestart=on-failure\n'
+              '/etc/mssh/ca-config.yaml\nRestart=on-failure\n'
               '[Install]\nWantedBy=multi-user.target\n',
-              '/etc/systemd/system/ssh-rt-auth-ca.service')
-    lxc_exec(CA_NAME, 'mkdir', '-p', '/var/log/ssh-rt-auth')
+              '/etc/systemd/system/mssh-ca.service')
+    lxc_exec(CA_NAME, 'mkdir', '-p', '/var/log/mssh')
     lxc_exec(CA_NAME, 'systemctl', 'daemon-reload')
-    lxc_exec(CA_NAME, 'systemctl', 'start', 'ssh-rt-auth-ca')
+    lxc_exec(CA_NAME, 'systemctl', 'start', 'mssh-ca')
     wait_for_port(CA_NAME, CA_PORT, max_wait=60)
 
     # Pull bootstrap admin creds locally.
@@ -196,7 +196,7 @@ def test_openssh_shim_end_to_end(request, tmp_path_factory):
     for n in ('bootstrap-admin-cert.pem', 'bootstrap-admin-key.pem',
               'tls-ca-cert.pem', 'signing-cert.pem'):
         subprocess.run(['lxc', 'file', 'pull',
-                        f'{CA_NAME}/etc/ssh-rt-auth/ca/{n}',
+                        f'{CA_NAME}/etc/mssh/ca/{n}',
                         str(creds_dir / n)],
                        check=True, capture_output=True)
     os.chmod(creds_dir / 'bootstrap-admin-key.pem', 0o600)
@@ -211,7 +211,7 @@ def test_openssh_shim_end_to_end(request, tmp_path_factory):
     )
 
     # ---- Enrol target as a server + pull its mTLS creds --------------------
-    section('Enrolling target as an ssh-rt-auth server')
+    section('Enrolling target as an mssh server')
     resp = admin.server_add('srv-openssh', groups=['poc'])
     server_creds = resp['credentials']
     target_mtls_cert = creds_dir / 'srv-cert.pem'
@@ -259,17 +259,17 @@ def test_openssh_shim_end_to_end(request, tmp_path_factory):
                   mode='600', owner=f'{u}:{u}')
 
     # mTLS creds for the shim.
-    lxc_exec(TARGET_NAME, 'mkdir', '-p', '/etc/ssh-rt-auth')
+    lxc_exec(TARGET_NAME, 'mkdir', '-p', '/etc/mssh')
     push_file(TARGET_NAME, target_mtls_cert,
-              '/etc/ssh-rt-auth/mtls-cert.pem', mode='640',
+              '/etc/mssh/mtls-cert.pem', mode='640',
               owner='root:mssh')
     push_file(TARGET_NAME, target_mtls_key,
-              '/etc/ssh-rt-auth/mtls-key.pem', mode='640',
+              '/etc/mssh/mtls-key.pem', mode='640',
               owner='root:mssh')
     push_file(TARGET_NAME, creds_dir / 'tls-ca-cert.pem',
-              '/etc/ssh-rt-auth/ca-tls-root.pem', mode='644')
+              '/etc/mssh/ca-tls-root.pem', mode='644')
     push_file(TARGET_NAME, creds_dir / 'signing-cert.pem',
-              '/etc/ssh-rt-auth/auth-signing-root.pem', mode='644')
+              '/etc/mssh/auth-signing-root.pem', mode='644')
 
     # Shim config — explicit sqlite cache so the second AuthorizedKeysCommand
     # invocation per accepted connection hits the persistent cache instead
@@ -277,40 +277,40 @@ def test_openssh_shim_end_to_end(request, tmp_path_factory):
     push_text(TARGET_NAME,
               'ca_endpoints:\n'
               f'  - https://{ca_ip}:{CA_PORT}\n'
-              'mtls_cert: /etc/ssh-rt-auth/mtls-cert.pem\n'
-              'mtls_key:  /etc/ssh-rt-auth/mtls-key.pem\n'
-              'ca_trust_root: /etc/ssh-rt-auth/ca-tls-root.pem\n'
-              'auth_trust_root: /etc/ssh-rt-auth/auth-signing-root.pem\n'
+              'mtls_cert: /etc/mssh/mtls-cert.pem\n'
+              'mtls_key:  /etc/mssh/mtls-key.pem\n'
+              'ca_trust_root: /etc/mssh/ca-tls-root.pem\n'
+              'auth_trust_root: /etc/mssh/auth-signing-root.pem\n'
               'server_name: srv-openssh\n'
               'cache:\n'
               '  backend: sqlite\n'
-              '  db_path: /var/cache/ssh-rt-auth/cert-cache.sqlite3\n'
+              '  db_path: /var/cache/mssh/cert-cache.sqlite3\n'
               '  max_entries: 100\n'
               'timeouts: {connect: 3, read: 5}\n',
-              '/etc/ssh-rt-auth/shim.yaml', mode='644')
+              '/etc/mssh/shim.yaml', mode='644')
 
     # Install the openssh shim script.
     push_file(TARGET_NAME, str(app_root / 'openssh' / 'openssh_shim.py'),
-              '/usr/local/bin/ssh-rt-auth-openssh-shim',
+              '/usr/local/bin/mssh-openssh-shim',
               mode='755', owner='root:root')
     # SQLite cache directory; the mssh user must own it because the shim
     # runs as that account (AuthorizedKeysCommandUser mssh).
-    lxc_exec(TARGET_NAME, 'mkdir', '-p', '/var/cache/ssh-rt-auth')
-    lxc_exec(TARGET_NAME, 'chown', 'mssh:mssh', '/var/cache/ssh-rt-auth')
-    lxc_exec(TARGET_NAME, 'chmod', '0700', '/var/cache/ssh-rt-auth')
+    lxc_exec(TARGET_NAME, 'mkdir', '-p', '/var/cache/mssh')
+    lxc_exec(TARGET_NAME, 'chown', 'mssh:mssh', '/var/cache/mssh')
+    lxc_exec(TARGET_NAME, 'chmod', '0700', '/var/cache/mssh')
 
     # sshd_config drop-in.
     push_text(TARGET_NAME,
               'PasswordAuthentication no\n'
               'PubkeyAuthentication yes\n'
               'AuthorizedKeysFile none\n'
-              'AuthorizedKeysCommand /usr/local/bin/ssh-rt-auth-openssh-shim '
+              'AuthorizedKeysCommand /usr/local/bin/mssh-openssh-shim '
               '%u %t %k\n'
               'AuthorizedKeysCommandUser mssh\n'
               # PAM tries to load environment from /etc/environment; make
               # sure SSHRT_SHIM_CONFIG can be picked up by the shim.
               'AcceptEnv SSHRT_SHIM_CONFIG\n',
-              '/etc/ssh/sshd_config.d/ssh-rt-auth.conf', mode='644')
+              '/etc/ssh/sshd_config.d/mssh.conf', mode='644')
 
     # Reload sshd. On Ubuntu 22.04 the service is `ssh`.
     lxc_exec(TARGET_NAME, 'systemctl', 'restart', 'ssh')
@@ -345,7 +345,7 @@ def test_openssh_shim_end_to_end(request, tmp_path_factory):
                               '-n', '40', '--no-pager', check=False)
                 op.attach('sshd_journal', jr.stdout)
                 ar = lxc_exec(CA_NAME, 'tail', '-n', '10',
-                              '/var/log/ssh-rt-auth/audit.jsonl',
+                              '/var/log/mssh/audit.jsonl',
                               check=False)
                 op.attach('ca_audit_tail', ar.stdout)
                 failures.append((user, expected, actual))
@@ -355,7 +355,7 @@ def test_openssh_shim_end_to_end(request, tmp_path_factory):
     # for alice (issue 9.2); with SQLite there should be exactly one.
     section('Verifying SQLite cache de-duped the double AuthorizedKeysCommand call')
     audit = lxc_exec(CA_NAME, 'cat',
-                     '/var/log/ssh-rt-auth/audit.jsonl', check=False)
+                     '/var/log/mssh/audit.jsonl', check=False)
     import json
     alice_grants = [
         e for e in (json.loads(line) for line in
@@ -369,9 +369,9 @@ def test_openssh_shim_end_to_end(request, tmp_path_factory):
           file=sys.stderr, flush=True)
     cache_present = lxc_exec(
         TARGET_NAME, 'sh', '-c',
-        'ls -la /var/cache/ssh-rt-auth/cert-cache.sqlite3 2>&1; '
+        'ls -la /var/cache/mssh/cert-cache.sqlite3 2>&1; '
         'echo "---"; '
-        'sqlite3 /var/cache/ssh-rt-auth/cert-cache.sqlite3 '
+        'sqlite3 /var/cache/mssh/cert-cache.sqlite3 '
         '"SELECT fingerprint, source_ip, serial FROM cert_cache" 2>&1 || true',
         check=False)
     print(f'  cache state on target:\n{cache_present.stdout}',

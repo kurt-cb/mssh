@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ssh-rt-auth shim for unmodified OpenSSH (AuthorizedKeysCommand).
+"""mssh shim for unmodified OpenSSH (AuthorizedKeysCommand).
 
 OpenSSH's ``sshd`` already supports plugging in an external authorized-keys
 provider via the ``AuthorizedKeysCommand`` config directive (man sshd_config,
@@ -14,14 +14,14 @@ it works against stock OpenSSH on Ubuntu/Debian.
 
 Install:
 
-    /usr/local/bin/ssh-rt-auth-openssh-shim    # this file, mode 0755, owner root
+    /usr/local/bin/mssh-openssh-shim    # this file, mode 0755, owner root
 
-Configure in ``/etc/ssh/sshd_config.d/ssh-rt-auth.conf`` (or main config)::
+Configure in ``/etc/ssh/sshd_config.d/mssh.conf`` (or main config)::
 
     PasswordAuthentication no
     PubkeyAuthentication   yes
     AuthorizedKeysFile     none
-    AuthorizedKeysCommand     /usr/local/bin/ssh-rt-auth-openssh-shim %u %t %k
+    AuthorizedKeysCommand     /usr/local/bin/mssh-openssh-shim %u %t %k
     AuthorizedKeysCommandUser mssh
 
 And reload sshd::
@@ -32,11 +32,11 @@ The shim is a short-lived subprocess (one fresh process per call), so it
 **must** use the persistent SQLite cache backend rather than the in-memory
 one — otherwise every invocation re-queries the CA and the audit log gets
 duplicate entries (sshd routinely calls ``AuthorizedKeysCommand`` twice per
-accepted connection). Set this in ``/etc/ssh-rt-auth/shim.yaml``::
+accepted connection). Set this in ``/etc/mssh/shim.yaml``::
 
     cache:
       backend: sqlite
-      db_path: /var/cache/ssh-rt-auth/cert-cache.sqlite3
+      db_path: /var/cache/mssh/cert-cache.sqlite3
 
 The shim auto-promotes the backend to ``sqlite`` if the config still says
 ``memory``, since the in-memory path is always wrong for this caller.
@@ -145,14 +145,14 @@ def _ipv6_from_hex(hex32: str) -> str:
 def main(argv: list[str]) -> int:
     if len(argv) < 4:
         sys.stderr.write(
-            'usage: ssh-rt-auth-openssh-shim <username> <key-type> '
+            'usage: mssh-openssh-shim <username> <key-type> '
             '<base64-key>\n')
         return 1
 
     username, key_type, key_blob_b64 = argv[1], argv[2], argv[3]
 
     # Allow the install to vendor the source tree somewhere other than /app
-    # and the shim config somewhere other than /etc/ssh-rt-auth/shim.yaml.
+    # and the shim config somewhere other than /etc/mssh/shim.yaml.
     sys.path.insert(0, os.environ.get('SSHRT_SRC_ROOT', '/app'))
 
     # Importing here (rather than at module top) keeps the script cheap to
@@ -161,7 +161,7 @@ def main(argv: list[str]) -> int:
     from mssh.shim.config import ShimConfig
 
     cfg_path = os.environ.get(
-        'SSHRT_SHIM_CONFIG', '/etc/ssh-rt-auth/shim.yaml')
+        'SSHRT_SHIM_CONFIG', '/etc/mssh/shim.yaml')
     try:
         cfg = ShimConfig.load(cfg_path)
         # Force SQLite for this caller — see module docstring for why.
@@ -171,13 +171,13 @@ def main(argv: list[str]) -> int:
     except Exception as e:
         # Misconfiguration — fail closed (no key line → sshd denies). We
         # write the error to stderr so it lands in the sshd auth log.
-        sys.stderr.write(f'ssh-rt-auth-openssh-shim: config error: {e}\n')
+        sys.stderr.write(f'mssh-openssh-shim: config error: {e}\n')
         return 1
 
     try:
         key_blob = base64.b64decode(key_blob_b64, validate=True)
     except Exception as e:
-        sys.stderr.write(f'ssh-rt-auth-openssh-shim: bad b64 key blob: {e}\n')
+        sys.stderr.write(f'mssh-openssh-shim: bad b64 key blob: {e}\n')
         return 1
 
     source_ip = _resolve_source_ip() or '0.0.0.0'
@@ -206,13 +206,13 @@ def main(argv: list[str]) -> int:
         sys.stdout.flush()
         # Optional diagnostic for the operator's sshd auth log.
         sys.stderr.write(
-            f'ssh-rt-auth-openssh-shim: granted user={username} '
+            f'mssh-openssh-shim: granted user={username} '
             f'fp-prefix={key_blob_b64[:24]}… serial={outcome.serial} '
             f'source_ip={source_ip}\n')
         return 0
 
     sys.stderr.write(
-        f'ssh-rt-auth-openssh-shim: denied user={username} '
+        f'mssh-openssh-shim: denied user={username} '
         f'reason={outcome.deny_reason or outcome.detail!r} '
         f'source_ip={source_ip}\n')
     # Returning 0 with no stdout is sshd-equivalent to "no key matched".

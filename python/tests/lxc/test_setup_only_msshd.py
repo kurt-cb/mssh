@@ -17,7 +17,7 @@ provisioning.
 
 Containers (FIXED names, stomped on each run):
 
-    mssh-adhoc-ca       CA + ssh-rt-admin
+    mssh-adhoc-ca       CA + mssh-admin
     mssh-adhoc-acct     Accounting SSH server
     mssh-adhoc-sales    Sales SSH server
     mssh-adhoc-hr       HR SSH server
@@ -404,7 +404,7 @@ def _wrapper_yaml_fallback() -> str:
         f'logging:\n'
         f'  level: info\n'
         f'  destination: stderr\n'
-        f'  audit_destination: file:/var/log/ssh-rt-auth/wrapper-audit.jsonl\n'
+        f'  audit_destination: file:/var/log/mssh/wrapper-audit.jsonl\n'
     )
 
 
@@ -416,14 +416,14 @@ def _wrapper_yaml_enforce(ca_ip: str) -> str:
         f'  external_port: {MSSHD_PORT}\n'
         f'  interfaces: []\n'
         f'tls:\n'
-        f'  server_cert: /etc/ssh-rt-auth/wrapper-server.crt\n'
-        f'  server_key:  /etc/ssh-rt-auth/wrapper-server.key\n'
-        f'  user_ca_pubkey: /etc/ssh-rt-auth/user-ca.pub\n'
+        f'  server_cert: /etc/mssh/wrapper-server.crt\n'
+        f'  server_key:  /etc/mssh/wrapper-server.key\n'
+        f'  user_ca_pubkey: /etc/mssh/user-ca.pub\n'
         f'ca:\n'
         f'  endpoints: [https://{ca_ip}:{CA_PORT}]\n'
-        f'  client_cert: /etc/ssh-rt-auth/wrapper-mtls.crt\n'
-        f'  client_key:  /etc/ssh-rt-auth/wrapper-mtls.key\n'
-        f'  ca_pubkey:   /etc/ssh-rt-auth/server-mtls-ca.pub\n'
+        f'  client_cert: /etc/mssh/wrapper-mtls.crt\n'
+        f'  client_key:  /etc/mssh/wrapper-mtls.key\n'
+        f'  ca_pubkey:   /etc/mssh/server-mtls-ca.pub\n'
         f'  timeout_seconds: 5\n'
         f'inner:\n'
         f'  sshd_binary: /usr/sbin/sshd\n'
@@ -433,19 +433,19 @@ def _wrapper_yaml_enforce(ca_ip: str) -> str:
         f'logging:\n'
         f'  level: info\n'
         f'  destination: stderr\n'
-        f'  audit_destination: file:/var/log/ssh-rt-auth/wrapper-audit.jsonl\n'
+        f'  audit_destination: file:/var/log/mssh/wrapper-audit.jsonl\n'
     )
 
 
 def _systemd_msshd_unit() -> str:
     return (
-        '[Unit]\nDescription=ssh-rt-auth wrapper (msshd)\n'
+        '[Unit]\nDescription=mssh wrapper (msshd)\n'
         'After=network-online.target\n'
         '[Service]\nWorkingDirectory=/app\n'
         'Environment="PYTHONPATH=/app/src"\n'
-        'Environment="SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/ssh-rt-auth"\n'
+        'Environment="SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh"\n'
         'ExecStart=/usr/bin/python3 -m mssh.msshd '
-        '--config /etc/ssh-rt-auth/wrapper.yaml\n'
+        '--config /etc/mssh/wrapper.yaml\n'
         'Restart=on-failure\nStandardError=journal\n'
         '[Install]\nWantedBy=multi-user.target\n'
     )
@@ -460,11 +460,11 @@ def _install_msshd(c: str, *, mode: str,
     yaml = (_wrapper_yaml_fallback() if mode == 'fallback'
             else _wrapper_yaml_enforce(ca_ip))
     lxc_exec(c, 'mkdir', '-p',
-             '/etc/ssh-rt-auth',
-             '/var/lib/ssh-rt-auth',
-             '/var/lib/ssh-rt-auth/inner-sshd',
-             '/var/log/ssh-rt-auth')
-    push_text(c, yaml, '/etc/ssh-rt-auth/wrapper.yaml', mode='644')
+             '/etc/mssh',
+             '/var/lib/mssh',
+             '/var/lib/mssh/inner-sshd',
+             '/var/log/mssh')
+    push_text(c, yaml, '/etc/mssh/wrapper.yaml', mode='644')
 
     if _is_alpine(c):
         # Kill any prior instance, then nohup.
@@ -473,10 +473,10 @@ def _install_msshd(c: str, *, mode: str,
                  check=False)
         lxc_exec(c, 'sh', '-c',
                  'cd /app && PYTHONPATH=/app/src '
-                 'SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/ssh-rt-auth '
+                 'SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh '
                  'nohup /usr/bin/python3 -m mssh.msshd '
-                 '--config /etc/ssh-rt-auth/wrapper.yaml '
-                 '> /var/log/ssh-rt-auth/msshd.log 2>&1 & '
+                 '--config /etc/mssh/wrapper.yaml '
+                 '> /var/log/mssh/msshd.log 2>&1 & '
                  'echo $! > /run/msshd.pid')
     else:
         push_text(c, _systemd_msshd_unit(),
@@ -488,7 +488,7 @@ def _install_msshd(c: str, *, mode: str,
         wait_for_port(c, MSSHD_PORT, max_wait=30)
     except Exception:
         if _is_alpine(c):
-            log = lxc_exec(c, 'cat', '/var/log/ssh-rt-auth/msshd.log',
+            log = lxc_exec(c, 'cat', '/var/log/mssh/msshd.log',
                            check=False)
             print(f'--- msshd log on {c} ---\n{log.stdout or ""}',
                   file=sys.stderr)
@@ -511,19 +511,19 @@ def _push_msshd_cert_material(server: _Server, *,
     even when in fallback mode (msshd ignores it)."""
     c = server.container
     lxc_exec(c, 'mkdir', '-p',
-             '/etc/ssh-rt-auth',
-             '/var/lib/ssh-rt-auth',
-             '/var/lib/ssh-rt-auth/inner-sshd')
-    push_file(c, wrapper_cert, '/etc/ssh-rt-auth/wrapper-server.crt', mode='644')
-    push_file(c, wrapper_key,  '/etc/ssh-rt-auth/wrapper-server.key', mode='600')
-    push_file(c, user_ca_pub,  '/etc/ssh-rt-auth/user-ca.pub', mode='644')
-    push_file(c, wrapper_mtls_cert, '/etc/ssh-rt-auth/wrapper-mtls.crt', mode='644')
-    push_file(c, wrapper_mtls_key,  '/etc/ssh-rt-auth/wrapper-mtls.key', mode='600')
-    push_file(c, ca_tls_root, '/etc/ssh-rt-auth/server-mtls-ca.pub', mode='644')
+             '/etc/mssh',
+             '/var/lib/mssh',
+             '/var/lib/mssh/inner-sshd')
+    push_file(c, wrapper_cert, '/etc/mssh/wrapper-server.crt', mode='644')
+    push_file(c, wrapper_key,  '/etc/mssh/wrapper-server.key', mode='600')
+    push_file(c, user_ca_pub,  '/etc/mssh/user-ca.pub', mode='644')
+    push_file(c, wrapper_mtls_cert, '/etc/mssh/wrapper-mtls.crt', mode='644')
+    push_file(c, wrapper_mtls_key,  '/etc/mssh/wrapper-mtls.key', mode='600')
+    push_file(c, ca_tls_root, '/etc/mssh/server-mtls-ca.pub', mode='644')
     push_file(c, str(wrapper_user_ca_priv),
-              '/var/lib/ssh-rt-auth/wrapper-user-ca', mode='600')
+              '/var/lib/mssh/wrapper-user-ca', mode='600')
     push_file(c, str(wrapper_user_ca_pub),
-              '/var/lib/ssh-rt-auth/inner-sshd/wrapper-user-ca.pub', mode='644')
+              '/var/lib/mssh/inner-sshd/wrapper-user-ca.pub', mode='644')
 
 
 # ---------------------------------------------------------------------------
@@ -644,10 +644,10 @@ def _msshd_restart_cmd(server: _Server) -> str:
         return (
             f'fuser -k -9 {MSSHD_PORT}/tcp 2>/dev/null; sleep 1; '
             f'cd /app && PYTHONPATH=/app/src '
-            f'SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/ssh-rt-auth '
+            f'SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh '
             f'nohup /usr/bin/python3 -m mssh.msshd '
-            f'--config /etc/ssh-rt-auth/wrapper.yaml '
-            f'> /var/log/ssh-rt-auth/msshd.log 2>&1 & '
+            f'--config /etc/mssh/wrapper.yaml '
+            f'> /var/log/mssh/msshd.log 2>&1 & '
             f'echo $! > /run/msshd.pid'
         )
     return 'systemctl restart msshd'
@@ -715,13 +715,13 @@ flip_one() {{
 
     # Backup, push new, restart.
     if ! ssh $SSH_N root@$ip \\
-            'cp /etc/ssh-rt-auth/wrapper.yaml /tmp/wrapper.yaml.bak' \\
+            'cp /etc/mssh/wrapper.yaml /tmp/wrapper.yaml.bak' \\
             2>/dev/null; then
         echo "SSH UNREACHABLE — skipped"
         return 1
     fi
     printf '%s' "$WRAPPER_YAML" | ssh $SSH_OPTS root@$ip \\
-        'cat > /etc/ssh-rt-auth/wrapper.yaml'
+        'cat > /etc/mssh/wrapper.yaml'
     ssh $SSH_N root@$ip "$restart" >/dev/null 2>&1
     sleep 3
 
@@ -733,7 +733,7 @@ flip_one() {{
     # Verify failed: revert.
     echo "FAILED — reverting"
     ssh $SSH_N root@$ip \\
-        'cp /tmp/wrapper.yaml.bak /etc/ssh-rt-auth/wrapper.yaml' \\
+        'cp /tmp/wrapper.yaml.bak /etc/mssh/wrapper.yaml' \\
         2>/dev/null
     ssh $SSH_N root@$ip "$restart" >/dev/null 2>&1
     return 1
@@ -877,8 +877,8 @@ You don't normally need this, but for debugging it's useful:
 
 ```bash
 lxc exec {ACCT_NAME} -- su - alice    # interactive shell as alice in acct
-lxc exec {CA_NAME}   -- cat /var/log/ssh-rt-auth/audit.jsonl
-lxc exec {CA_NAME}   -- journalctl -u ssh-rt-auth-ca --no-pager -n 50
+lxc exec {CA_NAME}   -- cat /var/log/mssh/audit.jsonl
+lxc exec {CA_NAME}   -- journalctl -u mssh-ca --no-pager -n 50
 ```
 
 The full container names are `{CA_NAME}`, `{ACCT_NAME}`,
@@ -1111,48 +1111,48 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
     lxc_exec(CA_NAME, 'sh', '-c',
              'PYTHONPATH=/app/src python3 -c "'
              'from mssh.ca.cert_minter import bootstrap_ca; '
-             f"bootstrap_ca('/etc/ssh-rt-auth/ca', "
+             f"bootstrap_ca('/etc/mssh/ca', "
              f"tls_server_sans=['DNS:localhost','IP:127.0.0.1',"
              f"'IP:{ips[CA_NAME]}'])\"", timeout=120)
     lxc_exec(CA_NAME, 'sh', '-c',
              'python3 -c "import yaml; '
-             "open('/etc/ssh-rt-auth/ca/enrollment.yaml','w').write("
+             "open('/etc/mssh/ca/enrollment.yaml','w').write("
              "yaml.safe_dump({'admins': {'bootstrap-admin': "
              "{'role':'superuser','mtls_subject':'CN=bootstrap-admin',"
              "'enrolled_at':'','enrolled_by':'init'}}}))\"")
     push_text(CA_NAME,
               f'listen: 0.0.0.0:{CA_PORT}\n'
-              'signing_key: /etc/ssh-rt-auth/ca/signing-key.pem\n'
-              'signing_cert: /etc/ssh-rt-auth/ca/signing-cert.pem\n'
-              'tls_cert: /etc/ssh-rt-auth/ca/tls-server-cert.pem\n'
-              'tls_key:  /etc/ssh-rt-auth/ca/tls-server-key.pem\n'
-              'client_ca_cert: /etc/ssh-rt-auth/ca/tls-ca-cert.pem\n'
+              'signing_key: /etc/mssh/ca/signing-key.pem\n'
+              'signing_cert: /etc/mssh/ca/signing-cert.pem\n'
+              'tls_cert: /etc/mssh/ca/tls-server-cert.pem\n'
+              'tls_key:  /etc/mssh/ca/tls-server-key.pem\n'
+              'client_ca_cert: /etc/mssh/ca/tls-ca-cert.pem\n'
               'identity_trust_roots: []\n'
-              'enrollment: {path: /etc/ssh-rt-auth/ca/enrollment.yaml}\n'
-              'audit: {path: /var/log/ssh-rt-auth/audit.jsonl}\n'
+              'enrollment: {path: /etc/mssh/ca/enrollment.yaml}\n'
+              'audit: {path: /var/log/mssh/audit.jsonl}\n'
               'defaults: {max_cert_validity_seconds: 3600, '
               'timestamp_drift_seconds: 600}\n'
               'cert_generation: {key_type: ec, '
               'server_cert_validity_days: 30, '
               'admin_cert_validity_days: 30}\n',
-              '/etc/ssh-rt-auth/ca-config.yaml')
+              '/etc/mssh/ca-config.yaml')
     push_text(CA_NAME,
-              '[Unit]\nDescription=ssh-rt-auth CA\nAfter=network.target\n'
+              '[Unit]\nDescription=mssh CA\nAfter=network.target\n'
               '[Service]\nWorkingDirectory=/app\nEnvironment="PYTHONPATH=/app/src"\n'
               'ExecStart=/usr/bin/python3 -m mssh.ca.server --config '
-              '/etc/ssh-rt-auth/ca-config.yaml\nRestart=on-failure\n'
+              '/etc/mssh/ca-config.yaml\nRestart=on-failure\n'
               '[Install]\nWantedBy=multi-user.target\n',
-              '/etc/systemd/system/ssh-rt-auth-ca.service')
-    lxc_exec(CA_NAME, 'mkdir', '-p', '/var/log/ssh-rt-auth')
+              '/etc/systemd/system/mssh-ca.service')
+    lxc_exec(CA_NAME, 'mkdir', '-p', '/var/log/mssh')
     lxc_exec(CA_NAME, 'systemctl', 'daemon-reload')
-    lxc_exec(CA_NAME, 'systemctl', 'start', 'ssh-rt-auth-ca')
+    lxc_exec(CA_NAME, 'systemctl', 'start', 'mssh-ca')
     wait_for_port(CA_NAME, CA_PORT, max_wait=60)
 
     # Pull admin creds + build a CAClient for enrollment.
     for n in ('bootstrap-admin-cert.pem', 'bootstrap-admin-key.pem',
               'tls-ca-cert.pem', 'signing-cert.pem'):
         subprocess.run(['lxc', 'file', 'pull',
-                        f'{CA_NAME}/etc/ssh-rt-auth/ca/{n}',
+                        f'{CA_NAME}/etc/mssh/ca/{n}',
                         str(ca_creds_dir / n)],
                        check=True, capture_output=True)
     os.chmod(ca_creds_dir / 'bootstrap-admin-key.pem', 0o600)

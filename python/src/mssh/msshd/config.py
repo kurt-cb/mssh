@@ -5,7 +5,7 @@ is dataclass-based with explicit field types; ``validate()`` performs
 cross-field checks and on-disk-permission checks for cert/key paths.
 
 The wrapper YAML is intentionally small — see
-[detailed-wrapper.md § 11](../../design/ssh-rt-auth-detailed-wrapper.md).
+[detailed-wrapper.md § 11](../../design/mssh-detailed-wrapper.md).
 Operators do not edit the inner sshd config; that is rendered hermetically
 by the wrapper from a template that ships in the wrapper package.
 """
@@ -68,7 +68,7 @@ class UsersConfig:
 class LoggingConfig:
     level: str = 'info'
     destination: str = 'stderr'
-    audit_destination: str = 'file:/var/log/ssh-rt-auth/wrapper-audit.jsonl'
+    audit_destination: str = 'file:/var/log/mssh/wrapper-audit.jsonl'
 
 
 @dataclass
@@ -162,7 +162,7 @@ class WrapperConfig:
                 destination=str(log_.get('destination') or 'stderr'),
                 audit_destination=str(
                     log_.get('audit_destination')
-                    or 'file:/var/log/ssh-rt-auth/wrapper-audit.jsonl'),
+                    or 'file:/var/log/mssh/wrapper-audit.jsonl'),
             ),
             performance=PerformanceConfig(
                 inner_cipher_none=bool(perf.get('inner_cipher_none')),

@@ -1,4 +1,4 @@
-"""ssh-rt-admin CLI entry point (click-based)."""
+"""mssh-admin CLI entry point (click-based)."""
 from __future__ import annotations
 
 import os
@@ -16,7 +16,7 @@ from .client import CAClient, CAClientError
 from .key_parser import b64_blob, parse_key_file
 
 
-CONFIG_PATH_DEFAULT = Path.home() / '.ssh-rt-admin' / 'config'
+CONFIG_PATH_DEFAULT = Path.home() / '.mssh-admin' / 'config'
 
 
 def _load_cli_config(path: str | Path | None) -> dict[str, Any]:
@@ -36,7 +36,7 @@ def _make_client(ctx: click.Context) -> CAClient:
     if not all([ca_url, cert, key, ca_cert]):
         raise click.UsageError(
             'must provide --ca-url, --admin-cert, --admin-key, --ca-cert '
-            '(or set them in ~/.ssh-rt-admin/config)')
+            '(or set them in ~/.mssh-admin/config)')
     return CAClient(base_url=ca_url, admin_cert=cert, admin_key=key,
                     ca_cert=ca_cert)
 
@@ -59,7 +59,7 @@ def _handle_call(fn, *args, **kwargs):
 
 @click.group()
 @click.option('--config', 'config_path', type=click.Path(),
-              help='Path to ssh-rt-admin config (default: ~/.ssh-rt-admin/config).')
+              help='Path to mssh-admin config (default: ~/.mssh-admin/config).')
 @click.option('--ca-url')
 @click.option('--admin-cert', type=click.Path())
 @click.option('--admin-key', type=click.Path())
@@ -68,7 +68,7 @@ def _handle_call(fn, *args, **kwargs):
               type=click.Choice(['table', 'json', 'yaml']), default='table')
 @click.pass_context
 def cli(ctx, config_path, ca_url, admin_cert, admin_key, ca_cert, output_format):
-    """ssh-rt-admin — management CLI for ssh-rt-auth."""
+    """mssh-admin — management CLI for mssh."""
     ctx.ensure_object(dict)
     ctx.obj['_config'] = _load_cli_config(config_path)
     ctx.obj['ca_url'] = ca_url
@@ -87,7 +87,7 @@ def cli(ctx, config_path, ca_url, admin_cert, admin_key, ca_cert, output_format)
               help='Directory to write CA keys and certs into.')
 @click.option('--bootstrap-admin', default='bootstrap-admin',
               help='CN for the initial superuser admin cert.')
-@click.option('--tls-server-cn', default='ssh-rt-auth-ca',
+@click.option('--tls-server-cn', default='mssh-ca',
               help='CN for the CA\'s TLS server cert.')
 @click.option('--tls-server-san', multiple=True,
               help='SubjectAltName for the CA\'s TLS server cert (repeatable). '

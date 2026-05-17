@@ -71,14 +71,14 @@ SSHD_PORT = 12222
 
 # The patches live at <repo-root>/openssh-patches/patches/. The
 # openssh-portable submodule itself is *not* absorbed — operators
-# clone it themselves (or use the sibling ssh-rt-auth-openssh repo
+# clone it themselves (or use the sibling mssh-openssh repo
 # if they already have one). The env var SSHRT_OPENSSH_PORTABLE
 # can override the source path.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _OPENSSH_REPO = _REPO_ROOT / 'openssh-patches'
 _OPENSSH_PORTABLE = Path(os.environ.get(
     'SSHRT_OPENSSH_PORTABLE',
-    str(_REPO_ROOT.parent / 'ssh-rt-auth-openssh' / 'openssh-portable')))
+    str(_REPO_ROOT.parent / 'mssh-openssh' / 'openssh-portable')))
 
 
 # Apt packages needed for build + run.

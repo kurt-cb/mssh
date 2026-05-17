@@ -1,1 +1,1 @@
-"""AsyncSSH SSH server with ssh-rt-auth shim integration."""
+"""AsyncSSH SSH server with mssh shim integration."""

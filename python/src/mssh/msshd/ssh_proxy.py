@@ -11,7 +11,7 @@ module:
        - interactive → conn.create_session(..., term_type=...)
   4. Pumps bytes between the outer stream and the inner SSH session.
 
-Protocol: see design/ssh-rt-auth-detailed-wrapper.md §3.
+Protocol: see design/mssh-detailed-wrapper.md §3.
 """
 from __future__ import annotations
 

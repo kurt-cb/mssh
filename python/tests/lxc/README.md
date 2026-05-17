@@ -1,12 +1,12 @@
 # LXC Integration Tests
 
 Modeled on the sshadmin LXC suite. Spins up real LXC containers and exercises
-the ssh-rt-auth flow end-to-end.
+the mssh flow end-to-end.
 
 ## Topology
 
 ```
-mssh-lxc-ca       Ubuntu 22.04   Flask CA + ssh-rt-admin
+mssh-lxc-ca       Ubuntu 22.04   Flask CA + mssh-admin
 mssh-lxc-u1       Ubuntu 22.04   sshd + Python shim
 mssh-lxc-u2       Ubuntu 22.04   sshd + Python shim
 mssh-lxc-u3       Ubuntu 22.04   sshd + Python shim
@@ -27,7 +27,7 @@ superusers), generated deterministically from a per-run seed by
 ## Running
 
 ```bash
-cd /home/kgodwin/ssh-rt-auth
+cd /home/kgodwin/mssh
 # Phase 1 — deployment validation only
 pytest tests/lxc/test_deployment_validation.py -v
 

@@ -20,7 +20,7 @@ Today the install is:
 ```bash
 # On every machine that runs any mssh component:
 git clone https://github.com/kurt-cb/ssh-rt-auth.git
-cd ssh-rt-auth/python
+cd mssh/python
 pip install -e .
 ```
 
@@ -311,7 +311,7 @@ Install (optional extra):
 pip install -e '.[mcp]'      # or `pip install mssh[mcp]` after release
 ```
 
-Configure: `mssh-mcp` reads `~/.ssh-rt-admin/config` (same fields as
+Configure: `mssh-mcp` reads `~/.mssh-admin/config` (same fields as
 `mssh-admin`). Then register the server with your MCP client. For
 Claude Desktop, add to `claude_desktop_config.json`:
 

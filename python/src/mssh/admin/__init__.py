@@ -1,1 +1,1 @@
-"""ssh-rt-admin management CLI."""
+"""mssh-admin management CLI."""

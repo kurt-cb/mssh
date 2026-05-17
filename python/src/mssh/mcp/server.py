@@ -1,6 +1,6 @@
 """mssh-mcp — MCP server, stdio transport.
 
-Reads admin client config from ~/.ssh-rt-admin/config (same as
+Reads admin client config from ~/.mssh-admin/config (same as
 mssh-admin uses) and exposes the read-only tool registry over MCP's
 stdio transport. The intended use: register this server in Claude
 Desktop / a local MCP client; ask read-only questions about the
@@ -35,7 +35,7 @@ from . import tools
 log = logging.getLogger('mssh.mcp')
 
 
-DEFAULT_CONFIG_PATH = Path.home() / '.ssh-rt-admin' / 'config'
+DEFAULT_CONFIG_PATH = Path.home() / '.mssh-admin' / 'config'
 
 
 def _load_admin_config(path: Path) -> dict:
@@ -131,7 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument('--config', default=os.environ.get('MSSH_ADMIN_CONFIG'),
                    help='Path to admin client config '
-                        '(default: ~/.ssh-rt-admin/config).')
+                        '(default: ~/.mssh-admin/config).')
     p.add_argument('--log-level', default='warning',
                    choices=['debug', 'info', 'warning', 'error'])
     args = p.parse_args(argv)

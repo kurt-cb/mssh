@@ -172,14 +172,14 @@ def wrapper_yaml_enforce(ca_ip: str, ca_port: int = 8443,
         f'  external_port: {msshd_port}\n'
         f'  interfaces: []\n'
         f'tls:\n'
-        f'  server_cert: /etc/ssh-rt-auth/wrapper-server.crt\n'
-        f'  server_key:  /etc/ssh-rt-auth/wrapper-server.key\n'
-        f'  user_ca_pubkey: /etc/ssh-rt-auth/user-ca.pub\n'
+        f'  server_cert: /etc/mssh/wrapper-server.crt\n'
+        f'  server_key:  /etc/mssh/wrapper-server.key\n'
+        f'  user_ca_pubkey: /etc/mssh/user-ca.pub\n'
         f'ca:\n'
         f'  endpoints: [https://{ca_ip}:{ca_port}]\n'
-        f'  client_cert: /etc/ssh-rt-auth/wrapper-mtls.crt\n'
-        f'  client_key:  /etc/ssh-rt-auth/wrapper-mtls.key\n'
-        f'  ca_pubkey:   /etc/ssh-rt-auth/server-mtls-ca.pub\n'
+        f'  client_cert: /etc/mssh/wrapper-mtls.crt\n'
+        f'  client_key:  /etc/mssh/wrapper-mtls.key\n'
+        f'  ca_pubkey:   /etc/mssh/server-mtls-ca.pub\n'
         f'  timeout_seconds: 5\n'
         f'inner:\n'
         f'  sshd_binary: /usr/sbin/sshd\n'
@@ -189,7 +189,7 @@ def wrapper_yaml_enforce(ca_ip: str, ca_port: int = 8443,
         f'logging:\n'
         f'  level: info\n'
         f'  destination: stderr\n'
-        f'  audit_destination: file:/var/log/ssh-rt-auth/wrapper-audit.jsonl\n'
+        f'  audit_destination: file:/var/log/mssh/wrapper-audit.jsonl\n'
     )
 
 
@@ -199,9 +199,9 @@ def systemd_msshd_unit() -> str:
         'After=network-online.target\n'
         '[Service]\nWorkingDirectory=/app\n'
         'Environment="PYTHONPATH=/app/src"\n'
-        'Environment="SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/ssh-rt-auth"\n'
+        'Environment="SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh"\n'
         'ExecStart=/usr/bin/python3 -m mssh.msshd '
-        '--config /etc/ssh-rt-auth/wrapper.yaml\n'
+        '--config /etc/mssh/wrapper.yaml\n'
         'Restart=on-failure\nStandardError=journal\n'
         '[Install]\nWantedBy=multi-user.target\n'
     )
@@ -220,26 +220,26 @@ def push_msshd_cert_material(container: str, *, alpine: bool = False,
                              wrapper_user_ca_pub: Path) -> None:
     """Push every cert + key + trust root msshd-enforce needs."""
     lxc_exec(container, 'mkdir', '-p',
-             '/etc/ssh-rt-auth',
-             '/var/lib/ssh-rt-auth',
-             '/var/lib/ssh-rt-auth/inner-sshd',
-             '/var/log/ssh-rt-auth')
+             '/etc/mssh',
+             '/var/lib/mssh',
+             '/var/lib/mssh/inner-sshd',
+             '/var/log/mssh')
     push_file(container, wrapper_cert,
-              '/etc/ssh-rt-auth/wrapper-server.crt', mode='644')
+              '/etc/mssh/wrapper-server.crt', mode='644')
     push_file(container, wrapper_key,
-              '/etc/ssh-rt-auth/wrapper-server.key', mode='600')
+              '/etc/mssh/wrapper-server.key', mode='600')
     push_file(container, user_ca_pub,
-              '/etc/ssh-rt-auth/user-ca.pub', mode='644')
+              '/etc/mssh/user-ca.pub', mode='644')
     push_file(container, str(wrapper_mtls_cert),
-              '/etc/ssh-rt-auth/wrapper-mtls.crt', mode='644')
+              '/etc/mssh/wrapper-mtls.crt', mode='644')
     push_file(container, str(wrapper_mtls_key),
-              '/etc/ssh-rt-auth/wrapper-mtls.key', mode='600')
+              '/etc/mssh/wrapper-mtls.key', mode='600')
     push_file(container, str(ca_tls_root),
-              '/etc/ssh-rt-auth/server-mtls-ca.pub', mode='644')
+              '/etc/mssh/server-mtls-ca.pub', mode='644')
     push_file(container, str(wrapper_user_ca_priv),
-              '/var/lib/ssh-rt-auth/wrapper-user-ca', mode='600')
+              '/var/lib/mssh/wrapper-user-ca', mode='600')
     push_file(container, str(wrapper_user_ca_pub),
-              '/var/lib/ssh-rt-auth/inner-sshd/wrapper-user-ca.pub',
+              '/var/lib/mssh/inner-sshd/wrapper-user-ca.pub',
               mode='644')
 
 
@@ -253,9 +253,9 @@ def start_msshd_enforce(container: str, *, ca_ip: str,
     """
     yaml = wrapper_yaml_enforce(ca_ip, msshd_port=msshd_port)
     lxc_exec(container, 'mkdir', '-p',
-             '/etc/ssh-rt-auth', '/var/lib/ssh-rt-auth',
-             '/var/lib/ssh-rt-auth/inner-sshd', '/var/log/ssh-rt-auth')
-    push_text(container, yaml, '/etc/ssh-rt-auth/wrapper.yaml', mode='644')
+             '/etc/mssh', '/var/lib/mssh',
+             '/var/lib/mssh/inner-sshd', '/var/log/mssh')
+    push_text(container, yaml, '/etc/mssh/wrapper.yaml', mode='644')
 
     if alpine:
         lxc_exec(container, 'sh', '-c',
@@ -263,10 +263,10 @@ def start_msshd_enforce(container: str, *, ca_ip: str,
                  check=False)
         lxc_exec(container, 'sh', '-c',
                  'cd /app && PYTHONPATH=/app/src '
-                 'SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/ssh-rt-auth '
+                 'SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh '
                  'nohup /usr/bin/python3 -m mssh.msshd '
-                 '--config /etc/ssh-rt-auth/wrapper.yaml '
-                 '> /var/log/ssh-rt-auth/msshd.log 2>&1 & '
+                 '--config /etc/mssh/wrapper.yaml '
+                 '> /var/log/mssh/msshd.log 2>&1 & '
                  'echo $! > /run/msshd.pid')
     else:
         push_text(container, systemd_msshd_unit(),
@@ -279,7 +279,7 @@ def start_msshd_enforce(container: str, *, ca_ip: str,
     except Exception:
         if alpine:
             log = lxc_exec(container, 'cat',
-                           '/var/log/ssh-rt-auth/msshd.log', check=False)
+                           '/var/log/mssh/msshd.log', check=False)
         else:
             log = lxc_exec(container, 'journalctl', '-u', 'msshd',
                            '--no-pager', '-n', '100', check=False)

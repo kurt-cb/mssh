@@ -7,7 +7,7 @@ JSON-lines entries for:
   - every admin operation (server.add, user.add, policy.add, ...)
   - mTLS attacks that reached the application layer (deny entries)
 
-This test reads ``/var/log/ssh-rt-auth/audit.jsonl`` from the CA container,
+This test reads ``/var/log/mssh/audit.jsonl`` from the CA container,
 classifies entries, and asserts:
 
   - all four scenario servers appear in admin audit entries
@@ -31,7 +31,7 @@ pytestmark = pytest.mark.lxc
 
 
 def _read_audit(container: str) -> list[dict]:
-    r = lxc_exec(container, 'cat', '/var/log/ssh-rt-auth/audit.jsonl',
+    r = lxc_exec(container, 'cat', '/var/log/mssh/audit.jsonl',
                  check=False)
     out = []
     for line in (r.stdout or '').splitlines():

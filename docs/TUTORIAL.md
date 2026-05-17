@@ -132,7 +132,7 @@ mssh_as alice sales whoami
 Now ask the CA why:
 
 ```bash
-lxc exec mssh-adhoc-ca -- cat /var/log/ssh-rt-auth/audit.jsonl \
+lxc exec mssh-adhoc-ca -- cat /var/log/mssh/audit.jsonl \
   | tail -1 | python3 -m json.tool
 ```
 
@@ -163,8 +163,8 @@ The same workstation creds in §2 let you ask the CA what it knows:
 
 ```bash
 # Save the verbose flags into a config so you don't retype them:
-mkdir -p ~/.ssh-rt-admin
-cat > ~/.ssh-rt-admin/config <<EOF
+mkdir -p ~/.mssh-admin
+cat > ~/.mssh-admin/config <<EOF
 ca_url: https://$(lxc list mssh-adhoc-ca --format csv -c 4 | awk '{print $1}'):8443
 admin_cert: $(pwd)/adhoc-ca-creds/bootstrap-admin-cert.pem
 admin_key:  $(pwd)/adhoc-ca-creds/bootstrap-admin-key.pem
@@ -219,7 +219,7 @@ For access issues: contact #ops on Slack.
 EOF
 
 # Tell wrapper.yaml to use it:
-lxc exec mssh-adhoc-acct -- sh -c "cat >> /etc/ssh-rt-auth/wrapper.yaml" <<'EOF'
+lxc exec mssh-adhoc-acct -- sh -c "cat >> /etc/mssh/wrapper.yaml" <<'EOF'
 
 banner:
   template_path: /etc/mssh/banner.txt
@@ -248,7 +248,7 @@ Revert the change before moving on:
 
 ```bash
 lxc exec mssh-adhoc-acct -- sh -c \
-  "sed -i '/^banner:/,/^$/d' /etc/ssh-rt-auth/wrapper.yaml \
+  "sed -i '/^banner:/,/^$/d' /etc/mssh/wrapper.yaml \
    && systemctl restart msshd"
 ```
 
@@ -300,7 +300,7 @@ design is that this is a one-line revert.
 # Flip back to Phase 1 (fallback) just for the sales server. This is
 # what the per-server rollback in MIGRATION.md § 4.4 looks like.
 lxc exec mssh-adhoc-sales -- sh -c \
-  "sed -i 's/^mode: enforce/mode: fallback/' /etc/ssh-rt-auth/wrapper.yaml \
+  "sed -i 's/^mode: enforce/mode: fallback/' /etc/mssh/wrapper.yaml \
    && systemctl restart msshd"
 
 # Now the other servers are still in enforce mode, but sales is
@@ -315,7 +315,7 @@ When you've fixed whatever was wrong, flip the single host back:
 
 ```bash
 lxc exec mssh-adhoc-sales -- sh -c \
-  "sed -i 's/^mode: fallback/mode: enforce/' /etc/ssh-rt-auth/wrapper.yaml \
+  "sed -i 's/^mode: fallback/mode: enforce/' /etc/mssh/wrapper.yaml \
    && systemctl restart msshd"
 ```
 
@@ -335,7 +335,7 @@ Every authorize call lands in the CA's audit log. For a real
 deployment-level look:
 
 ```bash
-lxc exec mssh-adhoc-ca -- tail -20 /var/log/ssh-rt-auth/audit.jsonl \
+lxc exec mssh-adhoc-ca -- tail -20 /var/log/mssh/audit.jsonl \
   | python3 -c 'import sys,json
 for line in sys.stdin:
     e = json.loads(line)

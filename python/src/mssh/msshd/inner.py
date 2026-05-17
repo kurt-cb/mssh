@@ -6,7 +6,7 @@ template that ships with the wrapper, hash-validated against an
 embedded known-good per OpenSSH version, and never edited by
 operators.
 
-See [detailed-wrapper.md §5](../../design/ssh-rt-auth-detailed-wrapper.md).
+See [detailed-wrapper.md §5](../../design/mssh-detailed-wrapper.md).
 
 Lifecycle:
   - ``InnerSshd.start()`` — render config, generate host key if absent,
@@ -92,7 +92,7 @@ def _find_template() -> Path:
 
     Checked in priority order:
       1. ``$SSHRT_SSHD_CONFIG_TEMPLATE`` env var (operator escape hatch).
-      2. ``/etc/ssh-rt-auth/sshd_config.template`` (installed location).
+      2. ``/etc/mssh/sshd_config.template`` (installed location).
       3. Walking up from this file, find the nearest ``config/sshd_config.template``.
          Handles both the development checkout layout (template at the
          repo root's ``config/``) and the LXC-test push-source layout
@@ -106,7 +106,7 @@ def _find_template() -> Path:
     if env_override:
         candidates.append(Path(env_override))
 
-    candidates.append(Path('/etc/ssh-rt-auth/sshd_config.template'))
+    candidates.append(Path('/etc/mssh/sshd_config.template'))
 
     # Walk up from this file's parents looking for `config/sshd_config.template`.
     here = Path(__file__).resolve()
@@ -115,7 +115,7 @@ def _find_template() -> Path:
         candidates.append(cand)
         # Stop walking once we leave a plausible project root (one of the
         # parents is named one of these).
-        if parent.name in ('src', 'python', 'ssh-rt-auth'):
+        if parent.name in ('src', 'python', 'mssh'):
             continue
         if parent == parent.parent:  # filesystem root
             break
@@ -134,7 +134,7 @@ class InnerSshdError(RuntimeError):
 
 class InnerSshd:
     def __init__(self, cfg: WrapperConfig, *,
-                 state_dir: str | Path = '/var/lib/ssh-rt-auth/inner-sshd',
+                 state_dir: str | Path = '/var/lib/mssh/inner-sshd',
                  user_ca_pubkey_path: str | Path | None = None):
         self.cfg = cfg
         self.state_dir = Path(state_dir)

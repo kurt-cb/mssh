@@ -19,7 +19,7 @@ Per-connection flow:
      cert against TrustedUserCAKeys, accepts, spawns the shell.
 
 Design refs:
-- [detailed-wrapper.md §6 + §7](../../design/ssh-rt-auth-detailed-wrapper.md)
+- [detailed-wrapper.md §6 + §7](../../design/mssh-detailed-wrapper.md)
 - OpenSSH cert format: PROTOCOL.certkeys
 """
 from __future__ import annotations
@@ -75,7 +75,7 @@ class UserCA:
     def public_key_openssh(self) -> bytes:
         """Wrapper-side accessor for the user-CA pubkey in OpenSSH
         authorized_keys format (one line, e.g.
-        ``ssh-ed25519 AAAA... ssh-rt-auth-wrapper-user-ca``)."""
+        ``ssh-ed25519 AAAA... mssh-user-ca``)."""
         return self._ca_key.export_public_key('openssh')
 
     @classmethod
@@ -83,7 +83,7 @@ class UserCA:
         """Generate a fresh Ed25519 user-CA keypair. Used by
         ``ssh-rt-wrapper-admin init``."""
         ca_key = asyncssh.generate_private_key('ssh-ed25519',
-                                                comment='ssh-rt-auth-wrapper-user-ca')
+                                                comment='mssh-user-ca')
         return cls(ca_key)
 
     @classmethod
@@ -164,7 +164,7 @@ class UserCA:
         user_key = asyncssh.generate_private_key('ssh-ed25519')
 
         if key_id is None:
-            key_id = f'ssh-rt-auth/{principal}/{cert_serial:x}'
+            key_id = f'mssh/{principal}/{cert_serial:x}'
 
         # Slight backdate on valid_after to defend against modest
         # clock drift between wrapper and inner sshd.

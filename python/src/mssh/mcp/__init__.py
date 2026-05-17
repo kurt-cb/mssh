@@ -9,7 +9,7 @@ Tools (v1, read-only):
   admin_list     — list enrolled admins
 
 Auth: connects to the CA over mTLS using the same admin client config
-mssh-admin reads (~/.ssh-rt-admin/config), so a single set of operator
+mssh-admin reads (~/.mssh-admin/config), so a single set of operator
 credentials works for both interfaces.
 
 Write tools (server_add, user_add, policy_add, key-rotate, …) are

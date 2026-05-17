@@ -1,9 +1,9 @@
-"""Set-up-only test for ad-hoc exploration of ssh-rt-auth.
+"""Set-up-only test for ad-hoc exploration of mssh.
 
 What this test does (one big function, no assertions of substance):
 
   1. Provisions a fresh set of LXC containers with FIXED names:
-       mssh-adhoc-ca           CA + ssh-rt-admin
+       mssh-adhoc-ca           CA + mssh-admin
        mssh-adhoc-acct         Accounting SSH server
        mssh-adhoc-sales        Sales SSH server
        mssh-adhoc-hr           HR SSH server
@@ -254,25 +254,25 @@ def _push_mtls_and_shim_config(server: _Server, ca_ip: str, *,
                                host_keys_dir: Path) -> None:
     """Push mTLS creds + shim config + AsyncSSH host key (no users yet)."""
     c = server.container
-    lxc_exec(c, 'mkdir', '-p', '/etc/ssh-rt-auth/server')
-    push_text(c, mtls_cert_pem, '/etc/ssh-rt-auth/server/mtls-cert.pem', mode='600')
-    push_text(c, mtls_key_pem,  '/etc/ssh-rt-auth/server/mtls-key.pem', mode='600')
+    lxc_exec(c, 'mkdir', '-p', '/etc/mssh/server')
+    push_text(c, mtls_cert_pem, '/etc/mssh/server/mtls-cert.pem', mode='600')
+    push_text(c, mtls_key_pem,  '/etc/mssh/server/mtls-key.pem', mode='600')
     push_text(c, ca_tls_root.decode('ascii'),
-              '/etc/ssh-rt-auth/server/ca-tls-root.pem', mode='644')
+              '/etc/mssh/server/ca-tls-root.pem', mode='644')
     push_text(c, auth_signing_root.decode('ascii'),
-              '/etc/ssh-rt-auth/server/auth-signing-root.pem', mode='644')
+              '/etc/mssh/server/auth-signing-root.pem', mode='644')
     shim_cfg = (
         'ca_endpoints:\n'
         f'  - https://{ca_ip}:{CA_PORT}\n'
-        'mtls_cert: /etc/ssh-rt-auth/server/mtls-cert.pem\n'
-        'mtls_key:  /etc/ssh-rt-auth/server/mtls-key.pem\n'
-        'ca_trust_root: /etc/ssh-rt-auth/server/ca-tls-root.pem\n'
-        'auth_trust_root: /etc/ssh-rt-auth/server/auth-signing-root.pem\n'
+        'mtls_cert: /etc/mssh/server/mtls-cert.pem\n'
+        'mtls_key:  /etc/mssh/server/mtls-key.pem\n'
+        'ca_trust_root: /etc/mssh/server/ca-tls-root.pem\n'
+        'auth_trust_root: /etc/mssh/server/auth-signing-root.pem\n'
         f'server_name: {server.canonical}\n'
         'cache: {max_entries: 100}\n'
         'timeouts: {connect: 3, read: 5}\n'
     )
-    push_text(c, shim_cfg, '/etc/ssh-rt-auth/server/shim.yaml')
+    push_text(c, shim_cfg, '/etc/mssh/server/shim.yaml')
     # AsyncSSH host key (generated on the host for convenience and pushed in).
     host_priv = host_keys_dir / f'{c}-host-ed25519'
     if host_priv.exists():
@@ -283,9 +283,9 @@ def _push_mtls_and_shim_config(server: _Server, ca_ip: str, *,
                     '-N', '', '-C', f'asyncssh-host-{server.canonical}'],
                    check=True, capture_output=True)
     push_file(c, host_priv,
-              '/etc/ssh-rt-auth/server/host-key', mode='600')
+              '/etc/mssh/server/host-key', mode='600')
     push_file(c, str(host_priv) + '.pub',
-              '/etc/ssh-rt-auth/server/host-key.pub', mode='644')
+              '/etc/mssh/server/host-key.pub', mode='644')
 
 
 def _write_users_allowed(server: _Server, user_keys: dict[str, dict],
@@ -300,7 +300,7 @@ def _write_users_allowed(server: _Server, user_keys: dict[str, dict],
         if u != SUPERUSER.username:
             lines.append(f'{u} ssh-ed25519 {super_b64}')
     push_text(server.container, '\n'.join(lines) + '\n',
-              '/etc/ssh-rt-auth/server/users.allowed', mode='644')
+              '/etc/mssh/server/users.allowed', mode='644')
 
 
 def _start_asyncssh_server(server: _Server) -> None:
@@ -308,31 +308,31 @@ def _start_asyncssh_server(server: _Server) -> None:
     c = server.container
     server_cmd = (
         '/usr/bin/python3 -m mssh.debug_sshd.ssh_server '
-        '--shim-config /etc/ssh-rt-auth/server/shim.yaml '
-        '--host-key /etc/ssh-rt-auth/server/host-key '
-        '--users-file /etc/ssh-rt-auth/server/users.allowed '
+        '--shim-config /etc/mssh/server/shim.yaml '
+        '--host-key /etc/mssh/server/host-key '
+        '--users-file /etc/mssh/server/users.allowed '
         f'--listen-host 0.0.0.0 --listen-port {SSHRT_PORT}'
     )
     if c == ENG_NAME:
         lxc_exec(c, 'mkdir', '-p', '/run')
         lxc_exec(c, 'sh', '-c',
                  f'cd /app && PYTHONPATH=/app/src nohup {server_cmd} '
-                 '> /var/log/ssh-rt-auth-server.log 2>&1 & echo $! > '
-                 '/run/ssh-rt-auth-server.pid')
+                 '> /var/log/mssh-server.log 2>&1 & echo $! > '
+                 '/run/mssh-server.pid')
     else:
         unit = (
-            '[Unit]\nDescription=ssh-rt-auth AsyncSSH server\n'
+            '[Unit]\nDescription=mssh AsyncSSH server\n'
             'After=network.target\n'
             '[Service]\nWorkingDirectory=/app\nEnvironment="PYTHONPATH=/app/src"\n'
             f'ExecStart={server_cmd}\n'
             'Restart=on-failure\n'
-            'StandardOutput=append:/var/log/ssh-rt-auth-server.log\n'
-            'StandardError=append:/var/log/ssh-rt-auth-server.log\n'
+            'StandardOutput=append:/var/log/mssh-server.log\n'
+            'StandardError=append:/var/log/mssh-server.log\n'
             '[Install]\nWantedBy=multi-user.target\n'
         )
-        push_text(c, unit, '/etc/systemd/system/ssh-rt-auth-server.service')
+        push_text(c, unit, '/etc/systemd/system/mssh-debug-sshd.service')
         lxc_exec(c, 'systemctl', 'daemon-reload')
-        lxc_exec(c, 'systemctl', 'start', 'ssh-rt-auth-server')
+        lxc_exec(c, 'systemctl', 'start', 'mssh-debug-sshd')
     wait_for_port(c, SSHRT_PORT, max_wait=30)
 
 
@@ -387,14 +387,14 @@ These are the exact admin commands run from the CA host that set you up:
 
 ```
 # Enrol the user
-ssh-rt-admin --admin-cert /etc/ssh-rt-auth/ca/bootstrap-admin-cert.pem \\
-             --admin-key  /etc/ssh-rt-auth/ca/bootstrap-admin-key.pem \\
-             --ca-cert    /etc/ssh-rt-auth/ca/tls-ca-cert.pem \\
+mssh-admin --admin-cert /etc/mssh/ca/bootstrap-admin-cert.pem \\
+             --admin-key  /etc/mssh/ca/bootstrap-admin-key.pem \\
+             --ca-cert    /etc/mssh/ca/tls-ca-cert.pem \\
              --ca-url     https://<ca-ip>:{CA_PORT} \\
              user add --user {user.username} --key /tmp/{user.username}.pub
 
 # Attach a policy granting access to the {user.department} server group(s)
-ssh-rt-admin policy add \\
+mssh-admin policy add \\
     --user {user.username} \\
     --server-groups {','.join(user.allowed_groups)} \\
     --channels session \\
@@ -411,7 +411,7 @@ If you try a denied server (any container outside your department) you
 should see "Permission denied (publickey,password,…)". The CA's audit log
 will show the denial reason; tail it on the CA host:
 
-    lxc exec mssh-adhoc-ca -- tail -f /var/log/ssh-rt-auth/audit.jsonl
+    lxc exec mssh-adhoc-ca -- tail -f /var/log/mssh/audit.jsonl
 
 ## Server inventory
 
@@ -495,43 +495,43 @@ def test_setup_adhoc_environment(request, tmp_path_factory):
     lxc_exec(CA_NAME, 'sh', '-c',
              'PYTHONPATH=/app/src python3 -c "'
              'from mssh.ca.cert_minter import bootstrap_ca; '
-             f"bootstrap_ca('/etc/ssh-rt-auth/ca', "
+             f"bootstrap_ca('/etc/mssh/ca', "
              f"tls_server_sans=['DNS:localhost','IP:127.0.0.1',"
              f"'IP:{ips[CA_NAME]}'])\"",
              timeout=120)
     lxc_exec(CA_NAME, 'sh', '-c',
              'python3 -c "'
              'import yaml; '
-             "open('/etc/ssh-rt-auth/ca/enrollment.yaml','w').write("
+             "open('/etc/mssh/ca/enrollment.yaml','w').write("
              "yaml.safe_dump({'admins': {'bootstrap-admin': "
              "{'role':'superuser','mtls_subject':'CN=bootstrap-admin',"
              "'enrolled_at':'','enrolled_by':'init'}}}))\"")
     push_text(CA_NAME,
               f'listen: 0.0.0.0:{CA_PORT}\n'
-              'signing_key: /etc/ssh-rt-auth/ca/signing-key.pem\n'
-              'signing_cert: /etc/ssh-rt-auth/ca/signing-cert.pem\n'
-              'tls_cert: /etc/ssh-rt-auth/ca/tls-server-cert.pem\n'
-              'tls_key:  /etc/ssh-rt-auth/ca/tls-server-key.pem\n'
-              'client_ca_cert: /etc/ssh-rt-auth/ca/tls-ca-cert.pem\n'
+              'signing_key: /etc/mssh/ca/signing-key.pem\n'
+              'signing_cert: /etc/mssh/ca/signing-cert.pem\n'
+              'tls_cert: /etc/mssh/ca/tls-server-cert.pem\n'
+              'tls_key:  /etc/mssh/ca/tls-server-key.pem\n'
+              'client_ca_cert: /etc/mssh/ca/tls-ca-cert.pem\n'
               'identity_trust_roots: []\n'
-              'enrollment: {path: /etc/ssh-rt-auth/ca/enrollment.yaml}\n'
-              'audit: {path: /var/log/ssh-rt-auth/audit.jsonl}\n'
+              'enrollment: {path: /etc/mssh/ca/enrollment.yaml}\n'
+              'audit: {path: /var/log/mssh/audit.jsonl}\n'
               'defaults: {max_cert_validity_seconds: 3600, '
               'timestamp_drift_seconds: 600}\n'
               'cert_generation: {key_type: ec, '
               'server_cert_validity_days: 30, '
               'admin_cert_validity_days: 30}\n',
-              '/etc/ssh-rt-auth/ca-config.yaml')
+              '/etc/mssh/ca-config.yaml')
     push_text(CA_NAME,
-              '[Unit]\nDescription=ssh-rt-auth CA\nAfter=network.target\n'
+              '[Unit]\nDescription=mssh CA\nAfter=network.target\n'
               '[Service]\nWorkingDirectory=/app\nEnvironment="PYTHONPATH=/app/src"\n'
               'ExecStart=/usr/bin/python3 -m mssh.ca.server --config '
-              '/etc/ssh-rt-auth/ca-config.yaml\nRestart=on-failure\n'
+              '/etc/mssh/ca-config.yaml\nRestart=on-failure\n'
               '[Install]\nWantedBy=multi-user.target\n',
-              '/etc/systemd/system/ssh-rt-auth-ca.service')
-    lxc_exec(CA_NAME, 'mkdir', '-p', '/var/log/ssh-rt-auth')
+              '/etc/systemd/system/mssh-ca.service')
+    lxc_exec(CA_NAME, 'mkdir', '-p', '/var/log/mssh')
     lxc_exec(CA_NAME, 'systemctl', 'daemon-reload')
-    lxc_exec(CA_NAME, 'systemctl', 'start', 'ssh-rt-auth-ca')
+    lxc_exec(CA_NAME, 'systemctl', 'start', 'mssh-ca')
     wait_for_port(CA_NAME, CA_PORT, max_wait=60)
     print(f'  CA up at https://{ips[CA_NAME]}:{CA_PORT}',
           file=sys.stderr, flush=True)
@@ -541,7 +541,7 @@ def test_setup_adhoc_environment(request, tmp_path_factory):
                  'tls-ca-cert.pem', 'signing-cert.pem']:
         subprocess.run(
             ['lxc', 'file', 'pull',
-             f'{CA_NAME}/etc/ssh-rt-auth/ca/{name}',
+             f'{CA_NAME}/etc/mssh/ca/{name}',
              str(ca_creds_dir / name)], check=True, capture_output=True)
     ca_tls_root_pem = (ca_creds_dir / 'tls-ca-cert.pem').read_bytes()
     auth_signing_root_pem = (ca_creds_dir / 'signing-cert.pem').read_bytes()
@@ -703,7 +703,7 @@ def _write_cleanup_script(path: Path) -> None:
     content = (
         '#!/usr/bin/env bash\n'
         '# Cleanup script generated by tests/lxc/test_setup_only.py\n'
-        '# Removes all ad-hoc ssh-rt-auth containers.\n'
+        '# Removes all ad-hoc mssh containers.\n'
         'set -euo pipefail\n'
         '\n'
         'CONTAINERS=(\n'
@@ -734,7 +734,7 @@ def _write_env_sh(path: Path, *, ips: dict, artifacts_dir: Path,
     """
     lines = [
         '#!/usr/bin/env bash',
-        '# ssh-rt-auth ad-hoc lab — environment variables',
+        '# mssh ad-hoc lab — environment variables',
         '#',
         '# Generated by tests/lxc/test_setup_only.py.',
         '# Source from any shell:    source ./adhoc-env.sh',
@@ -782,7 +782,7 @@ def _write_env_sh(path: Path, *, ips: dict, artifacts_dir: Path,
         f'export HR_HOST="{HR_NAME}"',
         f'export ENG_HOST="{ENG_NAME}"',
         '',
-        ('echo "ssh-rt-auth ad-hoc env loaded. '
+        ('echo "mssh ad-hoc env loaded. '
          'Try:  ssh \\$SSH_FLAGS alice@\\$ACCOUNTING_IP"'),
     ]
     path.write_text('\n'.join(lines) + '\n')
@@ -802,7 +802,7 @@ def _write_overview_md(path: Path, *, ips: dict, user_keys: dict,
 
     lines: list[str] = []
     lines += [
-        '# ssh-rt-auth — Ad-hoc test environment',
+        '# mssh — Ad-hoc test environment',
         '',
         'Generated by `tests/lxc/test_setup_only.py`. The five LXC containers',
         'are left **RUNNING**; remove them with `./cleanup_containers.sh`.',
@@ -905,10 +905,10 @@ def _write_overview_md(path: Path, *, ips: dict, user_keys: dict,
         '',
         '```bash',
         '# Tail the CA audit log',
-        'lxc exec $CA_HOST -- tail -f /var/log/ssh-rt-auth/audit.jsonl',
+        'lxc exec $CA_HOST -- tail -f /var/log/mssh/audit.jsonl',
         '',
         '# Tail an AsyncSSH server log',
-        'lxc exec $ACCT_HOST -- tail -f /var/log/ssh-rt-auth-server.log',
+        'lxc exec $ACCT_HOST -- tail -f /var/log/mssh-server.log',
         '',
         '# Open a shell on a container',
         'lxc exec $ACCT_HOST -- bash',
@@ -957,7 +957,7 @@ def _setup_command_log_section(*, ips: dict, user_keys: dict) -> list[str]:
         '## 9. Setup command log',
         '',
         'Below is every command the setup-only test ran, in order. They are',
-        'reproducible from the host machine with `ssh-rt-admin` once the CA',
+        'reproducible from the host machine with `mssh-admin` once the CA',
         'is up.',
         '',
         '### 9.1. CA initialization (crypto-officer / `bootstrap-admin`)',
@@ -968,15 +968,15 @@ def _setup_command_log_section(*, ips: dict, user_keys: dict) -> list[str]:
         '',
         '```bash',
         '# (executed inside the CA container)',
-        'mkdir -p /etc/ssh-rt-auth/ca',
+        'mkdir -p /etc/mssh/ca',
         'python3 -c "',
         '  from mssh.ca.cert_minter import bootstrap_ca',
-        '  bootstrap_ca(\'/etc/ssh-rt-auth/ca\',',
+        '  bootstrap_ca(\'/etc/mssh/ca\',',
         '               tls_server_sans=[\'DNS:localhost\',\'IP:127.0.0.1\','
         f'\'IP:$CA_IP\'])"',
         '```',
         '',
-        'This produces the following key material in `/etc/ssh-rt-auth/ca/`:',
+        'This produces the following key material in `/etc/mssh/ca/`:',
         '',
         '| file | role | trust path |',
         '|------|------|------------|',
@@ -998,17 +998,17 @@ def _setup_command_log_section(*, ips: dict, user_keys: dict) -> list[str]:
         '```bash',
         '# (CA container) systemd unit configured by the test',
         'systemctl daemon-reload',
-        'systemctl start ssh-rt-auth-ca',
+        'systemctl start mssh-ca',
         '```',
         '',
-        '### 9.3. ssh-rt-admin authentication for the rest of the commands',
+        '### 9.3. mssh-admin authentication for the rest of the commands',
         '',
-        'Every command in §9.4–§9.6 below is shown using `ssh-rt-admin`',
+        'Every command in §9.4–§9.6 below is shown using `mssh-admin`',
         'authenticated as the bootstrap admin. Adapt to your own admin cert',
         'as needed.',
         '',
         '```bash',
-        ('alias admin="ssh-rt-admin --admin-cert $ADMIN_CERT '
+        ('alias admin="mssh-admin --admin-cert $ADMIN_CERT '
          '--admin-key $ADMIN_KEY --ca-cert $CA_CERT --ca-url $CA_URL"'),
         '```',
         '',
@@ -1101,27 +1101,27 @@ def _setup_command_log_section(*, ips: dict, user_keys: dict) -> list[str]:
     lines += [
         '```',
         '',
-        '### 9.8. Per-server provisioning (test-side, not via ssh-rt-admin)',
+        '### 9.8. Per-server provisioning (test-side, not via mssh-admin)',
         '',
         'For each of the four SSH-host containers the test installs:',
         '',
         '| path inside container | content |',
         '|-----------------------|---------|',
-        '| `/etc/ssh-rt-auth/server/shim.yaml` | shim config (`ca_endpoints`, mTLS paths, `server_name`) |',
-        '| `/etc/ssh-rt-auth/server/mtls-cert.pem` | this server\'s mTLS client cert (from §9.4) |',
-        '| `/etc/ssh-rt-auth/server/mtls-key.pem` | this server\'s mTLS client key |',
-        '| `/etc/ssh-rt-auth/server/ca-tls-root.pem` | CA TLS trust root (= `tls-ca-cert.pem`) |',
-        '| `/etc/ssh-rt-auth/server/auth-signing-root.pem` | authz trust root (= `signing-cert.pem`) |',
-        '| `/etc/ssh-rt-auth/server/host-key` | AsyncSSH host private key |',
-        '| `/etc/ssh-rt-auth/server/users.allowed` | (user, pubkey-blob) bindings for shim-gated auth |',
+        '| `/etc/mssh/server/shim.yaml` | shim config (`ca_endpoints`, mTLS paths, `server_name`) |',
+        '| `/etc/mssh/server/mtls-cert.pem` | this server\'s mTLS client cert (from §9.4) |',
+        '| `/etc/mssh/server/mtls-key.pem` | this server\'s mTLS client key |',
+        '| `/etc/mssh/server/ca-tls-root.pem` | CA TLS trust root (= `tls-ca-cert.pem`) |',
+        '| `/etc/mssh/server/auth-signing-root.pem` | authz trust root (= `signing-cert.pem`) |',
+        '| `/etc/mssh/server/host-key` | AsyncSSH host private key |',
+        '| `/etc/mssh/server/users.allowed` | (user, pubkey-blob) bindings for shim-gated auth |',
         '',
         'Plus a systemd unit (Ubuntu) or a `nohup`-launched process (Alpine) that runs:',
         '',
         '```',
         'python3 -m mssh.debug_sshd.ssh_server \\',
-        '   --shim-config /etc/ssh-rt-auth/server/shim.yaml \\',
-        '   --host-key    /etc/ssh-rt-auth/server/host-key \\',
-        '   --users-file  /etc/ssh-rt-auth/server/users.allowed \\',
+        '   --shim-config /etc/mssh/server/shim.yaml \\',
+        '   --host-key    /etc/mssh/server/host-key \\',
+        '   --users-file  /etc/mssh/server/users.allowed \\',
         f'   --listen-host 0.0.0.0 --listen-port {SSHRT_PORT}',
         '```',
         '',

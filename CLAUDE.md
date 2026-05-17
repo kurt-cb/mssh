@@ -30,20 +30,6 @@ for msshd. The previous "Tier 1 / 2 / 3" framing is also retired;
 mssh has a single production server (msshd) plus the optional AKC
 shim (`python/src/mssh/akc_shim/`) for unmodified-OpenSSH compat.
 
-### Known naming inconsistency: operational paths
-
-The Python package rename `sshrt` → `mssh` is **done** (the package,
-its imports, console scripts, and module docstrings all use `mssh`).
-What's not yet renamed is the **operational path** `/etc/ssh-rt-auth/`
-(and `/var/log/ssh-rt-auth/`, `/var/lib/ssh-rt-auth/`). Operator-facing
-docs (`docs/operations.md`, `INSTALLATION.md`) already describe these
-as `/etc/mssh/` etc., but code defaults, config templates, systemd
-units, scripts, and ~339 test references still use the old paths.
-
-If you're touching any of these files, prefer the new `/etc/mssh/`
-naming. A bulk rename is a discrete follow-up — large diff, easy to
-break tests, worth its own commit.
-
 ## Three operating modes
 
 msshd selects between three modes via `wrapper.yaml`:
@@ -95,7 +81,7 @@ Operator adoption journey: fallback → gated → enforce, reversible.
 ### Historical (don't write new content here; reference only)
 
 - `archive/design/` — original 12 design docs that pre-date the
-  clean-room rewrite. Use older naming ("ssh-rt-auth", "Tier 1/2/3",
+  clean-room rewrite. Use older naming ("mssh", "Tier 1/2/3",
   "Phase 1/2", "PoC"). Frequently more detailed than the new docs.
 - `archive/docs/` — original operator docs.
 

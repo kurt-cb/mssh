@@ -20,7 +20,7 @@ class ShimConfig:
     # server). `sqlite` persists across processes (right for the OpenSSH
     # AuthorizedKeysCommand shim, which is a fresh subprocess every call).
     cache_backend: str = 'memory'
-    cache_db_path: str = '/var/cache/ssh-rt-auth/cert-cache.sqlite3'
+    cache_db_path: str = '/var/cache/mssh/cert-cache.sqlite3'
     connect_timeout: float = 5.0
     read_timeout: float = 10.0
     emergency_cert: str = ''
@@ -44,7 +44,7 @@ class ShimConfig:
             cache_max_entries=int(cache.get('max_entries') or 1000),
             cache_backend=str(cache.get('backend') or 'memory'),
             cache_db_path=str(cache.get('db_path')
-                              or '/var/cache/ssh-rt-auth/cert-cache.sqlite3'),
+                              or '/var/cache/mssh/cert-cache.sqlite3'),
             connect_timeout=float(timeouts.get('connect') or 5.0),
             read_timeout=float(timeouts.get('read') or 10.0),
             emergency_cert=str(data.get('emergency_cert') or ''),

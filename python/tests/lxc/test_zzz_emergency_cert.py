@@ -76,8 +76,8 @@ from cryptography.hazmat.primitives import serialization
 from mssh.ca.cert_minter import (
     load_private_key, load_certificate, mint_authorization_cert,
 )
-signing_key = load_private_key('/etc/ssh-rt-auth/ca/signing-key.pem')
-signing_cert = load_certificate('/etc/ssh-rt-auth/ca/signing-cert.pem')
+signing_key = load_private_key('/etc/mssh/ca/signing-key.pem')
+signing_cert = load_certificate('/etc/mssh/ca/signing-cert.pem')
 pub_blob = base64.b64decode({user_pub_blob_b64!r})
 now = datetime.datetime.now(tz=datetime.timezone.utc)
 cert, serial = mint_authorization_cert(
@@ -162,26 +162,26 @@ def test_emergency_cert_used_when_ca_offline(provisioned_env):
     # 4. Push to the target SSH host and update the shim config to point at it.
     section('Deploying emergency cert to target server')
     push_text(target_container, pem,
-              '/etc/ssh-rt-auth/server/emergency-cert.pem', mode='644')
+              '/etc/mssh/server/emergency-cert.pem', mode='644')
     # Rewrite shim.yaml: keep the original CA endpoints but ALSO add the
     # emergency_cert path. The emergency_trust_root isn't validated by the
     # PoC shim (TODO in code) — same cert works for both.
     shim_cfg = (
         'ca_endpoints:\n'
         f'  - {provisioned_env["ca_url"]}\n'
-        'mtls_cert: /etc/ssh-rt-auth/server/mtls-cert.pem\n'
-        'mtls_key:  /etc/ssh-rt-auth/server/mtls-key.pem\n'
-        'ca_trust_root: /etc/ssh-rt-auth/server/ca-tls-root.pem\n'
-        'auth_trust_root: /etc/ssh-rt-auth/server/auth-signing-root.pem\n'
+        'mtls_cert: /etc/mssh/server/mtls-cert.pem\n'
+        'mtls_key:  /etc/mssh/server/mtls-key.pem\n'
+        'ca_trust_root: /etc/mssh/server/ca-tls-root.pem\n'
+        'auth_trust_root: /etc/mssh/server/auth-signing-root.pem\n'
         f'server_name: {target_host.canonical_name}\n'
         'cache: {max_entries: 100}\n'
         'timeouts: {connect: 2, read: 3}\n'
-        'emergency_cert: /etc/ssh-rt-auth/server/emergency-cert.pem\n'
+        'emergency_cert: /etc/mssh/server/emergency-cert.pem\n'
         'emergency_trust_root: '
-        '/etc/ssh-rt-auth/server/auth-signing-root.pem\n'
+        '/etc/mssh/server/auth-signing-root.pem\n'
     )
     push_text(target_container, shim_cfg,
-              '/etc/ssh-rt-auth/server/shim.yaml', mode='644')
+              '/etc/mssh/server/shim.yaml', mode='644')
 
     # Restart the AsyncSSH server so the shim re-reads its config.
     if target_container.endswith('alpine'):
@@ -190,20 +190,20 @@ def test_emergency_cert_used_when_ca_offline(provisioned_env):
         lxc_exec(target_container, 'sh', '-c',
                  'cd /app && PYTHONPATH=/app/src nohup /usr/bin/python3 '
                  '-m mssh.debug_sshd.ssh_server '
-                 '--shim-config /etc/ssh-rt-auth/server/shim.yaml '
-                 '--host-key /etc/ssh-rt-auth/server/host-key '
-                 '--users-file /etc/ssh-rt-auth/server/users.allowed '
+                 '--shim-config /etc/mssh/server/shim.yaml '
+                 '--host-key /etc/mssh/server/host-key '
+                 '--users-file /etc/mssh/server/users.allowed '
                  '--listen-host 0.0.0.0 --listen-port 2222 '
-                 '> /var/log/ssh-rt-auth-server.log 2>&1 & '
-                 'echo $! > /run/ssh-rt-auth-server.pid')
+                 '> /var/log/mssh-server.log 2>&1 & '
+                 'echo $! > /run/mssh-server.pid')
     else:
         lxc_exec(target_container, 'systemctl', 'restart',
-                 'ssh-rt-auth-server')
+                 'mssh-debug-sshd')
     wait_for_port(target_container, ssh_port, max_wait=45)
 
     # 5. STOP THE CA. The shim's authorize() should fail to reach it.
     section('Stopping the CA')
-    lxc_exec(CA_HOST, 'systemctl', 'stop', 'ssh-rt-auth-ca')
+    lxc_exec(CA_HOST, 'systemctl', 'stop', 'mssh-ca')
     try:
         # 6. SSH attempt — should succeed via emergency cert.
         section('SSH while CA is offline')
@@ -215,7 +215,7 @@ def test_emergency_cert_used_when_ca_offline(provisioned_env):
                 command='echo HELLO_FROM_EMERGENCY',
             )
             ok = (rc == 0
-                  and 'ssh-rt-auth: authorized session' in stdout
+                  and 'mssh: authorized session' in stdout
                   and 'HELLO_FROM_EMERGENCY' in stdout)
             op.record(actual='granted' if ok else 'denied',
                       ok=ok, rc=rc, stdout=stdout[-400:],
@@ -223,7 +223,7 @@ def test_emergency_cert_used_when_ca_offline(provisioned_env):
             if not ok:
                 # Pull the SSH server log on failure for diagnostics.
                 srvlog = lxc_exec(target_container, 'tail', '-n', '40',
-                                  '/var/log/ssh-rt-auth-server.log',
+                                  '/var/log/mssh-server.log',
                                   check=False)
                 op.attach('asyncssh_log_tail',
                           srvlog.stdout or srvlog.stderr)
@@ -231,14 +231,14 @@ def test_emergency_cert_used_when_ca_offline(provisioned_env):
         # 7. Confirm the server log mentions emergency-cert use.
         section('Verifying server log says "using emergency cert"')
         srvlog = lxc_exec(target_container, 'cat',
-                          '/var/log/ssh-rt-auth-server.log', check=False)
+                          '/var/log/mssh-server.log', check=False)
         emergency_used = 'using emergency cert' in (srvlog.stdout or '')
         print(f'  emergency_used={emergency_used}',
               file=sys.stderr, flush=True)
     finally:
         # 8. Always restart the CA so subsequent tests can run.
         section('Restarting the CA')
-        lxc_exec(CA_HOST, 'systemctl', 'start', 'ssh-rt-auth-ca')
+        lxc_exec(CA_HOST, 'systemctl', 'start', 'mssh-ca')
         wait_for_port(CA_HOST, 8443, max_wait=30)
 
     assert ok, f'emergency-cert SSH failed: rc={rc} stderr={stderr[-300:]}'

@@ -66,8 +66,8 @@ def _deploy_to_containers(provisioned_env, username: str, key_priv_path: str,
         line = (f'{username} ssh-ed25519 '
                 f'{base64.b64encode(key_blob).decode("ascii")}')
         lxc_exec(container, 'sh', '-c',
-                 f'echo "{line}" >> /etc/ssh-rt-auth/server/users.allowed')
-        lxc_exec(container, 'systemctl', 'restart', 'ssh-rt-auth-server')
+                 f'echo "{line}" >> /etc/mssh/server/users.allowed')
+        lxc_exec(container, 'systemctl', 'restart', 'mssh-debug-sshd')
         restarted.append(container)
     from lxc_helpers import wait_for_port
     for c in restarted:
@@ -150,7 +150,7 @@ def test_wildcard_servers_pattern(provisioned_env, tmp_path):
                     target=host.canonical_name, expect='granted') as op:
             rc, stdout, _ = _ssh_from(SSHRT_U1, 'wildcard-user', ip,
                                       provisioned_env['ssh_port'])
-            ok = rc == 0 and 'ssh-rt-auth: authorized session' in stdout
+            ok = rc == 0 and 'mssh: authorized session' in stdout
             op.record(actual='granted' if ok else 'denied', ok=ok,
                       rc=rc, stdout=stdout[-200:])
             if not ok:
@@ -167,7 +167,7 @@ def test_wildcard_servers_pattern(provisioned_env, tmp_path):
                     target=host.canonical_name, expect='denied') as op:
             rc, stdout, _ = _ssh_from(SSHRT_U1, 'nomatch-user', ip,
                                       provisioned_env['ssh_port'])
-            denied = rc != 0 or 'ssh-rt-auth: authorized session' not in stdout
+            denied = rc != 0 or 'mssh: authorized session' not in stdout
             op.record(actual='denied' if denied else 'granted',
                       ok=denied, rc=rc)
             if not denied:

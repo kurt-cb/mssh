@@ -7,7 +7,7 @@ Phase 1B: enforce mode. TLS-terminating listener + CA call + cert mint
 + inner-sshd-managed handoff via asyncssh.
 
 Invocation:
-    python -m mssh.msshd --config /etc/ssh-rt-auth/wrapper.yaml
+    python -m mssh.msshd --config /etc/mssh/wrapper.yaml
 """
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
 
     state_dir = os.environ.get(
         'SSH_RT_AUTH_WRAPPER_STATE_DIR',
-        '/var/lib/ssh-rt-auth')
+        '/var/lib/mssh')
 
     # 1. Load the user-CA private key (in memory only after this).
     user_ca_priv_path = os.path.join(state_dir, 'wrapper-user-ca')
@@ -147,7 +147,7 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog='msshd')
-    ap.add_argument('--config', default='/etc/ssh-rt-auth/wrapper.yaml',
+    ap.add_argument('--config', default='/etc/mssh/wrapper.yaml',
                     help='path to wrapper.yaml')
     args = ap.parse_args(argv)
 

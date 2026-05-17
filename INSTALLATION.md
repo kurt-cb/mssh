@@ -7,7 +7,7 @@ adopt, troubleshoot) see [docs/operations.md](docs/operations.md).
 
 ```bash
 git clone https://github.com/kurt-cb/ssh-rt-auth.git
-cd ssh-rt-auth/python
+cd mssh/python
 pip install -e .
 ```
 

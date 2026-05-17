@@ -138,7 +138,7 @@ def render_table(rows: list[dict[str, Any]], columns: list[str]) -> str:
 
 
 def pull_audit_tail(lxc_exec_fn: Callable, container: str,
-                    audit_path: str = '/var/log/ssh-rt-auth/audit.jsonl',
+                    audit_path: str = '/var/log/mssh/audit.jsonl',
                     n: int = 5) -> list[dict[str, Any]]:
     """Read the last ``n`` JSON-lines entries from the CA's audit log."""
     r = lxc_exec_fn(container, 'tail', '-n', str(n), audit_path, check=False)

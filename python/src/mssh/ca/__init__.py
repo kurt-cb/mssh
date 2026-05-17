@@ -1,1 +1,1 @@
-"""ssh-rt-auth authorization CA."""
+"""mssh authorization CA."""

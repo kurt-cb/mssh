@@ -1,4 +1,4 @@
-"""Debug-only AsyncSSH server with ssh-rt-auth shim integration.
+"""Debug-only AsyncSSH server with mssh shim integration.
 
 Not a production tier — this is a minimal SSH server that calls the
 shim after publickey auth, used for debugging the CA / shim path in
@@ -298,7 +298,7 @@ async def _handle_session_inner(process: asyncssh.SSHServerProcess) -> None:
     username = conn.get_extra_info('mssh_auth_username') or process.get_extra_info('username') or '?'
     serial = conn.get_extra_info('mssh_auth_serial') or '?'
     banner = (
-        f'ssh-rt-auth: authorized session\r\n'
+        f'mssh: authorized session\r\n'
         f'user={username} serial={serial}\r\n'
     )
 

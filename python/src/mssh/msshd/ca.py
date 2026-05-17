@@ -4,7 +4,7 @@ Thin wrapper around ``shim.ca_client.CAClient`` that:
 
   - Builds the ``POST /v1/authorize`` request body in v1 schema
     (the v2 enrichments from
-    [design/ssh-rt-auth-v2-enhancements.md](../../design/ssh-rt-auth-v2-enhancements.md)
+    [design/mssh-v2-enhancements.md](../../design/mssh-v2-enhancements.md)
     are deferred to Phase 1B+).
   - Calls the CA in an executor (CAClient uses blocking ``requests``).
   - Returns a typed result with the cert (DER), serial, and notAfter,

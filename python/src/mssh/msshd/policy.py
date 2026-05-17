@@ -16,7 +16,7 @@ For the wrapper to enforce those at the inner sshd, we have to:
 This module is intentionally a thin parser + translator. No I/O.
 
 See:
-- [detailed-wrapper.md §8 translation table](../../design/ssh-rt-auth-detailed-wrapper.md)
+- [detailed-wrapper.md §8 translation table](../../design/mssh-detailed-wrapper.md)
 - ca/cert_minter.py — the DER format we have to parse here
 """
 from __future__ import annotations

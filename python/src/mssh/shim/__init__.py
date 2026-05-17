@@ -1,1 +1,1 @@
-"""ssh-rt-auth authorization shim (Python)."""
+"""mssh authorization shim (Python)."""

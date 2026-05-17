@@ -130,11 +130,11 @@ If `status` reports anything red, see [troubleshooting](#troubleshooting).
 ### 1.4 Write a workstation config
 
 Drop the four `--ca-url / --admin-cert / --admin-key / --ca-cert`
-values into `~/.ssh-rt-admin/config` so you don't have to type them
+values into `~/.mssh-admin/config` so you don't have to type them
 on every invocation:
 
 ```yaml
-# ~/.ssh-rt-admin/config
+# ~/.mssh-admin/config
 ca_url: https://ca.internal:8443
 admin_cert: /home/operator/.mssh-admin/bootstrap-admin-cert.pem
 admin_key:  /home/operator/.mssh-admin/bootstrap-admin-key.pem

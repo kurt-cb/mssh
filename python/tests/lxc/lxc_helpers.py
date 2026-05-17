@@ -1,15 +1,15 @@
-"""LXC container helpers for ssh-rt-auth integration tests.
+"""LXC container helpers for mssh integration tests.
 
 Topology (4 SSH machines + 1 CA, modeled on the user-confirmed plan):
 
-  CA_HOST       Ubuntu 22.04 — Flask CA + ssh-rt-admin
+  CA_HOST       Ubuntu 22.04 — Flask CA + mssh-admin
   SSHRT_U1      Ubuntu 22.04 — sshd + Python shim
   SSHRT_U2      Ubuntu 22.04 — sshd + Python shim
   SSHRT_U3      Ubuntu 22.04 — sshd + Python shim
   SSHRT_ALPINE  Alpine 3     — sshd + Python shim   (cross-distro coverage)
 
 All SSH hosts have Unix accounts for the full user matrix so the auth result
-is governed by ssh-rt-auth's policy, not by a missing-account error. The user
+is governed by mssh's policy, not by a missing-account error. The user
 matrix is built by ``tests/lxc/randomized.py`` from a deterministic seed.
 """
 from __future__ import annotations
@@ -197,7 +197,7 @@ def wait_for_port(container: str, port: int, max_wait: int = 60) -> None:
 
 
 def push_source(container: str, app_root: Path) -> None:
-    """Bundle the ssh-rt-auth source tree and push to /app inside the container.
+    """Bundle the mssh source tree and push to /app inside the container.
 
     ``app_root`` is the repo root; the tar bundles the Python source
     (python/src/ → /app/src/) plus the language-neutral configs
@@ -215,8 +215,8 @@ def push_source(container: str, app_root: Path) -> None:
             check=True, capture_output=True,
         )
         lxc_exec(container, 'mkdir', '-p', '/app')
-        push_file(container, tar, '/tmp/ssh-rt-auth.tar.gz')
-        lxc_exec(container, 'tar', '-xzf', '/tmp/ssh-rt-auth.tar.gz', '-C', '/app')
+        push_file(container, tar, '/tmp/mssh.tar.gz')
+        lxc_exec(container, 'tar', '-xzf', '/tmp/mssh.tar.gz', '-C', '/app')
         # Push language-neutral configs/scripts that live at the repo root.
         for top in ('config', 'scripts', 'systemd'):
             top_path = app_root / top
@@ -429,12 +429,12 @@ DIAGNOSTICS_DIR_DEFAULT = 'adhoc-diagnostics'
 
 # Log files we try to pull from every container. Missing files are skipped
 # silently — Ubuntu containers have auth.log/syslog, Alpine has messages,
-# only some containers have ssh-rt-auth-server.log or snoopy.log.
+# only some containers have mssh-debug-sshd.log or snoopy.log.
 _DIAGNOSTIC_LOG_PATHS = [
     '/var/log/auth.log',
     '/var/log/syslog',
     '/var/log/messages',
-    '/var/log/ssh-rt-auth-server.log',
+    '/var/log/mssh-server.log',
     '/var/log/mssh/msshd.log',
     '/root/systemlogs/snoopy.log',
 ]
@@ -465,13 +465,13 @@ def pull_diagnostics(containers: list[str],
         cdir = dest_dir / container
         cdir.mkdir(parents=True, exist_ok=True)
 
-        # journalctl: capture sshd + msshd + ssh-rt-auth-* units when
+        # journalctl: capture sshd + msshd + mssh-* units when
         # available. Alpine images without systemd just write empty.
         r = lxc_exec(container, 'sh', '-c',
                      'command -v journalctl >/dev/null 2>&1 && '
                      'journalctl --no-pager '
                      '-u ssh -u sshd -u msshd '
-                     '-u ssh-rt-auth-ca -u ssh-rt-auth-server '
+                     '-u mssh-ca -u mssh-debug-sshd '
                      '2>/dev/null || true',
                      check=False, timeout=60)
         (cdir / 'journalctl.log').write_text(r.stdout or '')

@@ -28,7 +28,7 @@ from .enrollment import Enrollment
 from .identity_parser import sha256_fingerprint
 
 
-log = logging.getLogger('ssh-rt-auth-ca')
+log = logging.getLogger('mssh-ca')
 
 
 def _load_identity_trust_root_fingerprints(paths: list[str]) -> set[str]:
@@ -108,7 +108,7 @@ def create_app(config: CAConfig) -> Flask:
     app.config['CA_CONFIG'] = config
 
     enrollment = Enrollment(config.enrollment_path)
-    audit = AuditLog(config.audit_path or '/tmp/ssh-rt-auth-audit.jsonl')
+    audit = AuditLog(config.audit_path or '/tmp/mssh-audit.jsonl')
 
     signing_key = cert_minter.load_private_key(config.signing_key)
     signing_cert = cert_minter.load_certificate(config.signing_cert)
@@ -368,7 +368,7 @@ def _make_request_handler():
 # ---------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog='ssh-rt-auth-ca')
+    p = argparse.ArgumentParser(prog='mssh-ca')
     p.add_argument('--config', required=True, help='Path to CA config file')
     p.add_argument('--debug', action='store_true')
     args = p.parse_args(argv)

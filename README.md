@@ -28,7 +28,7 @@ credentials useless if the attacker can't reach the CA**.
 
 ```bash
 git clone https://github.com/kurt-cb/ssh-rt-auth.git
-cd ssh-rt-auth/python
+cd mssh/python
 pip install -e .
 
 # Try the adhoc lab — 5 LXC containers, full Phase-0→Phase-2

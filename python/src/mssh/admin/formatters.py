@@ -1,4 +1,4 @@
-"""Output formatters for ssh-rt-admin (table / json / yaml)."""
+"""Output formatters for mssh-admin (table / json / yaml)."""
 from __future__ import annotations
 
 import json

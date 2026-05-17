@@ -122,7 +122,7 @@ def detect_state(*, ca_dir: Path | None = None,
             id='admin_client_configured', ok=False,
             message='no admin client configured — file-system checks only',
             next_step='Provide --ca-url + --admin-cert + --admin-key + --ca-cert '
-                      '(or write them to ~/.ssh-rt-admin/config) and re-run'))
+                      '(or write them to ~/.mssh-admin/config) and re-run'))
         return DeploymentState(ca_dir=ca_dir, nodes=nodes)
 
     try:

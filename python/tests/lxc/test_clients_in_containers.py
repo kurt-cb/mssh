@@ -169,7 +169,7 @@ def test_cross_distro_client_matrix(provisioned_env):
                         actual = (
                             'granted'
                             if rc == 0 and
-                               'ssh-rt-auth: authorized session' in stdout
+                               'mssh: authorized session' in stdout
                             else 'denied'
                         )
                         ok = (actual == expect)
@@ -181,7 +181,7 @@ def test_cross_distro_client_matrix(provisioned_env):
                                 lxc_exec, CA_HOST, n=5))
                             srvlog = lxc_exec(
                                 host.container_name, 'tail', '-n', '20',
-                                '/var/log/ssh-rt-auth-server.log',
+                                '/var/log/mssh-server.log',
                                 check=False)
                             op.attach('asyncssh_log_tail',
                                       srvlog.stdout or srvlog.stderr)
@@ -229,7 +229,7 @@ def test_dbclient_works_from_alpine(provisioned_env):
         rc, stdout, stderr = _dbclient_in_container(
             SSHRT_ALPINE, user.username, target_ip,
             provisioned_env['ssh_port'], command='echo OK')
-        ok = rc == 0 and 'ssh-rt-auth: authorized session' in stdout
+        ok = rc == 0 and 'mssh: authorized session' in stdout
         op.record(actual='granted' if ok else 'denied',
                   ok=ok, rc=rc, stderr=stderr[-300:])
         if not ok:

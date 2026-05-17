@@ -81,7 +81,7 @@ def test_full_matrix(provisioned_env):
                 rc, stdout, stderr = _ssh_from(
                     SSHRT_U1, user.username, target_ip, ssh_port,
                     command='echo OK')
-                if rc == 0 and 'ssh-rt-auth: authorized session' in stdout:
+                if rc == 0 and 'mssh: authorized session' in stdout:
                     actual = 'granted'
                 else:
                     actual = 'denied'
@@ -96,7 +96,7 @@ def test_full_matrix(provisioned_env):
                     # cause of a missing /v1/authorize call is rejection
                     # inside validate_public_key BEFORE the shim is invoked.
                     srvlog = lxc_exec(host.container_name, 'tail', '-n', '20',
-                                      '/var/log/ssh-rt-auth-server.log',
+                                      '/var/log/mssh-server.log',
                                       check=False)
                     op.attach('asyncssh_log_tail',
                               srvlog.stdout or srvlog.stderr)
@@ -119,7 +119,7 @@ def test_full_matrix(provisioned_env):
 
     if failures:
         section('Dumping CA audit log on failure')
-        r = lxc_exec(CA_HOST, 'cat', '/var/log/ssh-rt-auth/audit.jsonl',
+        r = lxc_exec(CA_HOST, 'cat', '/var/log/mssh/audit.jsonl',
                      check=False)
         for line in (r.stdout or '').splitlines()[-50:]:
             try:
@@ -165,7 +165,7 @@ def test_matrix_from_alternate_source(provisioned_env):
                 rc, stdout, stderr = _ssh_from(
                     source_container, user.username, target_ip, ssh_port)
                 ok = (rc == 0 and
-                      'ssh-rt-auth: authorized session' in stdout)
+                      'mssh: authorized session' in stdout)
                 op.record(actual='granted' if ok else 'denied',
                           ok=ok, rc=rc, stderr=stderr[-400:])
                 if not ok:

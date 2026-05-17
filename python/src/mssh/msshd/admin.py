@@ -77,7 +77,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog='ssh-rt-wrapper-admin')
-    ap.add_argument('--config', default='/etc/ssh-rt-auth/wrapper.yaml',
+    ap.add_argument('--config', default='/etc/mssh/wrapper.yaml',
                     help='path to wrapper.yaml')
     sub = ap.add_subparsers(dest='cmd', required=True)
     sub.add_parser('lint',      help='validate wrapper.yaml').set_defaults(fn=cmd_lint)

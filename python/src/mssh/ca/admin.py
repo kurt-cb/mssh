@@ -1,6 +1,6 @@
 """Admin API handlers.
 
-Role-permission table mirrors ssh-rt-auth-detailed-rest-api.md. Each handler
+Role-permission table mirrors mssh-detailed-rest-api.md. Each handler
 takes a parsed request body, the admin's enrollment record, and the
 ``AdminContext``; returns ``(http_status, json_body)``.
 """

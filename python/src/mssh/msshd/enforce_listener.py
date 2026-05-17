@@ -1,5 +1,5 @@
 """EnforceListener — TLS-terminating listener that drives the full
-ssh-rt-auth wrap-and-proxy flow.
+mssh wrap-and-proxy flow.
 
 For each accepted client connection:
 

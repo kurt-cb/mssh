@@ -162,7 +162,7 @@ def _issue_leaf(subject_cn: str, leaf_key, ca_key, ca_cert: x509.Certificate,
 def bootstrap_ca(ca_dir: str | Path, *, key_type: str = 'ec',
                  mtls_key_type: str = 'ec',
                  bootstrap_admin_cn: str = 'bootstrap-admin',
-                 tls_server_cn: str = 'ssh-rt-auth-ca',
+                 tls_server_cn: str = 'mssh-ca',
                  tls_server_sans: list[str] | None = None) -> BootstrapArtifacts:
     """First-time init: create the CA's keys, root certs, and bootstrap admin.
 
@@ -173,11 +173,11 @@ def bootstrap_ca(ca_dir: str | Path, *, key_type: str = 'ec',
 
     # Authorization signing key (signs short-lived X.509 authorization certs).
     signing_key = generate_signing_key(key_type)
-    signing_cert = _self_signed('ssh-rt-auth-authorization-root', signing_key)
+    signing_cert = _self_signed('mssh-authorization-root', signing_key)
 
     # mTLS CA (signs server + admin client certs and the CA's TLS server cert).
     tls_ca_key = generate_signing_key(mtls_key_type)
-    tls_ca_cert = _self_signed('ssh-rt-auth-mtls-root', tls_ca_key)
+    tls_ca_cert = _self_signed('mssh-mtls-root', tls_ca_key)
 
     # CA's TLS server cert (what shims/admins see when connecting).
     tls_server_key = generate_signing_key(mtls_key_type)
@@ -288,7 +288,7 @@ def mint_authorization_cert(
     """
     subject = x509.Name([
         x509.NameAttribute(oid.NameOID.COMMON_NAME, subject_username),
-        x509.NameAttribute(oid.NameOID.ORGANIZATION_NAME, 'ssh-rt-auth'),
+        x509.NameAttribute(oid.NameOID.ORGANIZATION_NAME, 'mssh'),
     ])
     serial_int = int.from_bytes(secrets.token_bytes(16), 'big') | 1
     serial_hex = format(serial_int, 'x')

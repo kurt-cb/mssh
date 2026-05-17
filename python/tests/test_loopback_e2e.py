@@ -244,4 +244,4 @@ def test_loopback_full_ssh_authorization(loopback_env, tmp_path):
 
     stdout, status = asyncio.run(_run())
     # Our server echoes a banner that contains the cert serial.
-    assert 'ssh-rt-auth: authorized session' in (stdout or '')
+    assert 'mssh: authorized session' in (stdout or '')

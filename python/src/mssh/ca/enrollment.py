@@ -1,6 +1,6 @@
 """YAML-backed enrollment database.
 
-Schema follows ssh-rt-auth-detailed-ca-admin.md. Atomic writes (write-temp +
+Schema follows mssh-detailed-ca-admin.md. Atomic writes (write-temp +
 rename) so concurrent reads never see a partial file.
 """
 from __future__ import annotations

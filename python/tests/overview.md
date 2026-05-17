@@ -1,4 +1,4 @@
-# ssh-rt-auth test suite overview
+# mssh test suite overview
 
 This document is a map of every test category that ships with the PoC:
 where it lives, what it verifies, how to run it. It's the single place to
@@ -107,7 +107,7 @@ Pass the marker explicitly to enable.
 
 | File | Marker | Purpose |
 |------|--------|---------|
-| `test_setup_only.py` | `setup_only` | Provisions an ad-hoc lab with department-style roles (`accounting` / `sales` / `hr` / `engineering` + a `root-admin` superuser). Each user generates their own keypair **inside** their primary container using the native tool (ssh-keygen for Ubuntu, dropbearkey + dropbearconvert for Alpine), the admin enrolls them with `ssh-rt-admin user add`, and the test leaves everything running. Writes `ADHOC_TEST_ENV.md`, `adhoc-env.sh`, and `cleanup_containers.sh` into the invocation cwd. No teardown. |
+| `test_setup_only.py` | `setup_only` | Provisions an ad-hoc lab with department-style roles (`accounting` / `sales` / `hr` / `engineering` + a `root-admin` superuser). Each user generates their own keypair **inside** their primary container using the native tool (ssh-keygen for Ubuntu, dropbearkey + dropbearconvert for Alpine), the admin enrolls them with `mssh-admin user add`, and the test leaves everything running. Writes `ADHOC_TEST_ENV.md`, `adhoc-env.sh`, and `cleanup_containers.sh` into the invocation cwd. No teardown. |
 | `test_openssh_shim.py` | `openssh_shim` | Wires `openssh/openssh_shim.py` into a stock OpenSSH `sshd` via `AuthorizedKeysCommand`. Three SSH attempts: enrolled+policy → granted, enrolled+no-policy → denied, not-enrolled → denied. Also asserts the SQLite cache de-duplicates sshd's double `AuthorizedKeysCommand` call (audit log has exactly 1 granted row for alice, not 2). |
 
 **Run:**

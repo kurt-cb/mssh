@@ -766,7 +766,7 @@ sshd's terse DEBUG output.
 (install via `pip install -e '.[mcp]'`). Exposes six tools:
 `status`, `server_list`, `user_list`, `user_inspect`,
 `audit_search`, `admin_list`. Wraps the existing `mssh-admin`
-admin-client config — the same `~/.ssh-rt-admin/config` that the
+admin-client config — the same `~/.mssh-admin/config` that the
 CLI uses. See [docs/operations.md § MCP interface](../docs/operations.md)
 for setup.
 
@@ -843,7 +843,7 @@ Two MCP server modes, served from the same daemon:
 
 ### Idea
 
-When an organization adopts ssh-rt-auth, their existing servers carry
+When an organization adopts mssh, their existing servers carry
 *years* of accumulated policy: `authorized_keys` files, sshd_config
 `AllowGroups`/`AllowUsers`, PAM rules, AKC plugins, `/etc/security/`
 limits, etc. Manually translating that into CA enrollments is

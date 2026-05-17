@@ -164,7 +164,7 @@ def test_enforce_grants_appear_in_ca_audit_log(msshd_env):
 
     # Read the CA's audit log and look for our grant.
     ca = CA_HOST
-    audit = lxc_exec(ca, 'cat', '/var/log/ssh-rt-auth/audit.jsonl',
+    audit = lxc_exec(ca, 'cat', '/var/log/mssh/audit.jsonl',
                      check=False)
     assert audit.returncode == 0, \
         f'reading CA audit log failed: rc={audit.returncode} stderr={audit.stderr!r}'
