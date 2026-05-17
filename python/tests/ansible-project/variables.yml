@@ -1,0 +1,11 @@
+---
+# Proxy Settings
+proxy_ip: "10.26.244.209"
+proxy_hostname: "squid-proxy.local"
+proxy_port: "3128"
+
+# Web Server Settings
+web_port: 80
+
+# Database Settings
+db_name: "production_db"

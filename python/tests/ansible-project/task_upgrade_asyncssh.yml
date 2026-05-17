@@ -1,0 +1,27 @@
+---
+# Example task — fix the "interactive mssh session drops after first
+# input" bug on Ubuntu 22.04 containers. Ubuntu's apt python3-asyncssh
+# is pinned at 2.5.0 (from 2020); msshd needs 2.14+ for stable
+# interactive PTY data flow. Pip-override the apt version, then
+# restart msshd.
+#
+# Run from the CA: cd ~/ansible-project && ansible-playbook \
+#   -i hosts.ini site.yml --limit ubuntu_servers --tags upgrade_asyncssh
+#
+# Delete this file if you don't need the workaround on your lab.
+
+- name: "Upgrade asyncssh to >=2.14 (fixes interactive-mssh PTY bug)"
+  ansible.builtin.pip:
+    name: "asyncssh>=2.14"
+    state: latest
+    extra_args: "--break-system-packages --upgrade"
+  when: "'ubuntu_servers' in group_names"
+  tags: [upgrade_asyncssh]
+
+- name: "Restart msshd (if running)"
+  ansible.builtin.systemd:
+    name: msshd
+    state: restarted
+  when: "'ubuntu_servers' in group_names"
+  failed_when: false       # msshd may not be configured yet at this phase
+  tags: [upgrade_asyncssh]

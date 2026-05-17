@@ -1,0 +1,14 @@
+---
+- name: Dynamic Multi-Task Playbook Execution
+  hosts: proxy_clients
+  become: true
+  
+  vars_files:
+    - variables.yml
+
+  tasks:
+    - name: Dynamically include and run task files in order
+      ansible.builtin.include_tasks: "{{ item }}"
+      with_fileglob:
+        - "task*.yml"
+        - "framework*.yml"

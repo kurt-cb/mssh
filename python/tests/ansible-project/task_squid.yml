@@ -1,0 +1,40 @@
+---
+- name: "Task 1: System Hosts File"
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: "^{{ proxy_ip }}\\s+"
+    line: "{{ proxy_ip }} {{ proxy_hostname }}"
+    state: present
+
+- name: "Task 1: System Environment (Debian/RedHat)"
+  ansible.builtin.blockinfile:
+    path: /etc/environment
+    block: |
+      http_proxy="http://{{ proxy_hostname }}:{{ proxy_port }}/"
+      https_proxy="http://{{ proxy_hostname }}:{{ proxy_port }}/"
+  when: ansible_os_family in ["Debian", "RedHat"]
+
+- name: "Task 1: APT proxy (Ubuntu)"
+  ansible.builtin.blockinfile:
+    path: /etc/apt/apt.conf.d/99proxy
+    create: true
+    block: 'Acquire::http::Proxy "http://{{ proxy_hostname }}:{{ proxy_port }}/";'
+  when: ansible_os_family == "Debian"
+
+- name: "Task 1: DNF proxy (RedHat)"
+  ansible.builtin.ini_file:
+    path: /etc/dnf/dnf.conf
+    section: main
+    option: proxy
+    value: "http://{{ proxy_hostname }}:{{ proxy_port }}"
+  when: ansible_os_family == "RedHat"
+
+- name: "Task 1: Profile proxy (Alpine)"
+  ansible.builtin.blockinfile:
+    path: /etc/profile.d/proxy.sh
+    create: true
+    mode: '0755'
+    block: |
+      export http_proxy="http://{{ proxy_hostname }}:{{ proxy_port }}/"
+      export https_proxy="http://{{ proxy_hostname }}:{{ proxy_port }}/"
+  when: ansible_os_family == "Alpine"
