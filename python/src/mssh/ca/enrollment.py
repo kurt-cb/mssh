@@ -99,6 +99,14 @@ class Enrollment:
         self.servers: dict[str, Server] = {}
         self.users: dict[str, User] = {}
         self.admins: dict[str, Admin] = {}
+        # Inner sshd_config template storage (see mssh.ca.templates).
+        # Keyed by inner_sshd_kind (e.g. 'openssh'); values are template
+        # text. ``templates_servers[server][kind]`` and
+        # ``templates_groups[group][kind]`` carry per-scope overrides;
+        # ``templates_default[kind]`` is the fleet-default.
+        self.templates_default: dict[str, str] = {}
+        self.templates_groups: dict[str, dict[str, str]] = {}
+        self.templates_servers: dict[str, dict[str, str]] = {}
         self._policy_seq = 0
         if self.path.exists():
             self.load()
@@ -137,6 +145,17 @@ class Enrollment:
                     enrolled_by=ufields.get('enrolled_by', ''),
                 )
             self._policy_seq = max_pol
+            # Templates (optional; absent in pre-templates enrollment files).
+            tpls = data.get('templates') or {}
+            self.templates_default = dict(tpls.get('default') or {})
+            self.templates_groups = {
+                g: dict(byk or {})
+                for g, byk in (tpls.get('groups') or {}).items()
+            }
+            self.templates_servers = {
+                s: dict(byk or {})
+                for s, byk in (tpls.get('servers') or {}).items()
+            }
 
     def save(self) -> None:
         with self._lock:
@@ -171,6 +190,19 @@ class Enrollment:
                     }
                     for u in self.users.values()
                 }
+            templates_section: dict[str, Any] = {}
+            if self.templates_default:
+                templates_section['default'] = dict(self.templates_default)
+            if self.templates_groups:
+                templates_section['groups'] = {
+                    g: dict(byk) for g, byk in self.templates_groups.items()
+                }
+            if self.templates_servers:
+                templates_section['servers'] = {
+                    s: dict(byk) for s, byk in self.templates_servers.items()
+                }
+            if templates_section:
+                out['templates'] = templates_section
             tmp = self.path.with_suffix(self.path.suffix + '.tmp')
             with tmp.open('w') as f:
                 yaml.safe_dump(out, f, sort_keys=True)
@@ -198,6 +230,8 @@ class Enrollment:
             if name not in self.servers:
                 raise EnrollmentError(f'server not found: {name}')
             del self.servers[name]
+            # Drop any per-server template overrides for this server.
+            self.templates_servers.pop(name, None)
             self.save()
 
     def find_server_by_mtls_subject(self, subject: str) -> Server | None:
