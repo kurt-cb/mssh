@@ -15,7 +15,18 @@ for the trust model. Items below extend or compose with those.
 
 ## 1. Per-connection ephemeral inner sshd
 
-**Status:** Worth pursuing in Phase 2. Genuinely cleaner architecture.
+**Status:** **Landed.** Per-host `inner.mode: long-lived | per-connection`
+ships in msshd today; CA-side config rendering with `{LOCAL_*}` /
+`{FROMCA_*}` marker grammar; emergency-template recovery path for
+CA-unreachable break-glass; protocol-version handshake on every
+authorize call. Default for new installs is `long-lived` and will
+flip to `per-connection` after one stable release cycle. Tracked
+as design now in [`design/architecture.md` § Hermetic inner sshd](architecture.md#hermetic-inner-sshd)
+and [`design/ca.md`](ca.md) (CA-side template store + render
+contract). Original plan archived at
+[`archive/design/mssh-per-connection-inner-sshd-plan.md`](../archive/design/mssh-per-connection-inner-sshd-plan.md).
+
+Notes preserved below for design-rationale value.
 
 ### Idea
 
@@ -1184,10 +1195,14 @@ without changing the existing long-lived-inner-sshd architecture.
   - **Per-user / per-session substitution.** The inner sshd is
     long-lived and shares its banner across sessions, so `{user}`
     can't change between connections without writing the banner
-    file concurrently — a race. Per-connection inner sshd (§1) is
-    the path; once that lands, msshd can render the banner per-
-    session with full CA-decision context, including `{user}` and
-    a `$MSSH_AUTH_DATA`-style summary.
+    file concurrently — a race. Per-connection inner sshd (§1)
+    **landed** and unblocks this — msshd can now render the banner
+    per-session against the full CA-decision context, including
+    `{user}` and a `$MSSH_AUTH_DATA`-style summary. The CA-side
+    template can write `Banner /var/lib/mssh/inner-sshd/sessions/{conn_id}/banner`
+    and msshd writes the per-session banner text alongside the
+    rendered sshd_config. Implementing this is small and bounded
+    once a per-server CA template is in place.
   - **CA-stored banner templates + admin CLI.** Templates live in
     `wrapper.yaml` on each msshd today. Storing them centrally in
     the CA's enrollment record (per-server or per-server-group)

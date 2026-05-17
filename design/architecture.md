@@ -141,10 +141,8 @@ per-server schedule.
 ## Hermetic inner sshd
 
 In **enforce** mode, msshd doesn't trust the operator's
-`/etc/ssh/sshd_config`. It generates a **hermetic** config at
-startup, hash-validates it against a per-OpenSSH-version baseline,
-and launches a fresh sshd subprocess against that config. The
-hermetic sshd:
+`/etc/ssh/sshd_config`. It launches its own sshd subprocess against
+a config it controls, with these invariants:
 
   - listens only on localhost (msshd is the only client)
   - accepts only ed25519 + ecdsa-p256, AEAD ciphers only
@@ -153,16 +151,53 @@ hermetic sshd:
   - has no PAM, no Include directives, no Match blocks
   - logs to msshd's stderr (no syslog, no separate log files)
 
-The operator never edits the hermetic config. When OpenSSH releases
-a new version, the hash baseline is updated together with whatever
-config-surface changes that version introduces — making the auth
-config a **versioned, audited artifact** rather than a moving
-target.
+The inner sshd has **two lifecycle modes**, selected by
+`wrapper.yaml`'s `inner.mode`:
+
+  - **long-lived** (default) — one inner sshd at msshd boot,
+    rendered once from a fixed template, serving every session
+    afterward. No per-session policy variability in the sshd_config
+    itself; per-session policy is enforced at the OpenSSH cert
+    layer (principals, critical options, force-command). Lowest
+    overhead; matches msshd's pre-1.1 behavior.
+  - **per-connection** — fresh sshd per session. The
+    `inner_sshd_config` is rendered by the **CA** as part of the
+    authorize response, with policy directives (`ForceCommand`,
+    `SetEnv`, forwarding flags, per-user banner) baked in by the
+    CA's template engine. msshd substitutes its own `{LOCAL_*}`
+    paths (port, host key, user-CA pubkey, banner file), runs
+    `sshd -t` as a sanity check, then spawns. ~50–100ms session
+    overhead. Unlocks per-user banner substitution and
+    OpenSSH-native enforcement of per-session policy without an
+    application-layer policy translator on msshd.
+
+Both modes guarantee the operator never edits the running config.
+In long-lived mode, the config is a fixed artifact generated from
+mssh's shipped template plus msshd-local paths. In per-connection
+mode, the rendered config is a **CA-signed artifact** (signed by
+the same authorize-response signing as the X.509 authz cert) —
+making the inner sshd config policy versioned and audited at the
+CA, not on each msshd host.
 
 This is the safety net: even if msshd has a bug in its
 authorization decision, the hermetic sshd cannot accept any
 credential msshd did not just mint. There is no other trust path
 into the inner sshd.
+
+**Recovery when the CA is unreachable.** Per-connection mode
+depends on the CA to render the config. To keep break-glass
+recovery from depending on the CA being up, msshd ships a local
+**emergency template** (`/usr/share/mssh/sshd_config.emergency.template`,
+optional operator override at `/etc/mssh/sshd_config.emergency.template`)
+that uses only `{LOCAL_*}` markers. When the CA is unreachable and
+an emergency cert is configured, msshd renders the emergency
+template locally and spawns the per-session sshd from it — same
+safe-by-default posture as a normal hermetic config, but with no
+per-session policy. The path is rate-limited per
+[security.md](security.md) "emergency cert". Operators whose
+break-glass story is simpler (system sshd on a different port)
+should leave the emergency cert unconfigured and use `mode:
+fallback` instead.
 
 ---
 

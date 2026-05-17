@@ -87,6 +87,52 @@ Key choices:
   - **`issued_at`** lets the CA reject stale requests (clock skew
     detection — see [architecture.md § Trust model](architecture.md#trust-model)).
 
+### Protocol-1.1 additions (optional)
+
+Protocol-1.1 adds four optional request fields. A 1.0 CA ignores
+them; a 1.1+ CA uses them to render the per-connection inner sshd
+config and record fleet versioning in audit. msshd populates them
+only when it has a value; missing fields are equivalent to "1.0
+mode" — the CA renders nothing extra and the response is shaped
+like a 1.0 response.
+
+```json
+{
+  …
+  "protocol_version":   "1.1",
+  "inner_sshd_kind":    "openssh",
+  "inner_sshd_version": "OpenSSH_9.6p1",
+  "msshd_version":      "0.1.0"
+}
+```
+
+The granted response under protocol 1.1 carries two additional
+top-level fields:
+
+```json
+{
+  "result": "granted",
+  "credentials": { … as above … },
+  "protocol_version":   "1.1",
+  "inner_sshd_config":  "Port {LOCAL_PORT}\nForceCommand /usr/bin/audit-shell …",
+  …envelope fields…
+}
+```
+
+`inner_sshd_config` is the **rendered** OpenSSH config text. The
+CA has already substituted all `{FROMCA_*}` markers from policy.
+msshd substitutes the small set of `{LOCAL_*}` markers it knows
+locally (port, host key path, user-CA pubkey path, banner file
+path), runs `sshd -t` as a sanity check, and spawns the per-session
+inner sshd against the result. This path is taken only when the
+target host runs `inner.mode: per-connection`; in `long-lived` mode
+the field is present in the response but ignored.
+
+See [`design/ca.md`](ca.md) for the CA-side template store + render
+contract, including the marker grammar (`{LOCAL_*}` substituted by
+msshd, `{FROMCA_*}` substituted by the CA, injection-defense rules
+for directive slots).
+
 ### Response — granted
 
 ```json
