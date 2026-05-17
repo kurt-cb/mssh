@@ -120,15 +120,20 @@ def pytest_addoption(parser):
                      help='Stop the adhoc setup after this phase '
                           '(test_setup_only_msshd.py only):\n'
                           '  0 = containers up, CA running, mssh source '
-                          'pushed; nothing else configured. Use this to '
-                          'walk the manual-setup flow with mssh-admin '
-                          'next on a blank slate.\n'
-                          '  1 = + vanilla sshd + per-user keypairs + '
-                          'authorized_keys distributed (ssh user@host:22 '
-                          'works).\n'
-                          '  2 (default) = + msshd in fallback then '
-                          'enforce mode + mssh material on hosts '
-                          '(mssh user@host:2200 works through msshd-enforce).')
+                          'deployed at /app, vanilla sshd running, '
+                          'per-user keypairs + authorized_keys '
+                          'distributed. ssh user@host:22 works; mssh / '
+                          'msshd not yet running ("installer deployed '
+                          'but not executed"). Walk the manual flow '
+                          'with mssh-admin next from here.\n'
+                          '  1 = + msshd installed in fallback mode in '
+                          'front of system sshd. ssh -p 2200 user@host '
+                          'works (transparently proxied). No CA call '
+                          'yet.\n'
+                          '  2 (default) = + mTLS material + CA '
+                          'enrollment + msshd flipped to enforce. mssh '
+                          'user@host:2200 works through the CA-mediated '
+                          'path.')
 
 
 # ---------------------------------------------------------------------------
