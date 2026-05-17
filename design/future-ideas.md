@@ -543,7 +543,10 @@ renderer for the config file.
 
 ## 9. Incremental SSH→mssh migration story (operational doc)
 
-**Status:** Documentation / operator-facing, not a code task.
+**Status:** **Landed** as [docs/MIGRATION.md](../docs/MIGRATION.md).
+Remaining work captured under [[end-to-end-migration-test]] (§20) —
+auto-generating the playbook from a real test run, so the runbook
+never drifts from the implementation.
 
 ### Idea
 

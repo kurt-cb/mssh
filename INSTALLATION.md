@@ -38,6 +38,12 @@ minutes. Read [docs/operations.md § adoption journey](docs/operations.md#the-ad
 for what the three modes mean and why we structure migrations
 around them.
 
+## Migrating an existing fleet
+
+For a step-by-step operator playbook (CA setup → msshd in
+fallback → user enrollment → flip to enforce → decommission
+legacy ssh), see [docs/MIGRATION.md](docs/MIGRATION.md).
+
 ## Distro packages
 
 Not yet. `apt install mssh msshd` is on the roadmap; see
