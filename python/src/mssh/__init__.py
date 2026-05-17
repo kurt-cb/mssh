@@ -1,15 +1,17 @@
-"""ssh-rt-auth — Python implementation.
+"""mssh — runtime, CA-mediated SSH authorization. Python implementation.
 
 Subpackages:
   ca/            CA server (Flask + mTLS).
-  admin/         ssh-rt-admin CLI (operator-facing).
+  admin/         mssh-admin CLI (operator-facing).
   shim/          AuthorizedKeysCommand-style authorization shim.
-  debug_sshd/    Debug-only AsyncSSH server that calls the shim
-                 (formerly Tier 2 reference; kept as a minimal CA-call
-                 surface for debugging the CA / shim path in isolation).
-  akc_shim/      Tier 3 entry point — OpenSSH AuthorizedKeysCommand.
-  msshd/         Tier 1 wrapper daemon (msshd).
-  mssh           Tier 1 client CLI (single module).
+  debug_sshd/    Debug-only AsyncSSH server that calls the shim — kept
+                 as a minimal CA-call surface for debugging the CA /
+                 shim path in isolation. Not a production server.
+  akc_shim/      OpenSSH AuthorizedKeysCommand entry point (unmodified-
+                 OpenSSH compatibility path).
+  msshd/         Gateway daemon (msshd) — terminates outer mTLS, calls
+                 the CA, runs a hermetic inner sshd.
+  client         mssh client CLI (single module).
 
 Future siblings: ../go/, ../c/ (placeholder skeletons today).
 

@@ -30,7 +30,7 @@ from .sqlite_cache import SqliteCertCache
 from .config import ShimConfig
 
 
-log = logging.getLogger('ssh-rt-auth-shim')
+log = logging.getLogger('mssh.shim')
 
 
 # Critical extension OIDs the shim recognizes. If the CA returns a cert with a

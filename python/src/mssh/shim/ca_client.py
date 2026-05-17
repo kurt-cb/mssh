@@ -8,7 +8,7 @@ from typing import Any
 import requests
 
 
-log = logging.getLogger('ssh-rt-auth-shim.ca_client')
+log = logging.getLogger('mssh.shim.ca_client')
 
 
 @dataclass

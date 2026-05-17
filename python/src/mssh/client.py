@@ -1,11 +1,11 @@
-"""mssh — client CLI for ssh-rt-auth wrapper hosts.
+"""mssh — client CLI for msshd hosts.
 
 Speaks the outer-protocol-v1 (JSON header + raw byte stream) over a
-TLS 1.3 + mTLS tunnel directly to the wrapper. No openssh-client
-dependency, no openssl subprocess. Pure Python (uses ``ssl.SSLContext``
-which underlies OpenSSL).
+TLS 1.3 + mTLS tunnel directly to msshd. No openssh-client dependency,
+no openssl subprocess. Pure Python (uses ``ssl.SSLContext`` which
+underlies OpenSSL).
 
-Protocol (matches design/ssh-rt-auth-detailed-wrapper.md §3):
+Protocol (see design/architecture.md § wire protocols):
 
   1. TCP + TLS 1.3 + mTLS handshake.
   2. Client → server (1 line of JSON):
@@ -209,7 +209,7 @@ def _build_ssl_context(ident: Identity) -> ssl.SSLContext:
     ctx.load_cert_chain(certfile=str(ident.cert), keyfile=str(ident.key))
     ctx.load_verify_locations(cafile=str(ident.ca))
     ctx.verify_mode = ssl.CERT_REQUIRED
-    ctx.check_hostname = False  # ssh-rt-auth hosts are addressed by IP/short name;
+    ctx.check_hostname = False  # msshd hosts are addressed by IP/short name;
                                 # SAN-based hostname verification isn't worth
                                 # the operator-side complexity for v1.
     return ctx
@@ -366,7 +366,7 @@ def _pump(sock: ssl.SSLSocket, *, interactive: bool) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog='mssh',
-        description='ssh-rt-auth client (mTLS + JSON-framed session-RPC).',
+        description='mssh client (mTLS + JSON-framed session-RPC to msshd).',
         usage='mssh [options] user@host[:port] [-- command [args ...]]',
     )
     parser.add_argument('target',

@@ -1,9 +1,11 @@
-"""ssh-rt-auth wrapper — Python PoC implementation.
+"""msshd — server-side gateway daemon. Python implementation.
 
 See:
-- wrapper/README.md — overview + variant chooser
-- design/ssh-rt-auth-detailed-wrapper.md — implementation blueprint
+- design/architecture.md — components, modes, hermetic inner sshd
+- design/api.md — REST + admin API contract
 
-Phase 1A (current): fallback mode only.
-Phase 1B (next):    enforce mode (mTLS, CA call, cert mint, inner sshd).
+Modes (selected via wrapper.yaml):
+  fallback — pure TCP proxy to operator's existing sshd; no CA call.
+  gated    — mTLS + CA approval, forward to operator's sshd. Deferred.
+  enforce  — mTLS + CA call + ephemeral OpenSSH cert + hermetic inner sshd.
 """
