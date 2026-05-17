@@ -26,6 +26,12 @@ setup(
         'click>=8.0',
         'requests>=2.31',
     ],
+    extras_require={
+        # Read-only MCP server exposing the CA admin API to a local
+        # LLM. Optional because the mcp SDK is a heavyweight dep that
+        # most operators don't need.
+        'mcp': ['mcp>=1.0'],
+    },
     entry_points={
         'console_scripts': [
             # CA + admin
@@ -40,6 +46,9 @@ setup(
             # Minimal CA-call surface for diagnosing CA/policy issues
             # in isolation from the gateway machinery.
             'mssh-debug-sshd      = mssh.debug_sshd.ssh_server:main',
+            # MCP server exposing the CA's read-only admin surface.
+            # Requires the 'mcp' extra (pip install -e '.[mcp]').
+            'mssh-mcp             = mssh.mcp.server:main',
         ],
     },
 )

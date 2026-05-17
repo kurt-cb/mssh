@@ -296,6 +296,50 @@ policies — and prints `✓` or `✗` per check. `next` prints only the
 first failing check plus a suggested command, useful while
 onboarding a new server or user.
 
+### Ask the CA in natural language (MCP)
+
+The `mssh-mcp` server exposes the read-only admin API over the
+[Model Context Protocol](https://modelcontextprotocol.io) so an
+LLM-driven client (Claude Desktop, etc.) can answer questions like
+"why was alice denied last Tuesday" or "list every server in the
+production group" by calling the same admin endpoints `mssh-admin`
+uses.
+
+Install (optional extra):
+
+```bash
+pip install -e '.[mcp]'      # or `pip install mssh[mcp]` after release
+```
+
+Configure: `mssh-mcp` reads `~/.ssh-rt-admin/config` (same fields as
+`mssh-admin`). Then register the server with your MCP client. For
+Claude Desktop, add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "mssh-ca": {
+      "command": "mssh-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+Tools exposed (all read-only):
+
+  - `status` — full deployment state walk (same as `mssh-admin status`).
+  - `server_list` — enrolled servers, with optional group / name
+    filter.
+  - `user_list` — enrolled users with key + policy counts.
+  - `user_inspect` — full detail for one user.
+  - `audit_search` — recent authorize decisions with filters.
+  - `admin_list` — enrolled admins.
+
+Write tools (`server_add`, `user_add`, `policy_add`, key rotation)
+are deliberately not in v1 — the trust delegation for write access
+needs its own design (see [design/future-ideas.md §12](../design/future-ideas.md)).
+
 ---
 
 ## Troubleshooting

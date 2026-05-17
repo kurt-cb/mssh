@@ -762,6 +762,21 @@ sshd's terse DEBUG output.
 
 ## 12. MCP interface to the CA — natural-language diagnostics + config
 
+**Status:** v1 (read-only) is **landed** as `mssh-mcp`
+(install via `pip install -e '.[mcp]'`). Exposes six tools:
+`status`, `server_list`, `user_list`, `user_inspect`,
+`audit_search`, `admin_list`. Wraps the existing `mssh-admin`
+admin-client config — the same `~/.ssh-rt-admin/config` that the
+CLI uses. See [docs/operations.md § MCP interface](../docs/operations.md)
+for setup.
+
+What's not done: the `trusted_write` mode (server_add, user_add,
+policy_add, key-rotate, …). Write tools carry a trust delegation
+that needs its own design conversation — multi-person bootstrap,
+per-admin opt-in flags in enrollment, audit annotation
+(`actor: mcp:<admin_subject>`), optional interactive approval
+flow on the admin's terminal. Not v1.
+
 ### Idea
 
 Expose the CA over an [MCP](https://modelcontextprotocol.io)
