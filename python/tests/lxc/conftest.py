@@ -108,6 +108,14 @@ def pytest_addoption(parser):
                           'diagnosing what processes the shim/AsyncSSH server '
                           'actually invoke. Alpine is skipped (musl build '
                           'required — not packaged in apk).')
+    parser.addoption('--lxc-prefix', default='mssh',
+                     help='Prefix for LXC container names. Default `mssh`, '
+                          'so the adhoc lab uses `mssh-adhoc-ca`, '
+                          '`mssh-adhoc-acct`, etc. Set to a different value '
+                          '(e.g. `--lxc-prefix=alice`) to run a parallel lab '
+                          'without name collisions. The shared `mssh-*-fixed` '
+                          'local base images are NOT prefixed — they\'re '
+                          'reused across labs.')
     parser.addoption('--phase', type=int, default=3, choices=(0, 1, 2, 3),
                      help='Stop the adhoc setup after this phase '
                           '(test_setup_only_msshd.py only):\n'

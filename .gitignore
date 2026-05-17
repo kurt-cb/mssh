@@ -14,6 +14,9 @@ __pycache__/
 adhoc-keys
 adhoc-ca-creds
 adhoc-diagnostics
+# The rendered ansible-project at invocation_cwd. NOT
+# python/tests/ansible-project/ (which is the source template).
+python/ansible-project
 cleanup_containers.sh
 ADHOC_TEST_ENV.md
 adhoc-env.sh

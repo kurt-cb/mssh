@@ -769,6 +769,200 @@ def _push_flip_scripts_to_ca(ips: dict, ca_ip: str) -> None:
                   owner=f'{SUPERUSER.username}:{SUPERUSER.username}')
 
 
+def _ansible_template_dir() -> Path:
+    """Path to the ansible-project skeleton this repo ships."""
+    return Path(__file__).resolve().parent.parent / 'ansible-project'
+
+
+def _render_ansible_hosts_ini(ips: dict, prefix: str) -> str:
+    """Render the inventory matching the user's ansible-project template:
+    groups by OS (ubuntu_servers / alpine_servers / fedora_servers /
+    debian) and by role (ca_server / sales / accounting / hr / engineering).
+
+    Each line carries the container's bridged IP. The ``[all:vars]``
+    block tells ansible to ssh as root using the dedicated key the lab
+    pushes to /root/.ssh/ on every container."""
+    ubuntu_servers = [(CA_NAME, ips[CA_NAME]),
+                      (ACCT_NAME, ips[ACCT_NAME]),
+                      (SALES_NAME, ips[SALES_NAME]),
+                      (HR_NAME, ips[HR_NAME])]
+    alpine_servers = [(ENG_NAME, ips[ENG_NAME])]
+
+    def block(name: str, members: list) -> str:
+        lines = [f'[{name}]']
+        for n, ip in members:
+            lines.append(f'{n} ansible_host={ip}')
+        lines.append('')
+        return '\n'.join(lines)
+
+    return '\n'.join([
+        block('fedora_servers', []),
+        block('ubuntu_servers', ubuntu_servers),
+        block('alpine_servers', alpine_servers),
+        block('debian', []),       # alias the operator can populate
+        block('ca_server', [(CA_NAME, ips[CA_NAME])]),
+        block('sales', [(SALES_NAME, ips[SALES_NAME])]),
+        block('accounting', [(ACCT_NAME, ips[ACCT_NAME])]),
+        block('hr', [(HR_NAME, ips[HR_NAME])]),
+        block('engineering', [(ENG_NAME, ips[ENG_NAME])]),
+        '[all:vars]',
+        'ansible_user=root',
+        'ansible_ssh_private_key_file=/root/.ssh/ansible_id_ed25519',
+        ('ansible_ssh_common_args=\'-o StrictHostKeyChecking=no '
+         '-o UserKnownHostsFile=/dev/null\''),
+        f'ansible_python_interpreter=/usr/bin/python3',
+        '',
+        f'# Lab prefix: {prefix}',
+        '',
+    ])
+
+
+_EXAMPLE_PLAYBOOK_UPGRADE_ASYNCSSH = '''---
+# Standalone playbook — fix the "interactive mssh session drops after
+# first input" bug on Ubuntu 22.04 containers. Ubuntu's apt
+# python3-asyncssh is pinned at 2.5.0 (from 2020); msshd needs 2.14+
+# for stable interactive PTY data flow. Pip-overrides the apt version,
+# then restarts msshd.
+#
+# Run from the CA:
+#     cd ~/ansible-project
+#     ansible-playbook -i hosts.ini playbook_upgrade_asyncssh.yml
+#
+# This is a STANDALONE playbook (its own `hosts:` block) so it doesn't
+# depend on site.yml's `proxy_clients` group target. Delete it if your
+# lab doesn't need the workaround.
+
+- name: "Upgrade asyncssh to >=2.14 on every Ubuntu msshd host"
+  hosts: ubuntu_servers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: "Ensure python3-pip is installed (Ubuntu's python3 ships without it)"
+      ansible.builtin.apt:
+        name: python3-pip
+        state: present
+        update_cache: false
+
+    - name: "pip-install asyncssh>=2.14 (overrides the apt 2.5.0)"
+      ansible.builtin.pip:
+        name: "asyncssh>=2.14"
+        state: latest
+        extra_args: "--break-system-packages --upgrade"
+
+    - name: "Restart msshd (skipped if not yet installed)"
+      ansible.builtin.systemd:
+        name: msshd
+        state: restarted
+      failed_when: false
+'''
+
+
+def _write_ansible_project(out_dir: Path, ips: dict, prefix: str) -> None:
+    """Copy the ansible-project skeleton from python/tests/ansible-project/
+    to ``out_dir``, then overwrite hosts.ini with one rendered from the
+    live lab's containers + groups. Adds an example
+    ``task_upgrade_asyncssh.yml`` the operator can use to fix the known
+    interactive-mssh-PTY bug (Ubuntu 22.04's python3-asyncssh is too old)."""
+    template = _ansible_template_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for src in template.iterdir():
+        if src.is_file():
+            shutil.copy2(src, out_dir / src.name)
+    # Overwrite hosts.ini with the rendered version.
+    (out_dir / 'hosts.ini').write_text(
+        _render_ansible_hosts_ini(ips, prefix))
+    # Drop the example standalone playbook. Operator can delete it.
+    (out_dir / 'playbook_upgrade_asyncssh.yml').write_text(
+        _EXAMPLE_PLAYBOOK_UPGRADE_ASYNCSSH)
+
+
+def _setup_ansible_on_ca(ips: dict, prefix: str,
+                        ansible_project_host_dir: Path) -> None:
+    """Wire the CA to be the ansible control host:
+
+      1. Install ansible-core on the CA (apt; Ubuntu has it).
+      2. Generate a dedicated ed25519 ansible key in /root/.ssh/ on the CA.
+      3. Push the public half to /root/.ssh/authorized_keys on every
+         SSH-capable container (Ubuntu has sshd running from apt install;
+         Alpine needs the openssh-server service started).
+      4. Push the rendered ansible-project tree from the host to
+         /root/ansible-project/ on the CA.
+
+    After this, an operator on the CA can:
+        cd /root/ansible-project
+        ansible all -m ping        # smoke-test
+        ansible-playbook site.yml  # run their playbook
+    """
+    # 1. apt install ansible on CA.
+    lxc_exec(CA_NAME, 'sh', '-c',
+             'DEBIAN_FRONTEND=noninteractive apt-get install -y -q '
+             'ansible-core 2>&1 | tail -5',
+             check=False, timeout=180)
+
+    # 2. Generate the ansible key on CA. Idempotent: skip if already there.
+    lxc_exec(CA_NAME, 'sh', '-c',
+             'mkdir -p /root/.ssh && chmod 700 /root/.ssh && '
+             '[ -f /root/.ssh/ansible_id_ed25519 ] || '
+             '  ssh-keygen -t ed25519 -N "" -q '
+             '    -f /root/.ssh/ansible_id_ed25519 -C ansible@ca')
+    r = lxc_exec(CA_NAME, 'cat', '/root/.ssh/ansible_id_ed25519.pub',
+                 check=True)
+    ansible_pubkey = (r.stdout or '').strip() + '\n'
+
+    # 3. Distribute to root@<each container> — INCLUDING the CA itself,
+    #    since `[all]` in the inventory covers it. Ensure sshd is
+    #    running on Alpine (Ubuntu's apt install enables it; Alpine
+    #    needs explicit start).
+    for c in ALL_CONTAINERS:
+        if c.endswith('-eng'):
+            # Alpine — install + start openssh-server explicitly.
+            lxc_exec(c, 'sh', '-c',
+                     'apk add --no-cache openssh-server openssh-keygen '
+                     '2>&1 | tail -3', check=False, timeout=120)
+            lxc_exec(c, 'ssh-keygen', '-A', check=False, timeout=30)
+            lxc_exec(c, 'sh', '-c',
+                     "sed -i 's|^#*PermitRootLogin.*|PermitRootLogin "
+                     "prohibit-password|' /etc/ssh/sshd_config", check=False)
+            lxc_exec(c, 'sh', '-c',
+                     '/usr/sbin/sshd 2>/dev/null; true', check=False)
+        else:
+            # Ubuntu — sshd installed by apt is enabled; just ensure
+            # PermitRootLogin is sane for key-auth.
+            lxc_exec(c, 'sh', '-c',
+                     "sed -i 's|^#*PermitRootLogin.*|PermitRootLogin "
+                     "prohibit-password|' /etc/ssh/sshd_config "
+                     "&& systemctl reload ssh 2>/dev/null || true",
+                     check=False)
+        # The CA's authorized_keys is special: it might also carry the
+        # superuser's SSH key at a later phase. Append rather than
+        # overwrite to preserve any prior content. Best-effort dedup.
+        lxc_exec(c, 'mkdir', '-p', '/root/.ssh')
+        lxc_exec(c, 'chmod', '700', '/root/.ssh')
+        if c == CA_NAME:
+            lxc_exec(c, 'sh', '-c',
+                     'touch /root/.ssh/authorized_keys && '
+                     'chmod 600 /root/.ssh/authorized_keys')
+            # Append-if-missing using grep -F.
+            push_text(c, ansible_pubkey, '/tmp/ansible.pub', mode='644')
+            lxc_exec(c, 'sh', '-c',
+                     'grep -qFx -f /tmp/ansible.pub '
+                     '/root/.ssh/authorized_keys 2>/dev/null || '
+                     'cat /tmp/ansible.pub >> /root/.ssh/authorized_keys; '
+                     'rm /tmp/ansible.pub')
+        else:
+            push_text(c, ansible_pubkey, '/root/.ssh/authorized_keys',
+                      mode='600')
+
+    # 4. Push the rendered project to the CA. Pre-cleanup so re-runs
+    #    don't accumulate stale tasks.
+    lxc_exec(CA_NAME, 'rm', '-rf', '/root/ansible-project', check=False)
+    lxc_exec(CA_NAME, 'mkdir', '-p', '/root/ansible-project')
+    for f in sorted(ansible_project_host_dir.iterdir()):
+        if f.is_file():
+            push_file(CA_NAME, f, f'/root/ansible-project/{f.name}',
+                      mode='644')
+
+
 def _write_root_readme(container: str, ca_ip: str, stop_at_phase: int) -> None:
     """Push /root/README.md to a container, telling an operator what
     state the lab is parked at and how to advance using mssh-admin's
@@ -835,6 +1029,35 @@ From the operator workstation (the host that has admin creds):
 The status walk knows about: CA up, admins enrolled, servers enrolled,
 users enrolled, every user with at least one key, every user with at
 least one policy. As you provision, those checks flip from ✗ to ✓.
+
+## Deploying via ansible from the CA
+
+The lab installs ansible-core on the CA and pre-populates an inventory
+at `/root/ansible-project/` covering every container in this lab. From
+the CA:
+
+    cd /root/ansible-project
+    ansible all -m ping              # smoke-test all containers
+    ansible-playbook site.yml        # runs every task*.yml + framework*.yml
+
+The inventory groups containers by OS (`ubuntu_servers`,
+`alpine_servers`, …) and by role (`ca_server`, `accounting`, `sales`,
+`hr`, `engineering`). Drop your own `task_<name>.yml` files alongside
+`task_ca.yml` / `task_squid.yml` and they get picked up by `site.yml`'s
+glob (under whichever group `site.yml`'s `hosts:` is set to).
+
+There's also a standalone `playbook_upgrade_asyncssh.yml` that fixes
+the known "interactive mssh session drops on first input" bug on
+Ubuntu 22.04 (Ubuntu's apt python3-asyncssh is pinned at 2.5.0; msshd
+needs 2.14+). Run it directly:
+
+    ansible-playbook -i hosts.ini playbook_upgrade_asyncssh.yml
+
+Delete it if your fleet doesn't need it.
+
+The same `/root/ansible-project/` exists on the operator host
+(`./ansible-project/`) for editing locally. Push your edits to the CA
+with `lxc file push` or rsync.
 
 ## Manual steps from Phase {stop_at_phase}
 
@@ -1165,7 +1388,29 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
     # 3 (default) = + msshd enforce. See conftest.py.
     stop_at_phase = int(request.config.getoption('--phase'))
 
-    banner(f'msshd adhoc lab — Phase 0 → ... → {stop_at_phase}')
+    # --lxc-prefix overrides the default `mssh-adhoc-*` container names so
+    # multiple operators can run parallel labs on the same host without
+    # collisions. Mutate module-level constants in-place — the constants
+    # are referenced from many helper functions defined above; this keeps
+    # the diff small.
+    prefix = request.config.getoption('--lxc-prefix') or 'mssh'
+    global CA_NAME, ACCT_NAME, SALES_NAME, HR_NAME, ENG_NAME
+    global SSH_CONTAINERS, ALL_CONTAINERS, SERVERS
+    CA_NAME    = f'{prefix}-adhoc-ca'
+    ACCT_NAME  = f'{prefix}-adhoc-acct'
+    SALES_NAME = f'{prefix}-adhoc-sales'
+    HR_NAME    = f'{prefix}-adhoc-hr'
+    ENG_NAME   = f'{prefix}-adhoc-eng'
+    SSH_CONTAINERS = [ACCT_NAME, SALES_NAME, HR_NAME, ENG_NAME]
+    ALL_CONTAINERS = [CA_NAME] + SSH_CONTAINERS
+    SERVERS = [
+        _Server(ACCT_NAME,  'srv-acct',  UBUNTU_IMAGE, 'accounting'),
+        _Server(SALES_NAME, 'srv-sales', UBUNTU_IMAGE, 'sales'),
+        _Server(HR_NAME,    'srv-hr',    UBUNTU_IMAGE, 'hr'),
+        _Server(ENG_NAME,   'srv-eng',   ALPINE_IMAGE, 'engineering'),
+    ]
+
+    banner(f'msshd adhoc lab — prefix={prefix!r} Phase 0 → ... → {stop_at_phase}')
 
     # Build the local mssh-ubuntu-fixed / mssh-alpine-fixed images on first
     # run. Subsequent runs reuse the local aliases and skip cloud-init's
@@ -1281,6 +1526,17 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
         admin_cert=str(ca_creds_dir / 'bootstrap-admin-cert.pem'),
         admin_key=str(ca_creds_dir / 'bootstrap-admin-key.pem'),
         ca_cert=str(ca_creds_dir / 'tls-ca-cert.pem'))
+
+    # ---- ansible scaffolding ----------------------------------------
+    # Render the ansible-project skeleton against the live lab + install
+    # ansible-core on the CA + set up CA→other-container SSH-as-root
+    # access so an operator can `ansible all -m ping` immediately.
+    # Lives on the host at ./ansible-project/ and on the CA at
+    # /root/ansible-project/. Available at every phase (>=0).
+    section('Bootstrapping ansible-project on host + CA')
+    ansible_host_dir = invocation_cwd / 'ansible-project'
+    _write_ansible_project(ansible_host_dir, ips, prefix)
+    _setup_ansible_on_ca(ips, prefix, ansible_host_dir)
 
     # ---- --phase 0 stopping point -----------------------------------
     # Blank-slate: containers up, CA running, source pushed, admin creds
