@@ -828,7 +828,10 @@ def _render_ansible_hosts_ini(ips: dict, prefix: str) -> str:
         block('engineering', [(ENG_NAME, ips[ENG_NAME])]),
         '[all:vars]',
         'ansible_user=root',
-        'ansible_ssh_private_key_file=/root/.ssh/ansible_id_ed25519',
+        # Relative to this hosts.ini's directory so the same inventory
+        # works on the host (./ansible-project/ansible_id_ed25519) and
+        # on the CA (/root/ansible-project/ansible_id_ed25519).
+        'ansible_ssh_private_key_file=./ansible_id_ed25519',
         ('ansible_ssh_common_args=\'-o StrictHostKeyChecking=no '
          '-o UserKnownHostsFile=/dev/null\''),
         f'ansible_python_interpreter=/usr/bin/python3',
@@ -901,20 +904,25 @@ def _write_ansible_project(out_dir: Path, ips: dict, prefix: str) -> None:
 
 def _setup_ansible_on_ca(ips: dict, prefix: str,
                         ansible_project_host_dir: Path) -> None:
-    """Wire the CA to be the ansible control host:
+    """Wire the lab for ansible — works from both the host and the CA.
 
       1. Install ansible-core on the CA (apt; Ubuntu has it).
-      2. Generate a dedicated ed25519 ansible key in /root/.ssh/ on the CA.
+      2. Generate a dedicated ed25519 keypair on the HOST at
+         ``<ansible_project_host_dir>/ansible_id_ed25519`` (private key
+         mode 600). This is the single source of truth for the key.
       3. Push the public half to /root/.ssh/authorized_keys on every
-         SSH-capable container (Ubuntu has sshd running from apt install;
-         Alpine needs the openssh-server service started).
-      4. Push the rendered ansible-project tree from the host to
-         /root/ansible-project/ on the CA.
+         SSH-capable container.
+      4. Push the rendered ansible-project tree (including the private
+         key) to /root/ansible-project/ on the CA.
 
-    After this, an operator on the CA can:
-        cd /root/ansible-project
-        ansible all -m ping        # smoke-test
-        ansible-playbook site.yml  # run their playbook
+    After this, an operator on EITHER side can:
+        cd ./ansible-project        # host
+        cd /root/ansible-project    # CA
+        ansible all -m ping
+        ansible-playbook site.yml
+
+    hosts.ini's ``ansible_ssh_private_key_file=./ansible_id_ed25519``
+    is relative, so the same inventory resolves in both contexts.
     """
     # 1. apt install ansible on CA.
     lxc_exec(CA_NAME, 'sh', '-c',
@@ -922,15 +930,19 @@ def _setup_ansible_on_ca(ips: dict, prefix: str,
              'ansible-core 2>&1 | tail -5',
              check=False, timeout=180)
 
-    # 2. Generate the ansible key on CA. Idempotent: skip if already there.
-    lxc_exec(CA_NAME, 'sh', '-c',
-             'mkdir -p /root/.ssh && chmod 700 /root/.ssh && '
-             '[ -f /root/.ssh/ansible_id_ed25519 ] || '
-             '  ssh-keygen -t ed25519 -N "" -q '
-             '    -f /root/.ssh/ansible_id_ed25519 -C ansible@ca')
-    r = lxc_exec(CA_NAME, 'cat', '/root/.ssh/ansible_id_ed25519.pub',
-                 check=True)
-    ansible_pubkey = (r.stdout or '').strip() + '\n'
+    # 2. Generate the ansible keypair on the HOST inside the rendered
+    #    ansible-project dir. Idempotent: skip if it already exists from
+    #    a prior run. mode 0600 on the private key so ssh + ansible
+    #    accept it.
+    key_priv = ansible_project_host_dir / 'ansible_id_ed25519'
+    key_pub  = ansible_project_host_dir / 'ansible_id_ed25519.pub'
+    if not key_priv.exists():
+        subprocess.run(
+            ['ssh-keygen', '-t', 'ed25519', '-N', '', '-q',
+             '-f', str(key_priv), '-C', 'ansible@mssh-lab'],
+            check=True)
+    os.chmod(key_priv, 0o0600)
+    ansible_pubkey = key_pub.read_text().strip() + '\n'
 
     # 3. Distribute to root@<each container> — INCLUDING the CA itself,
     #    since `[all]` in the inventory covers it. Ensure sshd is
@@ -982,8 +994,14 @@ def _setup_ansible_on_ca(ips: dict, prefix: str,
     lxc_exec(CA_NAME, 'mkdir', '-p', '/root/ansible-project')
     for f in sorted(ansible_project_host_dir.iterdir()):
         if f.is_file():
-            push_file(CA_NAME, f, f'/root/ansible-project/{f.name}',
-                      mode='644')
+            # The private key MUST land at 0600 or ssh/ansible refuse
+            # to use it. Everything else (yaml/cfg/ini/pubkey) at 0644.
+            if f.name == 'ansible_id_ed25519':
+                push_file(CA_NAME, f,
+                          f'/root/ansible-project/{f.name}', mode='600')
+            else:
+                push_file(CA_NAME, f,
+                          f'/root/ansible-project/{f.name}', mode='644')
 
 
 def _write_root_readme(container: str, ca_ip: str, stop_at_phase: int) -> None:
@@ -1114,25 +1132,29 @@ def _finalize_adhoc_artifacts(*, stop_at_phase: int, invocation_cwd: Path,
                               ips: dict, artifacts_dir: Path,
                               keys_generated: bool) -> None:
     """Write the host-side artifacts the operator needs to interact with
-    the lab. Always writes the cleanup script + the per-container README.
-    Writes env.sh + ADHOC_TEST_ENV.md only when keypairs exist (phase >= 1),
-    otherwise their referenced files don't exist and sourcing them would
-    error.
+    the lab. Always writes everything: cleanup script, adhoc-env.sh,
+    ADHOC_TEST_ENV.md, and per-container READMEs. At Phase 0 the env
+    helpers reference per-user keypaths that don't exist yet — sourcing
+    is still safe (env vars are just strings), and the helpers fail at
+    use time with a missing-key error. The IPs and container names are
+    useful even at Phase 0, so write them unconditionally.
 
     Pushes /root/README.md to every server container (and the CA) so an
     operator who `lxc exec`s in has setup notes wherever they land.
     """
     _write_cleanup_script(invocation_cwd / 'cleanup_containers.sh')
-    if keys_generated:
-        _write_env_sh(invocation_cwd / 'adhoc-env.sh',
-                      ips=ips, artifacts_dir=artifacts_dir)
-        _write_overview_md(invocation_cwd / 'ADHOC_TEST_ENV.md',
-                           ips=ips, artifacts_dir=artifacts_dir)
+    _write_env_sh(invocation_cwd / 'adhoc-env.sh',
+                  ips=ips, artifacts_dir=artifacts_dir,
+                  keys_generated=keys_generated)
+    _write_overview_md(invocation_cwd / 'ADHOC_TEST_ENV.md',
+                       ips=ips, artifacts_dir=artifacts_dir,
+                       keys_generated=keys_generated)
     for c in ALL_CONTAINERS:
         _write_root_readme(c, ips[CA_NAME], stop_at_phase)
 
 
-def _write_overview_md(path: Path, *, ips: dict, artifacts_dir: Path) -> None:
+def _write_overview_md(path: Path, *, ips: dict, artifacts_dir: Path,
+                       keys_generated: bool = True) -> None:
     user_lines = []
     for u in USERS:
         allowed = _allowed_servers_for(u)
@@ -1144,7 +1166,14 @@ def _write_overview_md(path: Path, *, ips: dict, artifacts_dir: Path) -> None:
         f'| {s.canonical.replace("srv-", "")} | {s.canonical} | '
         f'{s.group} | {ips[s.container]} |'
         for s in SERVERS)
-    path.write_text(f'''# mssh adhoc lab — what you've got
+    phase0_banner = ('' if keys_generated else
+        '> **Phase 0 stop point.** Per-user keypairs + mTLS material '
+        'have not been generated yet — the `mssh_as` / `ssh_as` helpers '
+        'in `adhoc-env.sh` reference files under `adhoc-keys/` that do '
+        'not exist on disk. The IP / container-name exports work fine; '
+        'use them with raw `lxc exec` or your own ssh until you rerun '
+        'with `--phase 1` or `--phase 2`.\n\n')
+    path.write_text(phase0_banner + f'''# mssh adhoc lab — what you've got
 
 5 machines: 4 SSH servers (acct, sales, hr, eng) + 1 CA. All driven
 **from the host** via ssh/mssh — you don't need to know or care that
@@ -1260,10 +1289,17 @@ The full container names are `{CA_NAME}`, `{ACCT_NAME}`,
 ''')
 
 
-def _write_env_sh(path: Path, *, ips: dict, artifacts_dir: Path) -> None:
+def _write_env_sh(path: Path, *, ips: dict, artifacts_dir: Path,
+                  keys_generated: bool = True) -> None:
     """adhoc-env.sh — source from the host. Exposes IPs, ports, key
     paths, and helper functions so the operator can act as any user
     via host-side ssh/mssh, with `lxc exec` nowhere in sight.
+
+    At Phase 0 (keys_generated=False) the IP / port / container-name
+    exports are still useful; the per-user key paths point at files
+    that don't exist yet. The helper functions emit a clear warning if
+    invoked before phase 1+ instead of failing with a cryptic
+    'identity file not found'.
     """
     # Host-side mssh: invoke the in-tree module directly so we don't
     # depend on the venv's `mssh` entry-point shim being current.
@@ -1288,6 +1324,16 @@ def _write_env_sh(path: Path, *, ips: dict, artifacts_dir: Path) -> None:
             f'export {n}_KEYPEM={artifacts_dir}/{u.username}.key',
         ]
 
+    phase0_header = ('' if keys_generated else f'''# ---------------------------------------------------------------------------
+# PHASE 0 STOP POINT
+# ---------------------------------------------------------------------------
+# This env was generated before any per-user keypairs or mTLS material
+# was created. The IP / port / container exports below work; the
+# mssh_as / ssh_as / ssh_as_2200 helpers will print a clear error
+# until you re-run the test with --phase 1 or --phase 2.
+_MSSH_LAB_PHASE0=1
+
+''')
     body = f'''# Source me from the directory that contains adhoc-keys/.
 # Lets you run ssh/mssh as any user directly from the host — no
 # `lxc exec` required. The lab containers are addressable by their
@@ -1332,12 +1378,24 @@ _user_unix_name() {{
     echo "$1" | tr '_' '-'
 }}
 
+# Phase-0 guard. If the lab was set up with --phase 0, no per-user
+# keypairs / mTLS material has been generated yet, so mssh_as /
+# ssh_as / ssh_as_2200 cannot work. Bail out with a clear message.
+_phase0_guard() {{
+    if [ -n "${{_MSSH_LAB_PHASE0:-}}" ]; then
+        echo "$1: lab is at Phase 0 — per-user keys not generated yet." >&2
+        echo "  Re-run setup with: pytest ... --phase 1   (or --phase 2)" >&2
+        return 1
+    fi
+}}
+
 # -o IdentitiesOnly=yes ensures ssh offers ONLY the -i key, not
 # every key in the agent — otherwise the server hits MaxAuthTries
 # and disconnects before our key gets tried.
 _SSH_OPTS='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes'
 
 mssh_as() {{
+    _phase0_guard mssh_as || return 1
     local user="$1" server="$2"; shift 2
     local ip; ip=$(_resolve_ip "$server")
     if [ -z "$ip" ]; then
@@ -1361,6 +1419,7 @@ mssh_as() {{
 }}
 
 ssh_as() {{
+    _phase0_guard ssh_as || return 1
     local user="$1" server="$2"; shift 2
     local ip; ip=$(_resolve_ip "$server")
     if [ -z "$ip" ]; then
@@ -1374,6 +1433,7 @@ ssh_as() {{
 }}
 
 ssh_as_2200() {{
+    _phase0_guard ssh_as_2200 || return 1
     local user="$1" server="$2"; shift 2
     local ip; ip=$(_resolve_ip "$server")
     if [ -z "$ip" ]; then
@@ -1391,16 +1451,19 @@ ssh_as_2200() {{
 # it via the superuser's ssh key (no `lxc exec`).
 
 flip_to_enforce() {{
+    _phase0_guard flip_to_enforce || return 1
     ssh -i "$ROOT_ADMIN_KEY" $_SSH_OPTS \\
         "root-admin@$ca_IP" ./flip-to-enforce.sh
 }}
 
 flip_to_per_connection() {{
+    _phase0_guard flip_to_per_connection || return 1
     ssh -i "$ROOT_ADMIN_KEY" $_SSH_OPTS \\
         "root-admin@$ca_IP" ./flip-to-per-connection.sh
 }}
 
 flip_to_fallback() {{
+    _phase0_guard flip_to_fallback || return 1
     ssh -i "$ROOT_ADMIN_KEY" $_SSH_OPTS \\
         "root-admin@$ca_IP" ./flip-to-fallback.sh
 }}
@@ -1412,7 +1475,7 @@ echo "  flip_to_fallback                    # all servers → msshd fallback mod
 echo "  flip_to_enforce                     # all servers → msshd enforce + long-lived inner (default)"
 echo "  flip_to_per_connection              # all servers → msshd enforce + per-connection inner"
 '''
-    path.write_text(body)
+    path.write_text(phase0_header + body)
 
 
 # ---------------------------------------------------------------------------
