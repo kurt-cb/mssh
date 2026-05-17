@@ -108,6 +108,21 @@ def pytest_addoption(parser):
                           'diagnosing what processes the shim/AsyncSSH server '
                           'actually invoke. Alpine is skipped (musl build '
                           'required — not packaged in apk).')
+    parser.addoption('--phase', type=int, default=3, choices=(0, 1, 2, 3),
+                     help='Stop the adhoc setup after this phase '
+                          '(test_setup_only_msshd.py only):\n'
+                          '  0 = containers up, CA running, mssh source '
+                          'pushed; nothing else configured. Use this to '
+                          'walk the manual-setup flow with mssh-admin '
+                          'next on a blank slate.\n'
+                          '  1 = + vanilla sshd + per-user keypairs + '
+                          'authorized_keys distributed (ssh user@host:22 '
+                          'works).\n'
+                          '  2 = + msshd in fallback mode '
+                          '(ssh -p 2200 user@host works through proxy).\n'
+                          '  3 (default) = + msshd in enforce mode + '
+                          'mssh material on hosts (mssh user@host:2200 '
+                          'works).')
 
 
 # ---------------------------------------------------------------------------

@@ -769,6 +769,120 @@ def _push_flip_scripts_to_ca(ips: dict, ca_ip: str) -> None:
                   owner=f'{SUPERUSER.username}:{SUPERUSER.username}')
 
 
+def _write_root_readme(container: str, ca_ip: str, stop_at_phase: int) -> None:
+    """Push /root/README.md to a container, telling an operator what
+    state the lab is parked at and how to advance using mssh-admin's
+    guide tools (`mssh-admin status` / `mssh-admin next`).
+
+    The README is most useful at --phase 0 (blank slate) and --phase 1
+    or 2 (partial setup) — that's where an operator might want to take
+    over manually. Phase 3 (fully configured) still gets the README so
+    the operator has reference material on the host.
+    """
+    phase_summary = {
+        0: ('Blank slate. The CA is running but **nothing else** on this '
+            'host is configured. From here, you walk the full SSH-to-mssh '
+            'migration by hand. Start with `mssh-admin status` on the '
+            'operator workstation to see the empty state, then '
+            '`mssh-admin next` for the first command.'),
+        1: ('Vanilla sshd is configured and `ssh user@host` works for '
+            'enrolled users. Next: install msshd in fallback mode in '
+            'front of the system sshd.'),
+        2: ('msshd is in fallback mode (`ssh -p 2200 user@host` works '
+            'as a transparent proxy). Next: enrol this server at the CA '
+            'and flip msshd to enforce.'),
+        3: ('Fully configured: msshd is in enforce mode and `mssh '
+            'user@host:2200` works through the CA-mediated path.'),
+    }[stop_at_phase]
+
+    body = f'''# mssh adhoc lab — manual-setup notes for {container}
+
+**Current lab phase: {stop_at_phase}.** {phase_summary}
+
+## What's installed already
+
+  - mssh source tree at `/app/`. Either run via `PYTHONPATH=/app/src
+    python3 -m mssh.<module>`, or `cd /app && pip install -e .` to put
+    the CLI commands on this host's PATH:
+
+        mssh         — client CLI
+        msshd        — gateway daemon
+        mssh-admin   — operator CLI (talks to the CA over mTLS)
+        mssh-ca      — CA service
+        mssh-mcp     — read-only MCP server for the CA (optional)
+
+  - Python deps already on the host: asyncssh, cryptography, flask,
+    pyyaml, click, requests.
+
+  - OpenSSH server + client installed by the lab's apt step.
+
+## CA reachability
+
+  - CA listening at **https://{ca_ip}:8443** (mTLS-only). The CA's
+    admin endpoints use this URL.
+  - Admin credentials for the CA are **not** on this host — they live
+    on the operator workstation that ran `setup_adhoc.sh`. You'll
+    typically invoke `mssh-admin` from there, not from inside this
+    container.
+
+## Use `mssh-admin next` as your guide
+
+From the operator workstation (the host that has admin creds):
+
+    mssh-admin status     # full state walk: ✓ on what's done, ✗ on what's not
+    mssh-admin next       # just the next concrete command to run
+
+The status walk knows about: CA up, admins enrolled, servers enrolled,
+users enrolled, every user with at least one key, every user with at
+least one policy. As you provision, those checks flip from ✗ to ✓.
+
+## Manual steps from Phase {stop_at_phase}
+
+See the operator docs at `/app/docs/`:
+
+  - **docs/MIGRATION.md** — production-style step-by-step runbook
+    (Phase 1 set up CA → Phase 2 msshd fallback → Phase 4 enforce).
+    This is the source of truth for "what command do I run next?"
+    when `mssh-admin next` isn't enough.
+  - **docs/TUTORIAL.md** — 60-minute guided walkthrough using this
+    same adhoc lab as the sandbox.
+  - **docs/operations.md** — day-to-day operator reference.
+
+## What this README does NOT cover
+
+  - Running the CA service. The CA is already up. To inspect it:
+    `journalctl -u mssh-ca` (on the CA container, not here).
+  - Generating user keypairs. The lab generates per-user keypairs at
+    Phase 1; if you're at Phase 0 you'll do this yourself.
+
+If you want the lab to go further automatically, exit the adhoc shell
+and re-run `setup_adhoc.sh` with a higher `--phase`.
+'''
+    push_text(container, body, '/root/README.md', mode='644')
+
+
+def _finalize_adhoc_artifacts(*, stop_at_phase: int, invocation_cwd: Path,
+                              ips: dict, artifacts_dir: Path,
+                              keys_generated: bool) -> None:
+    """Write the host-side artifacts the operator needs to interact with
+    the lab. Always writes the cleanup script + the per-container README.
+    Writes env.sh + ADHOC_TEST_ENV.md only when keypairs exist (phase >= 1),
+    otherwise their referenced files don't exist and sourcing them would
+    error.
+
+    Pushes /root/README.md to every server container (and the CA) so an
+    operator who `lxc exec`s in has setup notes wherever they land.
+    """
+    _write_cleanup_script(invocation_cwd / 'cleanup_containers.sh')
+    if keys_generated:
+        _write_env_sh(invocation_cwd / 'adhoc-env.sh',
+                      ips=ips, artifacts_dir=artifacts_dir)
+        _write_overview_md(invocation_cwd / 'ADHOC_TEST_ENV.md',
+                           ips=ips, artifacts_dir=artifacts_dir)
+    for c in ALL_CONTAINERS:
+        _write_root_readme(c, ips[CA_NAME], stop_at_phase)
+
+
 def _write_overview_md(path: Path, *, ips: dict, artifacts_dir: Path) -> None:
     user_lines = []
     for u in USERS:
@@ -1046,7 +1160,12 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
     ca_creds_dir   = invocation_cwd / 'adhoc-ca-creds'
     ca_creds_dir.mkdir(exist_ok=True)
 
-    banner('msshd adhoc lab — Phase 0 → 1 → 2')
+    # --phase N: 0 = containers + CA + source pushed (manual-setup
+    # starting point); 1 = + vanilla sshd; 2 = + msshd fallback;
+    # 3 (default) = + msshd enforce. See conftest.py.
+    stop_at_phase = int(request.config.getoption('--phase'))
+
+    banner(f'msshd adhoc lab — Phase 0 → ... → {stop_at_phase}')
 
     # Build the local mssh-ubuntu-fixed / mssh-alpine-fixed images on first
     # run. Subsequent runs reuse the local aliases and skip cloud-init's
@@ -1163,6 +1282,27 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
         admin_key=str(ca_creds_dir / 'bootstrap-admin-key.pem'),
         ca_cert=str(ca_creds_dir / 'tls-ca-cert.pem'))
 
+    # ---- --phase 0 stopping point -----------------------------------
+    # Blank-slate: containers up, CA running, source pushed, admin creds
+    # pulled to ca_creds_dir/. From here an operator drives the rest by
+    # hand with `mssh-admin status` / `mssh-admin next`.
+    if stop_at_phase < 1:
+        _finalize_adhoc_artifacts(
+            stop_at_phase=0, invocation_cwd=invocation_cwd,
+            ips=ips, artifacts_dir=artifacts_dir, keys_generated=False)
+        section('SUCCESS — msshd adhoc lab stopped at Phase 0 (blank slate)')
+        print(
+            f'\n  CA at https://{ips[CA_NAME]}:{CA_PORT}\n'
+            f'  admin creds: {ca_creds_dir}/\n'
+            f'  /root/README.md on each container has manual-setup notes.\n'
+            f'  Try: mssh-admin --ca-url https://{ips[CA_NAME]}:{CA_PORT} '
+            f'\\\n         --admin-cert {ca_creds_dir}/bootstrap-admin-cert.pem '
+            f'\\\n         --admin-key  {ca_creds_dir}/bootstrap-admin-key.pem '
+            f'\\\n         --ca-cert    {ca_creds_dir}/tls-ca-cert.pem '
+            f'next\n',
+            file=sys.stderr, flush=True)
+        return
+
     # =====================================================================
     # Phase 0 — vanilla sshd + ssh keypairs + authorized_keys
     # =====================================================================
@@ -1208,6 +1348,24 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
         print(f'  {u.username}: {len(_allowed_servers_for(u))} hosts OK',
               file=sys.stderr, flush=True)
 
+    # ---- --phase 1 stopping point -----------------------------------
+    # Vanilla sshd works. msshd not installed yet. The operator can use
+    # env.sh's ssh_as helper and walk the "drop msshd in front" step
+    # from /root/README.md manually.
+    if stop_at_phase < 2:
+        _finalize_adhoc_artifacts(
+            stop_at_phase=1, invocation_cwd=invocation_cwd,
+            ips=ips, artifacts_dir=artifacts_dir, keys_generated=True)
+        section('SUCCESS — msshd adhoc lab stopped at Phase 1 (vanilla sshd)')
+        print(
+            f'\n  source ./adhoc-env.sh    # exports ips, keys, helpers\n'
+            f'  ssh_as alice acct whoami # works\n'
+            f'  cat ./ADHOC_TEST_ENV.md  # overview\n'
+            f'\n  Next manual step: install msshd in fallback mode on a '
+            f'server.\n  See /root/README.md inside the container.\n',
+            file=sys.stderr, flush=True)
+        return
+
     # =====================================================================
     # Phase 1 — msshd in fallback in front of sshd
     # =====================================================================
@@ -1225,6 +1383,25 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
                         expected_substr=u.username)
         print(f'  {u.username}: ok through msshd:2200', file=sys.stderr,
               flush=True)
+
+    # ---- --phase 2 stopping point -----------------------------------
+    # msshd is in fallback mode. The CA isn't doing any auth yet (msshd
+    # is a transparent proxy). The operator can walk the "enrol servers
+    # + users + policies, flip to enforce" step manually.
+    if stop_at_phase < 3:
+        _finalize_adhoc_artifacts(
+            stop_at_phase=2, invocation_cwd=invocation_cwd,
+            ips=ips, artifacts_dir=artifacts_dir, keys_generated=True)
+        section('SUCCESS — msshd adhoc lab stopped at Phase 2 (msshd fallback)')
+        print(
+            f'\n  source ./adhoc-env.sh\n'
+            f'  ssh_as_2200 alice acct whoami   # works (through msshd proxy)\n'
+            f'  cat ./ADHOC_TEST_ENV.md\n'
+            f'\n  Next manual step: enrol servers + users at the CA, then '
+            f'flip msshd to enforce.\n'
+            f'  See /root/README.md inside any container.\n',
+            file=sys.stderr, flush=True)
+        return
 
     # =====================================================================
     # Phase 2 — gen mTLS, enroll, flip msshd to enforce
@@ -1355,16 +1532,14 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
     # adhoc artifacts
     # =====================================================================
     section('Writing adhoc artifacts (cleanup, env, README)')
-    _write_cleanup_script(invocation_cwd / 'cleanup_containers.sh')
-    _write_env_sh(invocation_cwd / 'adhoc-env.sh',
-                  ips=ips, artifacts_dir=artifacts_dir)
-    _write_overview_md(invocation_cwd / 'ADHOC_TEST_ENV.md',
-                       ips=ips, artifacts_dir=artifacts_dir)
+    _finalize_adhoc_artifacts(
+        stop_at_phase=3, invocation_cwd=invocation_cwd,
+        ips=ips, artifacts_dir=artifacts_dir, keys_generated=True)
 
     section('Pushing operator-grade flip scripts to /home/root-admin/ on CA')
     _push_flip_scripts_to_ca(ips, ips[CA_NAME])
 
-    section('SUCCESS — msshd adhoc lab is up at Phase 2 (enforce)')
+    section('SUCCESS — msshd adhoc lab is up at Phase 3 (enforce)')
     print(
         f'\n  source ./adhoc-env.sh    # exports ips, ports, key paths\n'
         f'  cat ./ADHOC_TEST_ENV.md  # full overview + examples\n'

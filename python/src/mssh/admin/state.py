@@ -80,40 +80,54 @@ def detect_state(*, ca_dir: Path | None = None,
     nodes: list[StateNode] = []
 
     # Phase A: CA directory + bootstrap files on disk.
+    #
+    # ca_dir is only meaningful when the operator is **on the CA host
+    # itself** — e.g. checking whether a fresh `init` has been run. From
+    # a remote operator workstation, the CA dir lives on a different
+    # machine and is irrelevant; only the admin client (mTLS creds) and
+    # API reachability matter. So: if no ca_dir was given but we DO have
+    # an admin client, skip the filesystem checks and let Phase B / C
+    # report against the live CA.
     if ca_dir is None:
+        if ca_client is None:
+            nodes.append(StateNode(
+                id='ca_dir_set', ok=False,
+                message='no --ca-dir and no admin client',
+                next_step='Initialize a fresh CA, or provide admin creds '
+                          '(--ca-url + --admin-cert + --admin-key + --ca-cert) '
+                          'to inspect an existing one',
+                next_command='mssh-admin init --ca-dir /etc/mssh-ca'))
+            return DeploymentState(ca_dir=None, nodes=nodes)
+        # Have a client → skip the filesystem phase entirely.
+    else:
+        ca_dir = Path(ca_dir)
+        if not ca_dir.is_dir():
+            nodes.append(StateNode(
+                id='ca_dir_exists', ok=False,
+                message=f'{ca_dir} does not exist',
+                next_step='Initialize the CA here',
+                next_command=f'mssh-admin init --ca-dir {ca_dir}'))
+            return DeploymentState(ca_dir=ca_dir, nodes=nodes)
+
         nodes.append(StateNode(
-            id='ca_dir_set', ok=False,
-            message='no --ca-dir specified and none in config',
-            next_step='Initialize a fresh CA, or point at an existing one',
-            next_command='mssh-admin init --ca-dir /etc/mssh-ca'))
-        return DeploymentState(ca_dir=None, nodes=nodes)
+            id='ca_dir_exists', ok=True,
+            message=f'CA directory present at {ca_dir}'))
 
-    ca_dir = Path(ca_dir)
-    if not ca_dir.is_dir():
+        missing = [f for f in _CA_BOOTSTRAP_FILES if not (ca_dir / f).exists()]
+        if missing:
+            nodes.append(StateNode(
+                id='ca_bootstrap_files', ok=False,
+                message=f'CA bootstrap incomplete; missing: '
+                        f'{", ".join(missing)}',
+                next_step='Re-run init (refuses to overwrite existing '
+                          'certs — either move them aside or use a fresh '
+                          'directory)',
+                next_command=f'mssh-admin init --ca-dir {ca_dir}'))
+            return DeploymentState(ca_dir=ca_dir, nodes=nodes)
+
         nodes.append(StateNode(
-            id='ca_dir_exists', ok=False,
-            message=f'{ca_dir} does not exist',
-            next_step='Initialize the CA here',
-            next_command=f'mssh-admin init --ca-dir {ca_dir}'))
-        return DeploymentState(ca_dir=ca_dir, nodes=nodes)
-
-    nodes.append(StateNode(
-        id='ca_dir_exists', ok=True,
-        message=f'CA directory present at {ca_dir}'))
-
-    missing = [f for f in _CA_BOOTSTRAP_FILES if not (ca_dir / f).exists()]
-    if missing:
-        nodes.append(StateNode(
-            id='ca_bootstrap_files', ok=False,
-            message=f'CA bootstrap incomplete; missing: {", ".join(missing)}',
-            next_step='Re-run init (refuses to overwrite existing certs — '
-                      'either move them aside or use a fresh directory)',
-            next_command=f'mssh-admin init --ca-dir {ca_dir}'))
-        return DeploymentState(ca_dir=ca_dir, nodes=nodes)
-
-    nodes.append(StateNode(
-        id='ca_bootstrap_files', ok=True,
-        message='CA signing key + admin cert + TLS material present'))
+            id='ca_bootstrap_files', ok=True,
+            message='CA signing key + admin cert + TLS material present'))
 
     # Phase B: API reachability.
     if ca_client is None:
