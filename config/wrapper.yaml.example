@@ -45,8 +45,22 @@ ca:
   ca_pubkey:   /etc/mssh/server-mtls-ca.pub
   timeout_seconds: 5
   # Optional: long-lived emergency cert for use when all CA endpoints
-  # are unreachable. See ca/emergency_cert.md.
+  # are unreachable. See design/security.md "emergency cert" and
+  # config/sshd_config.emergency.template. Setting this enables the
+  # break-glass path: when the CA is unreachable, msshd loads a local
+  # emergency sshd_config template (default:
+  # /usr/share/mssh/sshd_config.emergency.template, override at
+  # /etc/mssh/sshd_config.emergency.template) and spawns the inner
+  # sshd with safe-by-default settings. The path is rate-limited
+  # (see `emergency:` below) and audited prominently.
   emergency_cert: /etc/mssh/emergency.cert
+
+# Emergency-mode tuning. Only relevant when ca.emergency_cert is set.
+# Defaults align with security.md "minutes per use": 1 session per
+# minute with a small burst for the moment the CA first goes down.
+# emergency:
+#   rate_per_minute: 1.0          # token bucket refill rate
+#   burst: 5                      # bucket size
 
 inner:
   # The OpenSSH binary used as the inner sshd. Default: distro package.

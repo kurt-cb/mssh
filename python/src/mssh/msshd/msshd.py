@@ -78,6 +78,7 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
     from .. import PROTOCOL_VERSION, __version__ as MSSHD_VERSION
     from .ca import WrapperCAClient
     from .config import INNER_MODE_PER_CONNECTION
+    from .emergency import EmergencyConfig, EmergencyConfigError
     from .enforce_listener import EnforceListener
     from .inner import (InnerSshd, PerConnectionInnerSshd,
                         _detect_sshd_version)
@@ -119,6 +120,22 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
         log.error('inner sshd failed to start: %s', e)
         return 3
 
+    # 2a. Emergency template — load + validate at startup if
+    #     ca.emergency_cert is configured. A broken operator override
+    #     surfaces here, not during a real CA outage.
+    emergency_cfg = None
+    if cfg.ca.emergency_cert:
+        try:
+            emergency_cfg = await EmergencyConfig.load(
+                sshd_binary=cfg.inner.sshd_binary,
+                rate_per_minute=cfg.emergency.rate_per_minute,
+                burst=cfg.emergency.burst,
+            )
+        except EmergencyConfigError as e:
+            log.error('emergency template invalid: %s', e)
+            await inner.stop()
+            return 6
+
     try:
         # 3. CA client.
         try:
@@ -141,6 +158,7 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
             inner_sshd_version=inner_sshd_version,
             msshd_version=MSSHD_VERSION,
             protocol_version=PROTOCOL_VERSION,
+            emergency=emergency_cfg,
         )
         try:
             await listener.start()

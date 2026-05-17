@@ -67,7 +67,8 @@ class EnforceListener:
                  inner_sshd_kind: str = 'openssh',
                  inner_sshd_version: str = '',
                  msshd_version: str = '',
-                 protocol_version: str = ''):
+                 protocol_version: str = '',
+                 emergency=None):                  # EmergencyConfig | None
         self.cfg = cfg
         self.user_ca = user_ca
         self.ca_client = ca_client
@@ -76,6 +77,11 @@ class EnforceListener:
         self.inner_sshd_version = inner_sshd_version
         self.msshd_version = msshd_version
         self.protocol_version = protocol_version
+        # Emergency-mode wiring is *loaded* here so a broken template
+        # surfaces at startup; full per-session integration with the
+        # AuthorizationError path is a follow-up (see emergency.py
+        # module docstring).
+        self.emergency = emergency
         self._server: Optional[asyncio.base_events.Server] = None
         self._ssl_ctx = _build_ssl_context(cfg)
 
