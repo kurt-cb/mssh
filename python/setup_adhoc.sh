@@ -3,8 +3,11 @@
 #
 # Usage:
 #   ./setup_adhoc.sh              # default: msshd (Tier-1 wrap-and-proxy)
-#   ./setup_adhoc.sh msshd        # explicit
-#   ./setup_adhoc.sh debug        # debug_sshd (the old AsyncSSH PoC lab)
+#   ./setup_adhoc.sh msshd {phase}       # explicit
+#   ./setup_adhoc.sh debug {phase}       # debug_sshd (the old AsyncSSH PoC lab)
+#
+# phase is 0, 1 or 2 and indicates stopping point in setup of the environment.
+# 
 
 . ../.venv/bin/activate
 
@@ -25,15 +28,18 @@ case "$TIER" in
         exit 2
         ;;
 esac
+PHASE="${2:-2}"
 
 echo "Provisioning $TIER lab via $TEST_FILE"
-pytest "$TEST_FILE" -s --log-file=pytest.log --log-cli-level=$LEVEL -v -m "$MARKER"
+pytest "$TEST_FILE" -s --log-file=pytest.log --log-cli-level=$LEVEL -v -m "$MARKER" --phase $PHASE --lxc-prefix $USER
 RC=$?
 
 if [ "$RC" != "0" ]; then
     echo "Environment failed to generate"
     exit 1
 fi
+
+scp ansible-project/test_*.yml ca_server:
 
 # shell out
 echo "Shell-ing out with adhoc-env setup; ADHOC_TEST_ENV.md has details."
