@@ -30,6 +30,7 @@ import socket
 import subprocess
 import sys
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import WrapperConfig
@@ -275,6 +276,210 @@ class InnerSshd:
 
 
 # ---------------------------------------------------------------------------
+# Per-connection inner sshd
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _SessionProc:
+    """One per-session sshd process. Held in PerConnectionInnerSshd._sessions."""
+    session_id: str
+    port: int
+    proc: 'asyncio.subprocess.Process'
+    session_dir: Path
+
+
+class PerConnectionInnerSshd:
+    """Spawn a fresh sshd-D-on-loopback per session.
+
+    Used when ``wrapper.yaml`` has ``inner.mode: per-connection``. Each
+    session gets its own port, tempdir, sshd_config (rendered by the CA
+    with this session's policy + msshd's local paths substituted), and
+    sshd process. Per-session policy is enforced natively by OpenSSH
+    (ForceCommand / AllowTcpForwarding / SetEnv / etc.) instead of by
+    msshd's translation layer.
+
+    Lifecycle:
+      - ``start()`` once at msshd boot — ensures state_dir / host key
+        exist and wipes any stale ``state_dir/sessions/*`` left by a
+        prior crashed run.
+      - ``acquire_session(session_id, rendered_config)`` per session —
+        substitutes ``{LOCAL_*}`` markers in the CA-supplied config,
+        sanity-checks via ``sshd -t``, spawns ``sshd -D -p <port>``,
+        returns the port for msshd's SSH-client leg.
+      - ``release_session(session_id)`` per session — SIGTERMs the
+        sshd, releases the port, rmtree's the tempdir.
+      - ``stop()`` at msshd shutdown — releases all live sessions.
+
+    Backpressure: ``acquire_session`` honors
+    ``cfg.performance.max_concurrent_sessions``. When the cap is hit,
+    raises ``InnerSshdError`` — the caller surfaces this to the outer
+    client as a clean denial.
+    """
+
+    def __init__(self, cfg: WrapperConfig, *,
+                 state_dir: str | Path = '/var/lib/mssh/inner-sshd',
+                 user_ca_pubkey_path: str | Path | None = None):
+        self.cfg = cfg
+        self.state_dir = Path(state_dir)
+        self.user_ca_pubkey_path = (
+            Path(user_ca_pubkey_path) if user_ca_pubkey_path
+            else self.state_dir / 'wrapper-user-ca.pub')
+        self._sshd_binary = cfg.inner.sshd_binary
+        self._host_key: Path = self.state_dir / 'ssh_host_ed25519_key'
+        self._sessions: dict[str, _SessionProc] = {}
+        self._ports_in_use: set[int] = set()
+        self._lock = asyncio.Lock()
+
+    # ---------------------------------------------------------------------
+    # Public API
+    # ---------------------------------------------------------------------
+
+    @property
+    def sessions_dir(self) -> Path:
+        return self.state_dir / 'sessions'
+
+    @property
+    def active_count(self) -> int:
+        return len(self._sessions)
+
+    async def start(self) -> None:
+        """One-time setup. Idempotent: re-running is safe."""
+        if not Path(self._sshd_binary).is_file():
+            raise InnerSshdError(
+                f'sshd binary not found at {self._sshd_binary}')
+
+        version = await _detect_sshd_version(self._sshd_binary)
+        log.info('per-connection inner sshd: binary=%s (%s)',
+                 self._sshd_binary, version)
+
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.state_dir, 0o0750)
+
+        try:
+            Path('/run/sshd').mkdir(mode=0o0755, exist_ok=True)
+        except PermissionError:
+            log.warning('cannot create /run/sshd — per-connection sshds '
+                        'may fail to start. Run msshd as root or use a '
+                        'sshd built with a custom --with-privsep-path.')
+
+        if not self._host_key.exists():
+            await _gen_host_key(self._host_key)
+            log.info('generated per-connection host key at %s', self._host_key)
+
+        if not self.user_ca_pubkey_path.exists():
+            raise InnerSshdError(
+                f'user-CA pubkey not at {self.user_ca_pubkey_path} '
+                '(run msshd-admin init)')
+
+        # Wipe stale session dirs from any prior crashed run.
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.sessions_dir, 0o0700)
+        for entry in self.sessions_dir.iterdir():
+            if entry.is_dir():
+                log.info('per-connection: removing stale session dir %s',
+                         entry.name)
+                shutil.rmtree(entry, ignore_errors=True)
+
+    async def acquire_session(self, session_id: str,
+                              rendered_config: str) -> int:
+        """Spawn a per-session sshd. Returns the port it bound.
+
+        ``rendered_config`` is the per-session sshd_config text the CA
+        produced (with ``{FROMCA_*}`` markers already substituted from
+        policy). msshd substitutes the ``{LOCAL_*}`` markers below and
+        writes the result to a per-session tempdir.
+        """
+        async with self._lock:
+            cap = self.cfg.performance.max_concurrent_sessions
+            if cap and len(self._sessions) >= cap:
+                raise InnerSshdError(
+                    f'max_concurrent_sessions={cap} reached '
+                    f'(active={len(self._sessions)})')
+            lo, hi = self.cfg.inner.port_range
+            port = _allocate_port_excluding(lo, hi, self._ports_in_use)
+            self._ports_in_use.add(port)
+
+        session_dir = self.sessions_dir / session_id
+        session_dir.mkdir(mode=0o0700, parents=True, exist_ok=True)
+        config_path = session_dir / 'sshd_config'
+        banner_path = session_dir / 'banner'
+
+        # Per-session banner: empty in v1; future per-user
+        # banner-substitution lands here.
+        banner_path.write_text('')
+        os.chmod(banner_path, 0o0644)
+
+        # Substitute {LOCAL_*} markers. The CA emits these as literals
+        # because it doesn't know msshd's paths.
+        rendered_local = _substitute_local_markers(rendered_config, {
+            'LOCAL_PORT':           str(port),
+            'LOCAL_HOST_KEY':       str(self._host_key),
+            'LOCAL_USER_CA_PUBKEY': str(self.user_ca_pubkey_path),
+            'LOCAL_BANNER_FILE':    str(banner_path),
+        })
+        config_path.write_text(rendered_local)
+        os.chmod(config_path, 0o0600)
+
+        # Sanity check: refuse to spawn if sshd can't parse the config.
+        ok, err = await _sshd_config_test(self._sshd_binary, config_path)
+        if not ok:
+            self._cleanup_session_dir(session_dir, port)
+            raise InnerSshdError(
+                f'sshd refused per-session config (sshd -t): {err!r}')
+
+        proc = await asyncio.create_subprocess_exec(
+            self._sshd_binary, '-D', '-f', str(config_path),
+            '-E', str(session_dir / 'sshd.log'),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if not await _wait_port_open('127.0.0.1', port, timeout=10.0):
+            stderr = b''
+            try:
+                stderr = await asyncio.wait_for(
+                    proc.stderr.read(8192), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+            await _terminate_proc(proc, grace=0.5)
+            self._cleanup_session_dir(session_dir, port)
+            raise InnerSshdError(
+                f'per-session sshd did not bind 127.0.0.1:{port} within 10s '
+                f'(stderr={stderr!r})')
+
+        self._sessions[session_id] = _SessionProc(
+            session_id=session_id, port=port, proc=proc,
+            session_dir=session_dir)
+        log.info('per-connection: session %s started on :%d (pid=%d)',
+                 session_id, port, proc.pid)
+        return port
+
+    async def release_session(self, session_id: str, *,
+                              grace: float = 2.0) -> None:
+        """Terminate this session's sshd + rmtree its tempdir."""
+        sp = self._sessions.pop(session_id, None)
+        if sp is None:
+            return
+        log.info('per-connection: releasing session %s (pid=%d)',
+                 session_id, sp.proc.pid)
+        await _terminate_proc(sp.proc, grace=grace)
+        self._cleanup_session_dir(sp.session_dir, sp.port)
+
+    async def stop(self) -> None:
+        """Release all active sessions at msshd shutdown."""
+        for sid in list(self._sessions.keys()):
+            await self.release_session(sid, grace=1.0)
+
+    # ---------------------------------------------------------------------
+    # Internal helpers
+    # ---------------------------------------------------------------------
+
+    def _cleanup_session_dir(self, session_dir: Path, port: int) -> None:
+        """Remove a session's tempdir and release its port."""
+        shutil.rmtree(session_dir, ignore_errors=True)
+        self._ports_in_use.discard(port)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -355,3 +560,92 @@ async def _gen_host_key(host_key_path: Path) -> None:
         raise InnerSshdError(
             f'ssh-keygen failed (rc={rc}): {stderr.decode(errors="replace")}')
     os.chmod(host_key_path, 0o0600)
+
+
+# ---------------------------------------------------------------------------
+# Per-connection helpers
+# ---------------------------------------------------------------------------
+
+# Matches {NAME} or {NAME:default} markers — same grammar as mssh.ca.render,
+# but msshd substitutes only the LOCAL_* namespace. Anything else passes
+# through (the CA already substituted FROMCA_*).
+_LOCAL_MARKER_RE = re.compile(r'\{(LOCAL_[A-Z0-9_]+)(:[^}]*)?\}')
+
+
+def _substitute_local_markers(text: str, values: dict[str, str]) -> str:
+    """Substitute ``{LOCAL_*}`` markers in ``text`` using ``values``.
+
+    Markers with a ``:default`` part fall back to that if the key is
+    absent. Markers not in ``values`` and without a default pass
+    through untouched — sshd will then either treat them as literal
+    config (probably an error) or the operator will see them in the
+    per-session sshd_config tempdir and diagnose.
+    """
+    def sub(m: re.Match) -> str:
+        name = m.group(1)
+        default = m.group(2)
+        if name in values:
+            return values[name]
+        if default is not None:
+            return default[1:]                  # strip leading ':'
+        return m.group(0)                       # leave literal
+    return _LOCAL_MARKER_RE.sub(sub, text)
+
+
+def _allocate_port_excluding(lo: int, hi: int, exclude: set[int]) -> int:
+    """Return an available TCP port on 127.0.0.1 in [lo, hi] that is not
+    in ``exclude``. Used by the per-connection sshd pool to avoid
+    re-issuing ports that have a live sshd already on them."""
+    candidates = [p for p in random.sample(range(lo, hi + 1),
+                                            k=min(200, hi - lo + 1))
+                  if p not in exclude]
+    for port in candidates:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(('127.0.0.1', port))
+            except OSError:
+                continue
+            return port
+    raise InnerSshdError(
+        f'no free port found in [{lo}, {hi}] '
+        f'(excluding {len(exclude)} in-use)')
+
+
+async def _sshd_config_test(sshd_binary: str,
+                            config_path: Path) -> tuple[bool, str]:
+    """Run ``sshd -t -f config`` to validate the config before we spawn
+    the real sshd. Returns (ok, stderr-tail).
+
+    This is the per-session "belt-and-braces" safety check the
+    per-connection design relies on: if the CA emits a config the
+    host's sshd rejects, we refuse the session up front instead of
+    letting sshd crash on spawn with a less specific error."""
+    proc = await asyncio.create_subprocess_exec(
+        sshd_binary, '-t', '-f', str(config_path),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = await proc.communicate()
+    if proc.returncode == 0:
+        return True, ''
+    msg = (err or out or b'').decode('utf-8', errors='replace')
+    return False, msg.strip()[-500:]
+
+
+async def _terminate_proc(proc: 'asyncio.subprocess.Process', *,
+                          grace: float = 2.0) -> None:
+    """SIGTERM, wait up to ``grace``, escalate to SIGKILL if still alive.
+    Idempotent — already-exited procs return cleanly."""
+    if proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        return
+    with suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(proc.wait(), timeout=grace)
+    if proc.returncode is None:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=grace)
