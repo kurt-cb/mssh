@@ -847,7 +847,9 @@ _EXAMPLE_PLAYBOOK_UPGRADE_ASYNCSSH = '''---
       ansible.builtin.pip:
         name: "asyncssh>=2.14"
         state: latest
-        extra_args: "--break-system-packages --upgrade"
+      # NOTE: on Ubuntu 24.04 / Debian 12+ (PEP 668 enforcement), add
+      #   extra_args: "--break-system-packages"
+      # Ubuntu 22.04's pip doesn't recognize that flag, so it's omitted.
 
     - name: "Restart msshd (skipped if not yet installed)"
       ansible.builtin.systemd:
