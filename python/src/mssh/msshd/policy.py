@@ -15,8 +15,21 @@ For the wrapper to enforce those at the inner sshd, we have to:
 
 This module is intentionally a thin parser + translator. No I/O.
 
+**On the eventual shrinkage of this module.** In ``inner.mode:
+per-connection`` (Phase 2 of mssh), the CA renders a full
+``inner_sshd_config`` per session — ForceCommand / SetEnv /
+AllowTcpForwarding / etc. are baked into the sshd_config the CA
+returns, and OpenSSH enforces them natively. This module's role on
+that path collapses to "carry max-session and any
+non-OpenSSH-expressible bits." But ``inner.mode: long-lived`` is
+still the default, and on that path the sshd_config is fixed at
+startup — so the per-session X.509 extensions still need
+application-layer enforcement here. The module retains its full
+shape until ``long-lived`` is deprecated; only then does the
+shrinkage in the per-connection plan apply.
+
 See:
-- [detailed-wrapper.md §8 translation table](../../design/mssh-detailed-wrapper.md)
+- [design/architecture.md § Hermetic inner sshd](../../design/architecture.md#hermetic-inner-sshd)
 - ca/cert_minter.py — the DER format we have to parse here
 """
 from __future__ import annotations
