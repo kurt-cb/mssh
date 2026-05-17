@@ -75,9 +75,12 @@ async def _run(cfg: WrapperConfig) -> int:
 async def _run_enforce(cfg: WrapperConfig) -> int:
     # Lazy imports — enforce mode pulls in asyncssh + cryptography
     # heavy paths only when needed.
+    from .. import PROTOCOL_VERSION, __version__ as MSSHD_VERSION
     from .ca import WrapperCAClient
+    from .config import INNER_MODE_PER_CONNECTION
     from .enforce_listener import EnforceListener
-    from .inner import InnerSshd
+    from .inner import (InnerSshd, PerConnectionInnerSshd,
+                        _detect_sshd_version)
     from .userca import UserCA
 
     state_dir = os.environ.get(
@@ -94,12 +97,22 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
                   user_ca_priv_path, e)
         return 2
 
-    # 2. Inner sshd lifecycle.
-    inner = InnerSshd(
-        cfg, state_dir=os.path.join(state_dir, 'inner-sshd'),
-        user_ca_pubkey_path=os.path.join(
-            state_dir, 'inner-sshd', 'wrapper-user-ca.pub'),
-    )
+    # 2. Inner sshd lifecycle — branch on inner.mode.
+    inner: 'InnerSshd | PerConnectionInnerSshd'
+    if cfg.inner.mode == INNER_MODE_PER_CONNECTION:
+        log.info('inner sshd mode: per-connection')
+        inner = PerConnectionInnerSshd(
+            cfg, state_dir=os.path.join(state_dir, 'inner-sshd'),
+            user_ca_pubkey_path=os.path.join(
+                state_dir, 'inner-sshd', 'wrapper-user-ca.pub'),
+        )
+    else:
+        log.info('inner sshd mode: long-lived')
+        inner = InnerSshd(
+            cfg, state_dir=os.path.join(state_dir, 'inner-sshd'),
+            user_ca_pubkey_path=os.path.join(
+                state_dir, 'inner-sshd', 'wrapper-user-ca.pub'),
+        )
     try:
         await inner.start()
     except Exception as e:
@@ -115,9 +128,20 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
             await inner.stop()
             return 4
 
+        # 3a. Detect inner sshd binary version (once; logged + forwarded
+        #     to the CA on every authz call for fleet-version tracking
+        #     and per-version directive-compatibility checks).
+        inner_sshd_version = await _detect_sshd_version(cfg.inner.sshd_binary)
+        log.info('inner sshd version: %s', inner_sshd_version)
+
         # 4. The actual outer mTLS listener.
-        listener = EnforceListener(cfg, user_ca=user_ca,
-                                   ca_client=ca_client, inner_sshd=inner)
+        listener = EnforceListener(
+            cfg, user_ca=user_ca, ca_client=ca_client, inner_sshd=inner,
+            inner_sshd_kind='openssh',
+            inner_sshd_version=inner_sshd_version,
+            msshd_version=MSSHD_VERSION,
+            protocol_version=PROTOCOL_VERSION,
+        )
         try:
             await listener.start()
         except Exception as e:

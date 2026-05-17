@@ -50,16 +50,32 @@ log = logging.getLogger('msshd.enforce')
 
 
 class EnforceListener:
-    """TLS-terminating listener for enforce mode."""
+    """TLS-terminating listener for enforce mode.
+
+    ``inner_sshd`` is either ``InnerSshd`` (long-lived) or
+    ``PerConnectionInnerSshd`` (one sshd per session). The branch is
+    in ``_proxy_to_inner``: per-connection acquires a fresh sshd via
+    ``acquire_session(conn_id, grant.inner_sshd_config)`` and releases
+    it when the session ends; long-lived uses ``inner_sshd.port``
+    directly.
+    """
 
     def __init__(self, cfg: WrapperConfig, *,
                  user_ca: UserCA,
                  ca_client: WrapperCAClient,
-                 inner_sshd: InnerSshd):
+                 inner_sshd,                       # InnerSshd | PerConnectionInnerSshd
+                 inner_sshd_kind: str = 'openssh',
+                 inner_sshd_version: str = '',
+                 msshd_version: str = '',
+                 protocol_version: str = ''):
         self.cfg = cfg
         self.user_ca = user_ca
         self.ca_client = ca_client
         self.inner_sshd = inner_sshd
+        self.inner_sshd_kind = inner_sshd_kind
+        self.inner_sshd_version = inner_sshd_version
+        self.msshd_version = msshd_version
+        self.protocol_version = protocol_version
         self._server: Optional[asyncio.base_events.Server] = None
         self._ssl_ctx = _build_ssl_context(cfg)
 
@@ -140,6 +156,10 @@ class EnforceListener:
             source_ip=source_ip,
             source_port=source_port,
             requested_channels=['session'],
+            protocol_version=self.protocol_version,
+            inner_sshd_kind=self.inner_sshd_kind,
+            inner_sshd_version=self.inner_sshd_version,
+            msshd_version=self.msshd_version,
         )
 
         if isinstance(result, AuthorizationDeny):
@@ -188,7 +208,8 @@ class EnforceListener:
         # --- Inner SSH leg + bytes proxy ---
         try:
             await self._proxy_to_inner(
-                conn_id, reader, writer, principal, minted, cert_policy)
+                conn_id, reader, writer, principal, minted, cert_policy,
+                result)
         finally:
             await _close(writer)
 
@@ -200,26 +221,60 @@ class EnforceListener:
         principal: str,
         minted,
         cert_policy,
+        grant,                                    # AuthorizationGrant
     ) -> None:
         # Lazy import: asyncssh client is only needed in enforce mode,
         # and pulling it in at module import slows the daemon startup.
+        from .config import INNER_MODE_PER_CONNECTION
+        from .inner import InnerSshdError, PerConnectionInnerSshd
         from .ssh_proxy import proxy_to_inner_ssh
 
-        await proxy_to_inner_ssh(
-            outer_reader=outer_reader,
-            outer_writer=outer_writer,
-            inner_host='127.0.0.1',
-            inner_port=self.inner_sshd.port,
-            principal=principal,
-            user_private_key=minted.user_private_key,
-            user_cert=minted.cert,
-            inner_host_key_path=str(
-                self.inner_sshd.state_dir / 'ssh_host_ed25519_key.pub'),
-            conn_id=conn_id,
-            max_session_seconds=cert_policy.max_session_seconds,
-            forced_command=cert_policy.force_command or None,
-            forced_env=cert_policy.environment or None,
-        )
+        # Branch on inner mode: long-lived uses the one shared port;
+        # per-connection spawns a fresh sshd with the CA-rendered config.
+        per_conn = isinstance(self.inner_sshd, PerConnectionInnerSshd)
+        inner_port: int
+        acquired = False
+        if per_conn:
+            if not grant.inner_sshd_config:
+                log.error(
+                    '[%s] per-connection mode but CA returned no '
+                    'inner_sshd_config — denying session. CA protocol '
+                    'too old (need >=1.1) or template render failed at '
+                    'the CA. See CA audit for details.', conn_id)
+                return
+            try:
+                inner_port = await self.inner_sshd.acquire_session(
+                    conn_id, grant.inner_sshd_config)
+                acquired = True
+            except InnerSshdError as e:
+                log.error('[%s] could not spawn per-session sshd: %s',
+                          conn_id, e)
+                return
+        else:
+            inner_port = self.inner_sshd.port
+
+        try:
+            await proxy_to_inner_ssh(
+                outer_reader=outer_reader,
+                outer_writer=outer_writer,
+                inner_host='127.0.0.1',
+                inner_port=inner_port,
+                principal=principal,
+                user_private_key=minted.user_private_key,
+                user_cert=minted.cert,
+                inner_host_key_path=str(
+                    self.inner_sshd.state_dir / 'ssh_host_ed25519_key.pub'),
+                conn_id=conn_id,
+                max_session_seconds=cert_policy.max_session_seconds,
+                forced_command=cert_policy.force_command or None,
+                forced_env=cert_policy.environment or None,
+            )
+        finally:
+            if acquired:
+                try:
+                    await self.inner_sshd.release_session(conn_id)
+                except Exception:
+                    log.exception('[%s] release_session raised', conn_id)
 
 
 # ---------------------------------------------------------------------------

@@ -35,6 +35,9 @@ class AuthorizationGrant:
     cert_der: bytes
     serial: str
     not_after: _dt.datetime
+    # Protocol-1.1+ fields. Empty / None on older CAs.
+    inner_sshd_config: str = ''
+    protocol_version: str = ''
 
 
 @dataclass
@@ -84,9 +87,19 @@ class WrapperCAClient:
         source_ip: str,
         source_port: int,
         requested_channels: list[str] | None = None,
+        protocol_version: str = '',
+        inner_sshd_kind: str = '',
+        inner_sshd_version: str = '',
+        msshd_version: str = '',
     ) -> AuthorizationResult:
         """Call POST /v1/authorize. ``identity_blob`` is the raw SSH
-        wire-format pubkey or OpenSSH cert bytes."""
+        wire-format pubkey or OpenSSH cert bytes.
+
+        protocol_version / inner_sshd_kind / inner_sshd_version /
+        msshd_version are forwarded to the CA so it can render the
+        right inner_sshd_config + record fleet-version data in audit
+        (Phase 1.1+). Empty strings are dropped from the wire body so
+        a 1.0 CA never sees fields it doesn't know."""
         body: dict[str, Any] = {
             'identity': {
                 'type': identity_type,
@@ -100,6 +113,16 @@ class WrapperCAClient:
         }
         if requested_channels is not None:
             body['requested_channels'] = list(requested_channels)
+        # Protocol 1.1+ optional fields. Send only if populated so the
+        # body is a strict subset of 1.0 when caller doesn't supply them.
+        if protocol_version:
+            body['protocol_version'] = protocol_version
+        if inner_sshd_kind:
+            body['inner_sshd_kind'] = inner_sshd_kind
+        if inner_sshd_version:
+            body['inner_sshd_version'] = inner_sshd_version
+        if msshd_version:
+            body['msshd_version'] = msshd_version
 
         loop = asyncio.get_running_loop()
         try:
@@ -133,7 +156,9 @@ def _parse_result(result: AuthorizeResult) -> AuthorizationResult:
             return AuthorizationError(
                 message=f'unparseable not_after {not_after_s!r}')
         return AuthorizationGrant(
-            cert_der=cert_der, serial=serial, not_after=not_after)
+            cert_der=cert_der, serial=serial, not_after=not_after,
+            inner_sshd_config=str(body.get('inner_sshd_config') or ''),
+            protocol_version=str(body.get('protocol_version') or ''))
 
     if status == 'denied':
         return AuthorizationDeny(
