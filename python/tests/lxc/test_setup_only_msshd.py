@@ -850,65 +850,37 @@ def _render_ansible_hosts_ini(ips: dict, prefix: str) -> str:
     ])
 
 
-_EXAMPLE_PLAYBOOK_UPGRADE_ASYNCSSH = '''---
-# Standalone playbook — fix the "interactive mssh session drops after
-# first input" bug on Ubuntu 22.04 containers. Ubuntu's apt
-# python3-asyncssh is pinned at 2.5.0 (from 2020); msshd needs 2.14+
-# for stable interactive PTY data flow. Pip-overrides the apt version,
-# then restarts msshd.
-#
-# Run from the CA:
-#     cd ~/ansible-project
-#     ansible-playbook -i hosts.ini playbook_upgrade_asyncssh.yml
-#
-# This is a STANDALONE playbook (its own `hosts:` block) so it doesn't
-# depend on site.yml's `proxy_clients` group target. Delete it if your
-# lab doesn't need the workaround.
-
-- name: "Upgrade asyncssh to >=2.14 on every Ubuntu msshd host"
-  hosts: ubuntu_servers
-  become: true
-  gather_facts: false
-  tasks:
-    - name: "Ensure python3-pip is installed (Ubuntu's python3 ships without it)"
-      ansible.builtin.apt:
-        name: python3-pip
-        state: present
-        update_cache: false
-
-    - name: "pip-install asyncssh>=2.14 (overrides the apt 2.5.0)"
-      ansible.builtin.pip:
-        name: "asyncssh>=2.14"
-        state: latest
-      # NOTE: on Ubuntu 24.04 / Debian 12+ (PEP 668 enforcement), add
-      #   extra_args: "--break-system-packages"
-      # Ubuntu 22.04's pip doesn't recognize that flag, so it's omitted.
-
-    - name: "Restart msshd (skipped if not yet installed)"
-      ansible.builtin.systemd:
-        name: msshd
-        state: restarted
-      failed_when: false
-'''
-
-
 def _write_ansible_project(out_dir: Path, ips: dict, prefix: str) -> None:
-    """Copy the ansible-project skeleton from python/tests/ansible-project/
-    to ``out_dir``, then overwrite hosts.ini with one rendered from the
-    live lab's containers + groups. Adds an example
-    ``task_upgrade_asyncssh.yml`` the operator can use to fix the known
-    interactive-mssh-PTY bug (Ubuntu 22.04's python3-asyncssh is too old)."""
+    """Render the operator's ansible-project tree.
+
+    Source: ``python/tests/ansible-project/`` (tracked in git — every
+    file there is part of the operator's working set).
+
+    What this function does:
+      1. Copy every regular file from the source tree into ``out_dir``
+         verbatim. No additions, no removals.
+      2. Overwrite ``out_dir/hosts.ini`` with one rendered from the
+         live lab's container names + IPs. The committed hosts.ini in
+         the source tree is a placeholder so the directory makes
+         sense in isolation.
+
+    The keypair (``ansible_id_ed25519``) is generated separately by
+    ``_setup_ansible_on_ca`` so it lands at mode 0600 from creation.
+
+    Net result: ``out_dir`` is identical to the source template plus
+    one regenerated hosts.ini and one freshly-generated keypair. No
+    other "magic" files appear. See
+    ``python/tests/ansible-project/README.md`` for the operator-facing
+    explanation of the same.
+    """
     template = _ansible_template_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     for src in template.iterdir():
         if src.is_file():
             shutil.copy2(src, out_dir / src.name)
-    # Overwrite hosts.ini with the rendered version.
+    # Overwrite hosts.ini with one rendered against the live lab.
     (out_dir / 'hosts.ini').write_text(
         _render_ansible_hosts_ini(ips, prefix))
-    # Drop the example standalone playbook. Operator can delete it.
-    (out_dir / 'playbook_upgrade_asyncssh.yml').write_text(
-        _EXAMPLE_PLAYBOOK_UPGRADE_ASYNCSSH)
 
 
 def _setup_ansible_on_ca(ips: dict, prefix: str,
