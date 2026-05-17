@@ -983,12 +983,12 @@ def _write_root_readme(container: str, ca_ip: str, stop_at_phase: int) -> None:
             '`mssh-admin next` for the first command.'),
         1: ('Vanilla sshd is configured and `ssh user@host` works for '
             'enrolled users. Next: install msshd in fallback mode in '
-            'front of the system sshd.'),
-        2: ('msshd is in fallback mode (`ssh -p 2200 user@host` works '
-            'as a transparent proxy). Next: enrol this server at the CA '
+            'front of the system sshd, then enrol this server at the CA '
             'and flip msshd to enforce.'),
-        3: ('Fully configured: msshd is in enforce mode and `mssh '
-            'user@host:2200` works through the CA-mediated path.'),
+        2: ('Fully configured: msshd is in enforce mode and `mssh '
+            'user@host:2200` works through the CA-mediated path. '
+            'Flip-to-fallback / flip-to-enforce scripts live on the CA '
+            'for switching between modes.'),
     }[stop_at_phase]
 
     body = f'''# mssh adhoc lab — manual-setup notes for {container}
@@ -1642,27 +1642,11 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
         print(f'  {u.username}: ok through msshd:2200', file=sys.stderr,
               flush=True)
 
-    # ---- --phase 2 stopping point -----------------------------------
-    # msshd is in fallback mode. The CA isn't doing any auth yet (msshd
-    # is a transparent proxy). The operator can walk the "enrol servers
-    # + users + policies, flip to enforce" step manually.
-    if stop_at_phase < 3:
-        _finalize_adhoc_artifacts(
-            stop_at_phase=2, invocation_cwd=invocation_cwd,
-            ips=ips, artifacts_dir=artifacts_dir, keys_generated=True)
-        section('SUCCESS — msshd adhoc lab stopped at Phase 2 (msshd fallback)')
-        print(
-            f'\n  source ./adhoc-env.sh\n'
-            f'  ssh_as_2200 alice acct whoami   # works (through msshd proxy)\n'
-            f'  cat ./ADHOC_TEST_ENV.md\n'
-            f'\n  Next manual step: enrol servers + users at the CA, then '
-            f'flip msshd to enforce.\n'
-            f'  See /root/README.md inside any container.\n',
-            file=sys.stderr, flush=True)
-        return
+    # (No early-return between fallback and enforce — the operator can
+    # always reach fallback by flipping wrapper.yaml after the lab is up.)
 
     # =====================================================================
-    # Phase 2 — gen mTLS, enroll, flip msshd to enforce
+    # Final setup — gen mTLS, enroll, flip msshd to enforce
     # =====================================================================
     section('PHASE 2: generating wrapper user-CA + per-user mTLS certs')
     pki_dir = tmp_path_factory.mktemp('msshd-pki')
@@ -1791,13 +1775,13 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
     # =====================================================================
     section('Writing adhoc artifacts (cleanup, env, README)')
     _finalize_adhoc_artifacts(
-        stop_at_phase=3, invocation_cwd=invocation_cwd,
+        stop_at_phase=2, invocation_cwd=invocation_cwd,
         ips=ips, artifacts_dir=artifacts_dir, keys_generated=True)
 
     section('Pushing operator-grade flip scripts to /home/root-admin/ on CA')
     _push_flip_scripts_to_ca(ips, ips[CA_NAME])
 
-    section('SUCCESS — msshd adhoc lab is up at Phase 3 (enforce)')
+    section('SUCCESS — msshd adhoc lab is up at Phase 2 (enforce)')
     print(
         f'\n  source ./adhoc-env.sh    # exports ips, ports, key paths\n'
         f'  cat ./ADHOC_TEST_ENV.md  # full overview + examples\n'

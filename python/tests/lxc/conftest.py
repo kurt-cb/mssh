@@ -116,7 +116,7 @@ def pytest_addoption(parser):
                           'without name collisions. The shared `mssh-*-fixed` '
                           'local base images are NOT prefixed — they\'re '
                           'reused across labs.')
-    parser.addoption('--phase', type=int, default=3, choices=(0, 1, 2, 3),
+    parser.addoption('--phase', type=int, default=2, choices=(0, 1, 2),
                      help='Stop the adhoc setup after this phase '
                           '(test_setup_only_msshd.py only):\n'
                           '  0 = containers up, CA running, mssh source '
@@ -126,11 +126,9 @@ def pytest_addoption(parser):
                           '  1 = + vanilla sshd + per-user keypairs + '
                           'authorized_keys distributed (ssh user@host:22 '
                           'works).\n'
-                          '  2 = + msshd in fallback mode '
-                          '(ssh -p 2200 user@host works through proxy).\n'
-                          '  3 (default) = + msshd in enforce mode + '
-                          'mssh material on hosts (mssh user@host:2200 '
-                          'works).')
+                          '  2 (default) = + msshd in fallback then '
+                          'enforce mode + mssh material on hosts '
+                          '(mssh user@host:2200 works through msshd-enforce).')
 
 
 # ---------------------------------------------------------------------------
