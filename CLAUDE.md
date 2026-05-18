@@ -113,6 +113,53 @@ unbounded entries + long-lived bypass certs, the cache could grow
 in pathological cases. Real-world sizes are small (one entry per
 active principal) so the bound matters less than the semantics.
 
+### Amendment 2026-05-18 (b) — sequence-based CRL
+
+The cache invalidation story (above) handled only one direction:
+on a live CA deny, drop the cached entry for that principal. It
+didn't propagate revocations to caches that *aren't* being touched
+by a fresh connection at the moment. That gap is now closed by a
+sequence-based CRL.
+
+Pieces:
+
+- **CA**: append-only CRL log
+  ([`python/src/mssh/ca/crl.py`](python/src/mssh/ca/crl.py)). Each
+  entry is `{seq, revoked_at, serials, revoked_by, reason}`.
+  Persisted at `<enrollment_dir>/crl.jsonl`. Superuser-only
+  endpoint `POST /v1/admin/cert/revoke` appends. Operator + auditor
+  can `GET /v1/admin/crl`. msshd fetches via `GET /v1/crl`.
+- **Authorize protocol**: response carries `current_crl_seq: M`.
+  Request body carries msshd's `last_crl_seq: N` for audit visibility.
+- **msshd**: `crl_sync.py` reacts to `M > N` by background-fetching
+  `(N, M]` in `crl_fetch_limit` pages, applying each entry's serials
+  via `authz_cache.invalidate_by_serial(serial)`, persisting
+  `last_crl_seq` as it advances.
+- **Strict-mode gate**: `ca.crl_strict_threshold` (default 50). When
+  `(known_ca_seq - last_applied) > threshold`, msshd refuses cache
+  hits and forces live CA calls until catch-up completes. 0 disables.
+
+Operator UX:
+
+```sh
+mssh-admin cert revoke deadbeef --reason 'key rotation'
+mssh-admin crl list --after 100 --limit 20
+```
+
+The CRL applies regardless of source tag: a revoked bypass cert is
+dropped exactly like a revoked CA-grant cert. Same policy for any
+cert; CA is the oracle when reachable.
+
+Eviction-on-capacity is still open (see prior amendment). Sequence-
+based CRL bounds growth-by-revocation, not growth-by-mint. A
+deployment minting many long-lived bypass certs that don't get
+naturally evicted by their own `not_after` could in principle still
+grow without bound. Tracked separately.
+
+See [design/notes-bypass-cache.md](design/notes-bypass-cache.md)
+"Amendment 2026-05-18 (b)" for the design rationale + edge cases
+(CA seq reset, multi-msshd coordination).
+
 ## Docs
 
 ### Operator-facing

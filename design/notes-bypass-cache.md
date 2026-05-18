@@ -177,3 +177,90 @@ After Kurt's inline comments above, the v1 implementation lands on:
    visibility into "what's currently cached, where it came from."
 
 These are the load-bearing decisions for the v1 implementation.
+
+---
+
+## Amendment 2026-05-18 (b) — CRL revocation channel
+
+Resolution of "design hole #4" above. Eviction-on-capacity remains
+unaddressed; but the deeper issue — *how does a revoke at the CA
+propagate to in-flight cache entries across the fleet?* — is now
+solved by a sequence-based CRL.
+
+### The shape
+
+CA-side: append-only log of revocation entries
+([`python/src/mssh/ca/crl.py`](../python/src/mssh/ca/crl.py)).
+
+```
+seq | revoked_at        | serials                | revoked_by | reason
+----+-------------------+-------------------------+------------+-------
+  1 | 2026-05-20T10:00Z | ["abc123"]              | boot-admin | rotation
+  2 | 2026-05-23T09:00Z | ["alice-bypass-serial"] | boot-admin | offboard
+```
+
+Sequence is forever-incrementing; entries are atomic diffs.
+Persisted as JSONL at `<enrollment_dir>/crl.jsonl`.
+
+### Protocol
+
+- Every `/v1/authorize` response now carries `current_crl_seq: M`.
+- msshd persists its `last_crl_seq` on disk alongside the authz cache.
+- When msshd sees `M > last_applied`, a background task fetches
+  `GET /v1/crl?after=N&limit=K` against the CA endpoints, applies
+  each entry's serials to the authz cache via
+  `cache.invalidate_by_serial(serial)`, bumps `last_applied`,
+  persists.
+- The authorize request also sends `last_crl_seq` so the CA's audit
+  log records fleet drift.
+
+### Strict-mode gate (operator-configurable)
+
+`ca.crl_strict_threshold` in wrapper.yaml (default 50). When
+`(known_ca_seq - last_applied) > threshold`, msshd refuses cache
+hits and falls through to live CA calls for every connection until
+sync catches up. Default catches up briefly; operators worried about
+revocation propagation can crank the threshold lower (down to 1 if
+desired). Setting it to 0 disables the gate entirely.
+
+### What the CRL apply does NOT do
+
+- It doesn't re-validate cert chains, because cache entries are
+  certs the CA itself signed and that have already passed validation.
+- It doesn't differentiate by source tag — a revoked bypass cert is
+  dropped exactly like a revoked CA-grant cert. Per the original
+  resolution above (#2), CA is the oracle when reachable.
+
+### Operator UX
+
+```sh
+# Revoke (superuser only):
+mssh-admin cert revoke deadbeef abcd1234 --reason 'key rotation'
+
+# Inspect the CRL log:
+mssh-admin crl list
+mssh-admin crl list --after 100 --limit 20
+```
+
+Every msshd in the fleet picks the revocation up on its next
+authorize call. Affected operators get denied on cache invalidation;
+their next attempt forces a fresh CA call which deny-confirms.
+
+### What this closes (and what it doesn't)
+
+**Closes:** the cache-eviction-on-revocation hole. Revoked certs
+exit cache deterministically.
+
+**Still open (acknowledged in original note #4):**
+eviction-on-capacity. Cache size still has no upper bound. With
+sequence-based CRL the lifetime is bounded by `not_after`, so the
+pathological-growth concern is reduced — but a deployment minting
+many long-lived bypass certs that all stay distinct in the cache
+could still in principle grow without limit. Tracked separately.
+
+**Not addressed here:** CA restart with seq-reset. If a CA reseeds
+its CRL sequence at 0 (e.g., DR rebuild) while msshds in the fleet
+have last_applied >0, the new entries won't reach them. That's a
+multi-msshd-coordination problem the simple design doesn't solve.
+Operator-side mitigation today: rebuild msshd state when
+reseeding the CA.
