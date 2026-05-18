@@ -182,3 +182,22 @@ class CAClient:
         if max_session_seconds is not None:
             body['max_session_seconds'] = max_session_seconds
         return self._request('POST', '/v1/admin/bypass-cert/mint', json=body)
+
+    # ---- CRL ----
+    def cert_revoke(self, serials: list[str], *,
+                    reason: str = '') -> dict[str, Any]:
+        """Append a CRL entry revoking the listed cert serials.
+        Every msshd in the fleet picks this up on its next authorize
+        call. See design/notes-bypass-cache.md "CRL Amendment"."""
+        body: dict[str, Any] = {'serials': list(serials)}
+        if reason:
+            body['reason'] = reason
+        return self._request('POST', '/v1/admin/cert/revoke', json=body)
+
+    def crl_list(self, after: int = 0,
+                 limit: int | None = None) -> dict[str, Any]:
+        """Return the CRL entries with seq > after."""
+        params: dict[str, Any] = {'after': int(after)}
+        if limit is not None:
+            params['limit'] = int(limit)
+        return self._request('GET', '/v1/admin/crl', params=params)

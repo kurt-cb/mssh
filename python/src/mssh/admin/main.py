@@ -705,5 +705,55 @@ def bypass_cert_mint_cmd(ctx, username, pubkey_path, valid_days,
         err=True)
 
 
+# ---------------------------------------------------------------------------
+# CRL / cert revocation
+# ---------------------------------------------------------------------------
+
+@cli.group('cert')
+def cert_group():
+    """Manage authz certs minted by this CA (revoke etc.)."""
+
+
+@cert_group.command('revoke')
+@click.argument('serials', nargs=-1, required=True)
+@click.option('--reason', default='',
+              help='Free-text reason recorded in the CRL entry + audit.')
+@click.pass_context
+def cert_revoke_cmd(ctx, serials, reason):
+    """Revoke one or more cert SERIALS (lowercase hex).
+
+    Appends a CRL entry; the fleet picks it up on next authorize
+    call. Affects both normal CA-grant entries AND bypass-injected
+    entries in each msshd's authz cache. See
+    design/notes-bypass-cache.md "CRL Amendment".
+
+    Example:
+        mssh-admin cert revoke deadbeef abcd1234 --reason 'key rotation'
+    """
+    c = _make_client(ctx)
+    out = _handle_call(c.cert_revoke, list(serials), reason=reason)
+    click.echo(f'revoked seq={out["seq"]} serials={out["serials"]}',
+               err=True)
+    _output(ctx, out)
+
+
+@cli.group('crl')
+def crl_group():
+    """View the CA's CRL (revocation log)."""
+
+
+@crl_group.command('list')
+@click.option('--after', type=int, default=0,
+              help='Return entries with seq > AFTER.')
+@click.option('--limit', type=int, default=None,
+              help='Cap the number of entries returned.')
+@click.pass_context
+def crl_list_cmd(ctx, after, limit):
+    """List CRL entries, optionally filtered by seq."""
+    c = _make_client(ctx)
+    out = _handle_call(c.crl_list, after, limit)
+    _output(ctx, out)
+
+
 if __name__ == '__main__':
     sys.exit(cli())  # pragma: no cover

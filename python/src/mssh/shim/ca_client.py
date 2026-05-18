@@ -75,3 +75,37 @@ class CAClient:
             )
         raise CAClientFailedOver(
             f'all {len(self.endpoints)} CA endpoints failed: {last_err}')
+
+    def crl_fetch(self, after: int, limit: int) -> dict:
+        """GET /v1/crl?after=N&limit=K against the endpoint list.
+        Returns the parsed JSON body. Failover behaviour mirrors
+        authorize(): try each endpoint in turn, surface
+        CAClientFailedOver if all fail."""
+        last_err: Exception | None = None
+        for endpoint in self.endpoints:
+            url = endpoint.rstrip('/') + '/v1/crl'
+            try:
+                resp = self._session.get(
+                    url, params={'after': int(after), 'limit': int(limit)},
+                    cert=(self.mtls_cert, self.mtls_key),
+                    verify=self.ca_trust_root,
+                    timeout=(self.connect_timeout, self.read_timeout),
+                )
+            except (requests.ConnectionError, requests.Timeout) as e:
+                log.warning('CA endpoint %s unreachable (CRL): %s; trying next',
+                            endpoint, e)
+                last_err = e
+                continue
+            if resp.status_code >= 500:
+                log.warning('CA endpoint %s returned %d (CRL); trying next',
+                            endpoint, resp.status_code)
+                last_err = RuntimeError(f'HTTP {resp.status_code}')
+                continue
+            try:
+                body = resp.json()
+            except Exception as e:
+                last_err = e
+                continue
+            return body
+        raise CAClientFailedOver(
+            f'all {len(self.endpoints)} CA endpoints failed (CRL): {last_err}')

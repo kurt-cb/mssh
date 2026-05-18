@@ -48,6 +48,10 @@ _PERMISSIONS = {
     # holder inject directly into msshd's authz cache, sidestepping
     # the live CA. Restrict to superuser only.
     'bypass_cert.mint': {'superuser'},
+    # Cert revocation: appends to the CRL, which all msshds pick up
+    # on their next authorize call. Sensitive — superuser only.
+    'cert.revoke':      {'superuser'},
+    'crl.read':         {'superuser', 'server-admin', 'user-admin', 'auditor'},
 }
 
 
@@ -70,6 +74,10 @@ class AdminContext:
     # operator and injected into msshd's authz cache).
     signing_key: Any = None
     signing_cert: Any = None
+    # CRL log. Sequence-based revocation channel; msshd fleet picks
+    # up entries on its next authorize call. See ca/crl.py +
+    # design/notes-bypass-cache.md "CRL Amendment".
+    crl: Any = None             # CRLStore
 
 
 def _now_iso() -> str:
@@ -714,4 +722,72 @@ def bypass_cert_mint(ctx: AdminContext, admin: Admin,
         'not_before': not_before.strftime('%Y-%m-%dT%H:%M:%SZ'),
         'not_after': not_after.strftime('%Y-%m-%dT%H:%M:%SZ'),
         'cert_pem': cert_pem,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CRL — cert revocation list
+# ---------------------------------------------------------------------------
+
+def cert_revoke(ctx: AdminContext, admin: Admin,
+                body: dict) -> tuple[int, dict]:
+    """Append a CRL entry revoking the given cert serial(s).
+
+    Body:
+        {
+          "serials": ["abc123", "def456"],   // required, lowercase hex
+          "reason":  "operator decision"      // optional
+        }
+
+    Every msshd in the fleet picks this up on its next authorize call
+    (the response carries the new ``current_crl_seq``; msshd fetches
+    the missing CRLs and applies them to its authz cache).
+    """
+    if (err := _check('cert.revoke', admin)):
+        return err
+    if ctx.crl is None:
+        return _err(500, 'internal', 'CRL store not configured')
+    serials = body.get('serials')
+    if not isinstance(serials, list) or not serials:
+        return _err(400, 'bad_request',
+                    'serials must be a non-empty list of hex serials')
+    cleaned: list[str] = []
+    for s in serials:
+        if not isinstance(s, str) or not s.strip():
+            return _err(400, 'bad_request', f'invalid serial: {s!r}')
+        cleaned.append(s.strip().lower())
+    reason = str(body.get('reason') or '')
+
+    try:
+        entry = ctx.crl.append(cleaned, revoked_by=admin.name, reason=reason)
+    except OSError as e:
+        return _err(500, 'internal', f'CRL append failed: {e}')
+
+    _audit_admin(ctx, admin, 'cert.revoke',
+                 {'serials': cleaned, 'seq': entry.seq, 'reason': reason},
+                 'ok')
+
+    return 201, {
+        'status': 'ok',
+        'seq': entry.seq,
+        'revoked_at': entry.revoked_at,
+        'serials': cleaned,
+    }
+
+
+def crl_fetch(ctx: AdminContext, admin: Admin,
+              after: int, limit: int | None) -> tuple[int, dict]:
+    """Return CRL entries with seq > ``after``, optionally bounded
+    by ``limit``. Operator-callable for diagnostic visibility; the
+    msshd hot path uses the un-authenticated ``GET /v1/crl`` mirror.
+    """
+    if (err := _check('crl.read', admin)):
+        return err
+    if ctx.crl is None:
+        return _err(500, 'internal', 'CRL store not configured')
+    entries = ctx.crl.fetch_after(int(after or 0), limit=limit)
+    return 200, {
+        'status': 'ok',
+        'current_seq': ctx.crl.current_seq(),
+        'entries': [e.to_dict() for e in entries],
     }

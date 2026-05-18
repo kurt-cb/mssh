@@ -79,6 +79,7 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
     from .authz_cache import AuthzCache
     from .ca import WrapperCAClient
     from .config import INNER_MODE_PER_CONNECTION
+    from .crl_sync import CRLSync
     from .enforce_listener import EnforceListener
     from .inner import (InnerSshd, PerConnectionInnerSshd,
                         _detect_sshd_version)
@@ -141,10 +142,16 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
         authz_cache = AuthzCache(
             persist_path=os.path.join(state_dir, 'authz_cache.json'))
 
+        # 3c. CRL sync — pulls revocations from the CA in the
+        # background after each authorize call. See crl_sync.py.
+        crl_sync = CRLSync(authz_cache, ca_client,
+                           fetch_limit=cfg.ca.crl_fetch_limit)
+
         # 4. The actual outer mTLS listener.
         listener = EnforceListener(
             cfg, user_ca=user_ca, ca_client=ca_client, inner_sshd=inner,
             authz_cache=authz_cache,
+            crl_sync=crl_sync,
             inner_sshd_kind='openssh',
             inner_sshd_version=inner_sshd_version,
             msshd_version=MSSHD_VERSION,

@@ -66,6 +66,7 @@ class EnforceListener:
                  ca_client: WrapperCAClient,
                  inner_sshd,                       # InnerSshd | PerConnectionInnerSshd
                  authz_cache: AuthzCache,
+                 crl_sync=None,                    # CRLSync | None
                  inner_sshd_kind: str = 'openssh',
                  inner_sshd_version: str = '',
                  msshd_version: str = '',
@@ -75,6 +76,14 @@ class EnforceListener:
         self.ca_client = ca_client
         self.inner_sshd = inner_sshd
         self.authz_cache = authz_cache
+        # CRL sync — fetches missing CRLs after each authorize call;
+        # see crl_sync.py. May be None in early-bootstrap / test code.
+        self.crl_sync = crl_sync
+        # Highest CRL sequence we've seen the CA advertise. Tracks
+        # CA's view of "current" across connections so the strict
+        # gate has a fresh enough number to compare against
+        # last-applied. Seeded from the persisted cache state.
+        self._last_known_ca_crl_seq: int = authz_cache.last_crl_seq
         self.inner_sshd_kind = inner_sshd_kind
         self.inner_sshd_version = inner_sshd_version
         self.msshd_version = msshd_version
@@ -188,8 +197,27 @@ class EnforceListener:
             await _close(writer)
             return
 
-        # --- Normal flow: cache first, CA on miss ---
-        cached = self.authz_cache.get(principal)
+        # --- Strict-mode CRL gate ---
+        # If we know the CA is significantly ahead of our CRL state
+        # (last live response advertised current_crl_seq much higher
+        # than last_applied), refuse to serve cache hits — force a
+        # live CA call so revocations propagate before granting.
+        # Threshold of 0 disables the gate (always serve from cache).
+        cache_is_stale = False
+        if self.crl_sync is not None:
+            threshold = self.cfg.ca.crl_strict_threshold
+            if threshold > 0:
+                gap = (self._last_known_ca_crl_seq
+                       - self.authz_cache.last_crl_seq)
+                if gap > threshold:
+                    log.warning('[%s] cache stale: CRL gap=%d > '
+                                'threshold=%d; bypassing cache',
+                                conn_id, gap, threshold)
+                    cache_is_stale = True
+
+        # --- Normal flow: cache first, CA on miss (or stale) ---
+        cached = (None if cache_is_stale
+                  else self.authz_cache.get(principal))
         if cached is not None:
             log.info('[%s] authz cache hit for %s (source=%s, '
                      'not_after=%s)', conn_id, principal,
@@ -215,6 +243,7 @@ class EnforceListener:
                 inner_sshd_kind=self.inner_sshd_kind,
                 inner_sshd_version=self.inner_sshd_version,
                 msshd_version=self.msshd_version,
+                last_crl_seq=self.authz_cache.last_crl_seq,
             )
 
             if isinstance(result, AuthorizationDeny):
@@ -238,6 +267,11 @@ class EnforceListener:
                      '— caching', conn_id, result.serial,
                      result.not_after)
             self.authz_cache.put(principal, result, source=SOURCE_CA)
+            # Record + maybe trigger background CRL sync.
+            self._last_known_ca_crl_seq = max(
+                self._last_known_ca_crl_seq, result.current_crl_seq)
+            if self.crl_sync is not None:
+                self.crl_sync.maybe_sync(result.current_crl_seq)
 
         # --- Validate + parse policy (shared path for cache-hit + fresh-CA) ---
         try:

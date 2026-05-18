@@ -83,6 +83,10 @@ class AuthzCache:
         in-memory only (useful for tests). The file is created with
         mode 0600 on first write."""
         self._entries: dict[str, CachedGrant] = {}
+        # Last applied CRL sequence number (sequence-based revocation
+        # log — see ca/crl.py). 0 = "nothing applied yet". Persisted
+        # alongside the cache entries.
+        self.last_crl_seq: int = 0
         self._persist_path: Optional[Path] = (
             Path(persist_path) if persist_path else None)
         if self._persist_path is not None:
@@ -145,6 +149,38 @@ class AuthzCache:
             return True
         return False
 
+    def invalidate_by_serial(self, serial: str) -> int:
+        """Drop any cache entry whose grant has the given cert
+        ``serial``. Returns the number of entries removed (0 or 1
+        in practice; structured as a count for safety).
+
+        Used by CRL apply to remove revoked entries. The CA sends
+        ``serials`` in CRL entries; msshd iterates the cache (which
+        is small) and drops matches. Source-tag-agnostic: a revoked
+        bypass cert is dropped exactly the same as a revoked CA-grant.
+        """
+        serial = serial.strip().lower()
+        if not serial:
+            return 0
+        dropped: list[str] = []
+        for p, e in list(self._entries.items()):
+            if e.grant.serial.lower() == serial:
+                dropped.append(p)
+        for p in dropped:
+            del self._entries[p]
+        if dropped:
+            self._persist()
+            log.info('authz_cache: invalidated by serial=%s '
+                     '(principals=%s)', serial, dropped)
+        return len(dropped)
+
+    def set_last_crl_seq(self, seq: int) -> None:
+        """Update the highest-applied CRL sequence and persist."""
+        if seq <= self.last_crl_seq:
+            return
+        self.last_crl_seq = int(seq)
+        self._persist()
+
     def list_all(self) -> list[CachedGrant]:
         """All non-expired entries, for diagnostic / admin tooling.
         Filters out expired entries lazily as a side effect."""
@@ -167,6 +203,7 @@ class AuthzCache:
             return
         body = {
             'version': 1,
+            'last_crl_seq': self.last_crl_seq,
             'entries': [
                 {
                     'principal':    e.principal,
@@ -208,6 +245,10 @@ class AuthzCache:
             log.warning('authz_cache: unexpected on-disk format at %s, '
                         'starting empty', self._persist_path)
             return
+        try:
+            self.last_crl_seq = int(body.get('last_crl_seq') or 0)
+        except (TypeError, ValueError):
+            self.last_crl_seq = 0
         loaded, skipped = 0, 0
         now = _now()
         for raw in body.get('entries', []):

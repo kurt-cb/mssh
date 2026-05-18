@@ -51,6 +51,15 @@ class CAConfig:
     ca_pubkey: str = ''
     timeout_seconds: float = 5.0
     emergency_cert: str = ''
+    # CRL sync controls. crl_fetch_limit caps each GET /v1/crl call
+    # so a long-offline msshd doesn't ask the CA for a huge batch.
+    # crl_strict_threshold: if (current_crl_seq - last_applied) >
+    # this, msshd refuses cache hits and falls through to live CA
+    # calls until sync catches up. 0 = disable strict gating (always
+    # serve from cache regardless of staleness). See
+    # design/notes-bypass-cache.md "CRL Amendment".
+    crl_fetch_limit: int = 100
+    crl_strict_threshold: int = 50
 
 
 INNER_MODE_LONG_LIVED = 'long-lived'
@@ -161,6 +170,11 @@ class WrapperConfig:
                 ca_pubkey=str(ca.get('ca_pubkey') or ''),
                 timeout_seconds=float(ca.get('timeout_seconds') or 5.0),
                 emergency_cert=str(ca.get('emergency_cert') or ''),
+                crl_fetch_limit=int(ca.get('crl_fetch_limit') or 100),
+                crl_strict_threshold=int(
+                    ca.get('crl_strict_threshold')
+                    if ca.get('crl_strict_threshold') is not None
+                    else 50),
             ),
             inner=InnerConfig(
                 sshd_binary=str(inner.get('sshd_binary') or '/usr/sbin/sshd'),

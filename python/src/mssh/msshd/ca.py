@@ -38,6 +38,11 @@ class AuthorizationGrant:
     # Protocol-1.1+ fields. Empty / None on older CAs.
     inner_sshd_config: str = ''
     protocol_version: str = ''
+    # CA's current CRL sequence at response time. 0 = CA has no CRL
+    # (legacy CA or empty log). msshd uses this to decide whether to
+    # fetch missing CRL entries via GET /v1/crl?after=N. See
+    # design/notes-bypass-cache.md "CRL Amendment".
+    current_crl_seq: int = 0
 
 
 @dataclass
@@ -91,6 +96,7 @@ class WrapperCAClient:
         inner_sshd_kind: str = '',
         inner_sshd_version: str = '',
         msshd_version: str = '',
+        last_crl_seq: int = 0,
     ) -> AuthorizationResult:
         """Call POST /v1/authorize. ``identity_blob`` is the raw SSH
         wire-format pubkey or OpenSSH cert bytes.
@@ -123,6 +129,10 @@ class WrapperCAClient:
             body['inner_sshd_version'] = inner_sshd_version
         if msshd_version:
             body['msshd_version'] = msshd_version
+        # Always send the CRL sequence — 0 is meaningful (msshd has
+        # never synced). CA includes its current_crl_seq in the
+        # response so msshd can fetch missing CRLs.
+        body['last_crl_seq'] = int(last_crl_seq)
 
         loop = asyncio.get_running_loop()
         try:
@@ -135,6 +145,18 @@ class WrapperCAClient:
             return AuthorizationError(message=f'unexpected CA error: {e}')
 
         return _parse_result(result)
+
+    async def fetch_crl(self, *, after: int, limit: int) -> dict:
+        """GET /v1/crl?after=N&limit=K against the same CA endpoint
+        list. Returns the parsed JSON body: {status, current_seq,
+        entries: [...]}.
+
+        Raises an exception on transport / parse failure. Callers
+        (the CRL sync loop) treat exceptions as "skip this round,
+        retry later"."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self._client.crl_fetch, after, limit)
 
 
 def _parse_result(result: AuthorizeResult) -> AuthorizationResult:
@@ -155,10 +177,15 @@ def _parse_result(result: AuthorizeResult) -> AuthorizationResult:
         except Exception:
             return AuthorizationError(
                 message=f'unparseable not_after {not_after_s!r}')
+        try:
+            current_crl_seq = int(body.get('current_crl_seq') or 0)
+        except (TypeError, ValueError):
+            current_crl_seq = 0
         return AuthorizationGrant(
             cert_der=cert_der, serial=serial, not_after=not_after,
             inner_sshd_config=str(body.get('inner_sshd_config') or ''),
-            protocol_version=str(body.get('protocol_version') or ''))
+            protocol_version=str(body.get('protocol_version') or ''),
+            current_crl_seq=current_crl_seq)
 
     if status == 'denied':
         return AuthorizationDeny(

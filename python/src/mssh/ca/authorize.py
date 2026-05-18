@@ -32,6 +32,10 @@ class AuthorizeContext:
     identity_trust_root_fingerprints: set[str]   # SHA256 of trusted user-CA pubkey blobs
     default_max_cert_validity_seconds: int = 3600
     timestamp_drift_seconds: int = 60
+    # CRL store. authorize includes the current CRL sequence in the
+    # response so msshd knows when it's behind and should fetch.
+    # See ca/crl.py.
+    crl: Any = None             # CRLStore | None
 
 
 def _now() -> _dt.datetime:
@@ -123,6 +127,13 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
     inner_sshd_kind = body.get('inner_sshd_kind') or 'openssh'
     inner_sshd_version = body.get('inner_sshd_version') or ''
     msshd_version = body.get('msshd_version') or ''
+    # msshd's last applied CRL sequence. Informational on the CA
+    # side (we don't gate on it); used in audit and lets operators
+    # see fleet drift via the audit log.
+    try:
+        client_last_crl_seq = int(body.get('last_crl_seq') or 0)
+    except (TypeError, ValueError):
+        client_last_crl_seq = 0
 
     try:
         identity_blob = base64.b64decode(identity_b64, validate=True)
@@ -265,6 +276,7 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
             'msshd_version': msshd_version,
             'inner_sshd_kind': inner_sshd_kind,
             'inner_sshd_version': inner_sshd_version,
+            'last_crl_seq': client_last_crl_seq,
         },
     }
     if inner_sshd_config_error:
@@ -287,4 +299,8 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
     }
     if inner_sshd_config is not None:
         response['inner_sshd_config'] = inner_sshd_config
+    # CRL sequence — msshd uses this to detect when it's behind and
+    # needs to fetch new CRL entries. Always present (0 if no CRL).
+    if ctx.crl is not None:
+        response['current_crl_seq'] = ctx.crl.current_seq()
     return 200, response

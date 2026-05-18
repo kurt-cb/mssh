@@ -117,6 +117,12 @@ def create_app(config: CAConfig) -> Flask:
     tls_ca_key = cert_minter.load_private_key(
         Path(config.signing_cert).parent / 'tls-ca-key.pem')
 
+    # CRL log lives next to the enrollment file. Sequence-based
+    # revocation channel; msshds pick up entries on next authorize.
+    from . import crl as _crl
+    crl_path = Path(config.enrollment_path).parent / 'crl.jsonl'
+    crl_store = _crl.CRLStore(crl_path)
+
     identity_fps = _load_identity_trust_root_fingerprints(config.identity_trust_roots)
 
     auth_ctx = authorize.AuthorizeContext(
@@ -125,6 +131,7 @@ def create_app(config: CAConfig) -> Flask:
         identity_trust_root_fingerprints=identity_fps,
         default_max_cert_validity_seconds=config.default_max_cert_validity_seconds,
         timestamp_drift_seconds=config.timestamp_drift_seconds,
+        crl=crl_store,
     )
     admin_ctx = admin_handlers.AdminContext(
         enrollment=enrollment, audit=audit,
@@ -133,6 +140,7 @@ def create_app(config: CAConfig) -> Flask:
         admin_cert_validity_days=config.admin_cert_validity_days,
         mtls_key_type=config.mtls_key_type,
         signing_key=signing_key, signing_cert=signing_cert,
+        crl=crl_store,
     )
 
     app.config['AUTH_CTX'] = auth_ctx
@@ -387,6 +395,67 @@ def register_routes(app: Flask) -> None:
         status, payload = admin_handlers.bypass_cert_mint(
             app.config['ADMIN_CTX'], adm, body)
         return jsonify(payload), status
+
+    # ---- CRL ----
+    # cert.revoke appends to the CRL; msshds pick up on next authorize.
+    @app.post('/v1/admin/cert/revoke')
+    def _cert_revoke():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.cert_revoke(
+            app.config['ADMIN_CTX'], adm, body)
+        return jsonify(payload), status
+
+    # /v1/admin/crl is the operator/auditor view (RBAC: any admin role
+    # except no role at all).
+    @app.get('/v1/admin/crl')
+    def _crl_admin_list():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        try:
+            after = int(request.args.get('after') or 0)
+        except ValueError:
+            return jsonify({'status': 'error', 'reason': 'bad_request',
+                            'detail': 'after must be an integer'}), 400
+        limit_arg = request.args.get('limit')
+        try:
+            limit = int(limit_arg) if limit_arg is not None else None
+        except ValueError:
+            return jsonify({'status': 'error', 'reason': 'bad_request',
+                            'detail': 'limit must be an integer'}), 400
+        status, payload = admin_handlers.crl_fetch(
+            app.config['ADMIN_CTX'], adm, after, limit)
+        return jsonify(payload), status
+
+    # /v1/crl is the msshd hot-path fetch. Authenticated by the same
+    # mTLS chain as /v1/authorize (the wrapper presents its mTLS cert
+    # — no admin role gate). Pure read; never mutates state.
+    @app.get('/v1/crl')
+    def _crl_msshd_fetch():
+        try:
+            after = int(request.args.get('after') or 0)
+        except ValueError:
+            return jsonify({'status': 'error', 'reason': 'bad_request',
+                            'detail': 'after must be an integer'}), 400
+        limit_arg = request.args.get('limit')
+        try:
+            limit = int(limit_arg) if limit_arg is not None else None
+        except ValueError:
+            return jsonify({'status': 'error', 'reason': 'bad_request',
+                            'detail': 'limit must be an integer'}), 400
+        auth_ctx = app.config['AUTH_CTX']
+        if auth_ctx.crl is None:
+            return jsonify({'status': 'ok', 'current_seq': 0,
+                            'entries': []}), 200
+        entries = auth_ctx.crl.fetch_after(after, limit=limit)
+        return jsonify({
+            'status': 'ok',
+            'current_seq': auth_ctx.crl.current_seq(),
+            'entries': [e.to_dict() for e in entries],
+        }), 200
 
 
 # ---------------------------------------------------------------------------
