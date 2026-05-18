@@ -5,20 +5,58 @@
 - name: Spinup Squid Proxy Host
   hosts: localhost
   gather_facts: no
+  vars:
+    proxy_static_ip: "10.26.244.2"
   roles:
     - role: lxc_spinup
       vars:
         container_name: squid-proxy
         image_name: mssh-alpine-fixed
         ssh_key_path: /home/kgodwin/msshtest/python/tests/ansible-project/ansible_id_ed25519
+        inventory_file: /home/kgodwin/msshtest/python/tests/ansible-project/hosts.ini
+
+- name: Configure Static IP
+  hosts: squid-proxy
+  gather_facts: yes
+  vars:
+    proxy_static_ip: "10.26.244.2"
+
+  tasks:
+    - name: Configure static IP with netplan
+      ansible.builtin.copy:
+        content: |
+          network:
+            version: 2
+            ethernets:
+              eth0:
+                dhcp4: false
+                addresses:
+                  - {{ proxy_static_ip }}/24
+                gateway4: 10.26.244.1
+                nameservers:
+                  addresses: [8.8.8.8, 8.8.4.4]
+        dest: /etc/netplan/99-static.yaml
+        owner: root
+        group: root
+        mode: '0644'
+      register: netplan_config
+
+    - name: Apply netplan configuration
+      ansible.builtin.shell: netplan apply
+      when: netplan_config.changed
+
+    - name: Wait for network to settle
+      pause:
+        seconds: 2
 
 - name: Configure Squid Proxy
   hosts: squid-proxy
   become: yes
   gather_facts: yes
   vars:
+    proxy_static_ip: "10.26.244.100"
     squid_port: 3128
-    allowed_network: "10.26.244.240/24"
+    allowed_network: "10.26.244.100/24"
 
   tasks:
     - name: Install Squid package

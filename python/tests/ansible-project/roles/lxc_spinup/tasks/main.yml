@@ -58,3 +58,14 @@
     port: 22
     state: started
     timeout: "{{ wait_timeout }}"
+
+- name: Update inventory file with container IP
+  ansible.builtin.lineinfile:
+    path: "{{ inventory_file }}"
+    regexp: "^{{ container_name }}[ \t]+ansible_host="
+    line: "{{ container_name }}  ansible_host={{ container_ip }}"
+    state: present
+    create: no
+  when: inventory_file is defined
+  delegate_to: localhost
+  become: no
