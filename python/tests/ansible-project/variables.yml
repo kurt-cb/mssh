@@ -1,6 +1,6 @@
 ---
 # Proxy Settings
-proxy_ip: "10.26.244.209"
+proxy_ip: "10.26.244.240"
 proxy_hostname: "squid-proxy.local"
 proxy_port: "3128"
 

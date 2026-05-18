@@ -1,0 +1,82 @@
+---
+# Example: Spinup and configure Squid Proxy
+# Usage: ansible-playbook examples/spinup_squid.yml
+
+- name: Spinup Squid Proxy Host
+  hosts: localhost
+  gather_facts: no
+  roles:
+    - role: lxc_spinup
+      vars:
+        container_name: squid-proxy
+        image_name: mssh-alpine-fixed
+        ssh_key_path: /home/kgodwin/msshtest/python/tests/ansible-project/ansible_id_ed25519
+
+- name: Configure Squid Proxy
+  hosts: squid-proxy
+  become: yes
+  gather_facts: yes
+  vars:
+    squid_port: 3128
+    allowed_network: "10.26.244.240/24"
+
+  tasks:
+    - name: Install Squid package
+      ansible.builtin.package:
+        name: squid
+        state: present
+
+    - name: Deploy Squid configuration file
+      ansible.builtin.template:
+        src: ../templates/squid.conf.j2
+        dest: /etc/squid/squid.conf
+        owner: root
+        group: root
+        mode: '0644'
+        validate: "squid -k parse -f %s"
+      notify: restart squid
+
+    - name: Ensure Squid service is started and enabled
+      ansible.builtin.service:
+        name: squid
+        state: started
+        enabled: yes
+
+    - name: Allow Squid port in firewall (UFW for Ubuntu)
+      ansible.builtin.ufw:
+        rule: allow
+        port: "{{ squid_port }}"
+        proto: tcp
+      when: ansible_os_family == "Debian"
+
+    - name: Check squid service status
+      ansible.builtin.shell: systemctl is-active --quiet squid
+      register: squid_status
+      changed_when: false
+
+    - name: Test proxy connectivity
+      ansible.builtin.shell: |
+        curl -s --proxy "http://{{ ansible_host }}:3128" -o /dev/null -w "%{http_code}" http://example.com
+      register: proxy_test
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display proxy test result
+      debug:
+        msg: "Proxy connectivity test returned: {{ proxy_test.stdout }}"
+
+  handlers:
+    - name: restart squid
+      ansible.builtin.service:
+        name: squid
+        state: restarted
+
+  post_tasks:
+    - name: Display proxy setup instructions
+      debug:
+        msg: |
+          Squid proxy is running at http://{{ ansible_host }}:3128
+
+          To use the proxy in your shell:
+            export http_proxy=http://{{ ansible_host }}:3128
+            export https_proxy=http://{{ ansible_host }}:3128
