@@ -560,3 +560,114 @@ A re-implementation claims v1.1 conformance if it:
   5. Implements every admin endpoint in [§4.2](#42-endpoints-summary) with the RBAC checks in [§4.1](#41-roles--permissions).
   6. Writes audit entries with the schema in [§7](#7-audit-log).
   7. Persists enrollment + templates with semantics equivalent to [§6.4](#64-enrollment-yaml-shape).
+
+
+---
+
+## 10. CRL — certificate revocation list (added 2026-05-18)
+
+The CA maintains a sequence-based revocation log. Every revoke
+appends one entry; msshds in the fleet fetch missing entries on
+their next authorize call and apply them to their local authz
+caches.
+
+### 10.1 Log shape
+
+Append-only JSONL at `<enrollment_dir>/crl.jsonl`. One entry per
+line:
+
+```json
+{
+  "seq": 42,
+  "revoked_at": "2026-05-18T12:00:00Z",
+  "serials": ["abc123", "def456"],
+  "revoked_by": "boot-admin",
+  "reason": "key rotation"
+}
+```
+
+Sequence numbers are monotonically increasing, assigned by the CA
+at append time. Empty `serials` is permitted (heartbeat-style
+sequence bump) but unusual.
+
+### 10.2 Append (admin API)
+
+`POST /v1/admin/cert/revoke` — superuser-only. Body:
+
+```json
+{ "serials": ["abc", "def"], "reason": "..." }
+```
+
+Response: the new entry's seq + revoked_at. See
+[api.md](api.md#post-v1admincertrevoke).
+
+### 10.3 Fetch (msshd hot path)
+
+`GET /v1/crl?after=N&limit=K` — same mTLS authentication as
+`/v1/authorize`; no admin RBAC.
+
+Returns entries with `seq > N`, optionally capped by `limit`. msshd
+calls this from its background CRL-sync coroutine after any
+authorize response where `current_crl_seq > last_applied_seq`.
+
+### 10.4 Authorize hot-path coupling
+
+`/v1/authorize` responses include `current_crl_seq: int` so
+clients know when they're behind. The request body has an
+optional `last_crl_seq: int` (informational; CA records in audit
+for fleet-drift visibility).
+
+### 10.5 Application semantics on msshd
+
+msshd's CRL sync loop:
+
+1. After every authorize response, compare `current_crl_seq` to
+   persisted `last_applied_seq`.
+2. If behind, spawn a background task to `GET /v1/crl?after=N`.
+3. For each returned entry, iterate over the authz cache and drop
+   any entry whose grant serial matches one in `entry.serials`.
+4. Advance `last_applied_seq` after each successfully-applied page.
+
+Invalidation is source-agnostic: revoked bypass certs are dropped
+the same as revoked CA-grant certs. "CA is the oracle when
+reachable."
+
+### 10.6 Strict-mode gate
+
+msshd has a configurable threshold
+(`ca.crl_strict_threshold`, default 50). When
+`(known_ca_seq - last_applied) > threshold`, msshd refuses cache
+hits and forces live CA calls until catch-up. Setting threshold = 0
+disables the gate (always serve from cache).
+
+### 10.7 Per-issuer evolution (Phase 4+)
+
+The current design has a single CRL log per CA. When the multi-
+intermediate hierarchy migration completes (see
+[design/notes-pki-hierarchy.md](notes-pki-hierarchy.md)), the CRL
+becomes per-issuer:
+
+- One log per intermediate, stored at
+  `<enrollment_dir>/crl/<short-name>.jsonl`
+- Authorize response carries `current_crl_seqs: {issuer_id: seq}`
+- Fetch endpoint takes `issuer` parameter:
+  `GET /v1/crl?issuer=<id>&after=N&limit=K`
+- Rotating an intermediate naturally orphans its old CRL — the new
+  intermediate has a fresh pubkey-fp16 (and thus a fresh issuer_id),
+  so old CRL state is irrelevant to the new chain
+
+Backward compatibility: during the transition, a singular
+`current_crl_seq` / `last_crl_seq` (without the `_seqs` plural) is
+treated as user-mint's value.
+
+### 10.8 What CRL does NOT solve
+
+- **Eviction-on-capacity.** CRL bounds growth-by-revocation, not
+  growth-by-mint. The authz cache has separate per-principal +
+  global eviction caps (see
+  [security.md § Eviction-on-capacity](security.md#eviction-on-capacity-not-a-security-control)).
+- **CA seq-reset coordination.** If a CA is fully rebuilt (root +
+  intermediates regenerated), msshds with stale `last_applied`
+  values get out of sync. The per-issuer evolution (10.7) closes
+  this naturally: a fresh intermediate has a fresh issuer_id, so
+  msshds see "new issuer" and start tracking from seq=0.

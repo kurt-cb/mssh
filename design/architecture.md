@@ -291,3 +291,75 @@ are exhausted, the client fails.
 See [security.md](security.md) for the threat model and
 [future-ideas.md](future-ideas.md) for everything we've considered
 adding later.
+
+
+---
+
+## Authz cache + bypass-cert (added 2026-05-18)
+
+msshd has an in-memory + on-disk authz cache (one entry per
+principal). On every incoming connection it checks the cache
+first; on hit, no CA call. On miss, it calls the CA, stores the
+result, uses it. The cache is the load-bearing structure for two
+features:
+
+  - **Reduced CA load.** Short-bursting connections from the same
+    principal coalesce into one CA call.
+  - **Operator break-glass.** An operator with an offline-stored
+    *bypass cert* can `mssh --inject-bypass-cert <cert>` against
+    a msshd whose CA is unreachable. msshd validates the cert
+    (chain + bypass marker + principal match) and writes it
+    directly into the cache. The operator's next normal `mssh`
+    session hits the cache and succeeds — no CA call.
+
+Cache entries are persisted on disk at
+`<state_dir>/authz_cache.json` (mode 0600). Survives msshd
+restarts so operators repairing across reboots don't have to
+re-inject. See [security.md § Authz cache + bypass-cert + CRL](security.md#authz-cache--bypass-cert--crl-2026-05-18)
+for the security analysis.
+
+## CRL revocation channel (added 2026-05-18)
+
+The CA maintains an append-only CRL log (`crl.jsonl`). Each entry
+is `{seq, revoked_at, serials, revoked_by, reason}` — sequence
+numbers monotonically increase. Every `/v1/authorize` response
+carries the CA's current sequence number; msshd tracks the highest
+sequence it has applied and fetches missing entries via
+`GET /v1/crl?after=N&limit=K`. Applied entries invalidate matching
+cache entries by serial — source-agnostic (bypass certs are
+revocable the same as CA-granted certs).
+
+Operators issue revocations via `mssh-admin cert revoke <serial>`.
+Fleet propagation happens on each msshd's next authorize call.
+
+A configurable strict-mode gate prevents serving from a stale
+cache: if `(known_ca_seq - last_applied) > threshold`
+(`ca.crl_strict_threshold`, default 50), msshd refuses cache hits
+and forces live CA calls until catch-up. Set to 0 to disable.
+
+## PKI hierarchy migration (in progress)
+
+The CA is migrating from single-signer (one signing key for authz
+certs + one TLS CA for mTLS certs) to a root + 4 named intermediates
+hierarchy:
+
+```
+root  (mssh-root, self-signed, long-lived)
+ ├── user-mint     — per-session authz certs
+ ├── bypass-mint   — operator-presentable bypass certs
+ ├── host-mint     — server identities (CA TLS, msshd mTLS)
+ └── auth          — admin/client mTLS certs
+```
+
+Each intermediate has its own keypair and signs the leaves in its
+role. Rotating one intermediate (e.g. bypass-mint) invalidates
+its outstanding certs (chain breaks) without affecting any other
+role. CRL state becomes per-issuer, keyed by
+`<short-name>:<pubkey-fp16>`.
+
+Migration is staged across several commits — see
+[design/notes-pki-hierarchy.md](notes-pki-hierarchy.md) for the
+phased plan + current status. Phase 1 (foundation: helpers,
+dataclasses, backward-compat function signatures) has landed.
+Bootstrap refactor + per-issuer CRL + msshd chain validation +
+admin CLI commands land in subsequent commits.

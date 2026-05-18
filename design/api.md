@@ -366,3 +366,118 @@ should warn on mismatches.
 
 These are defaults the CA enforces; operators can tune them in
 the CA config.
+
+
+---
+
+## Endpoints added 2026-05-18 — bypass cert + CRL
+
+### POST /v1/admin/bypass-cert/mint
+
+Mint a CA-bypass authz cert for an enrolled user. Superuser-only.
+The cert is a normal X.509 authz cert with the OID_CA_BYPASS
+critical extension marker — operators store it offline and
+present via `mssh --inject-bypass-cert` when the CA is unreachable.
+
+Request:
+```json
+{
+  "username": "alice",
+  "pubkey_b64": "<base64 SSH wire-format pubkey blob>",
+  "validity_days": 90,
+  "source_bind": "0.0.0.0/0",
+  "server_bind": "*",
+  "channels": ["session"],
+  "force_command": "...",
+  "max_session_seconds": 3600
+}
+```
+
+Response 201:
+```json
+{
+  "status": "ok",
+  "username": "alice",
+  "serial": "deadbeef...",
+  "not_before": "2026-05-18T00:00:00Z",
+  "not_after": "2026-08-16T00:00:00Z",
+  "cert_pem": "-----BEGIN CERTIFICATE-----\n..."
+}
+```
+
+### POST /v1/admin/cert/revoke
+
+Append a CRL entry revoking one or more cert serials. Superuser-only.
+Every msshd in the fleet picks the entry up on its next authorize
+call (the response carries `current_crl_seq`; msshd fetches missing
+entries via `GET /v1/crl`).
+
+Request:
+```json
+{
+  "serials": ["deadbeef", "abc123"],
+  "reason": "key rotation"
+}
+```
+
+Response 201:
+```json
+{
+  "status": "ok",
+  "seq": 42,
+  "revoked_at": "2026-05-18T12:00:00Z",
+  "serials": ["deadbeef", "abc123"]
+}
+```
+
+### GET /v1/admin/crl
+
+Operator/auditor view of the CRL log. Any admin role.
+
+Query params:
+- `after` — return entries with `seq > after` (default 0 = all)
+- `limit` — cap the number of entries returned
+
+Response 200:
+```json
+{
+  "status": "ok",
+  "current_seq": 45,
+  "entries": [
+    {"seq": 42, "revoked_at": "...", "serials": ["..."], "revoked_by": "boot", "reason": "..."},
+    ...
+  ]
+}
+```
+
+### GET /v1/crl
+
+msshd-facing CRL fetch endpoint. Same response shape as
+`/v1/admin/crl` but no admin RBAC — authenticated by the wrapper's
+mTLS cert (same authentication as `/v1/authorize`). Used by
+msshd's CRL sync loop.
+
+Same `after` + `limit` query params.
+
+### Authorize protocol extensions
+
+Request gains optional `last_crl_seq: int` (informational; CA
+records it in audit for fleet drift visibility).
+
+Response gains `current_crl_seq: int` (always present; 0 = empty
+CRL log). msshd compares against its persisted `last_applied_seq`
+and triggers sync if behind.
+
+### Future (PKI hierarchy migration — Phase 4+)
+
+Once the multi-intermediate hierarchy lands (see
+[design/notes-pki-hierarchy.md](notes-pki-hierarchy.md)), these
+endpoints gain a per-issuer dimension:
+
+- Authorize response: `current_crl_seqs: {issuer_id: seq}` (map)
+- `GET /v1/crl?issuer=<id>&after=N&limit=K` — per-issuer fetch
+- `POST /v1/admin/cert/revoke` body adds `issuer` field (or
+  CA auto-detects from cert chain)
+
+Backward compat: a singular `current_crl_seq` / `last_crl_seq` is
+treated as user-mint's value during the transition.

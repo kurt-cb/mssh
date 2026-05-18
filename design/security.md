@@ -291,3 +291,99 @@ The audit log is append-only; rotation is operator-managed (typical
 sustained rates are dozens to hundreds of events per second per
 server). Tampering with the log requires CA-host access — at
 which point the threat model is already broken.
+
+
+---
+
+## Authz cache + bypass-cert + CRL (2026-05-18)
+
+Three security-relevant primitives added after the initial design.
+See [design/notes-bypass-cache.md](notes-bypass-cache.md) for the
+full rationale + Kurt's inline review comments + resolutions.
+
+### Authz cache on msshd
+
+msshd maintains a per-principal authz cache (in-memory + on-disk
+persistence at `<state_dir>/authz_cache.json`, mode 0600). On every
+mTLS-terminated connection it looks up the cache FIRST; on hit, no
+CA call. On miss, it calls the CA; on grant, the result is stored;
+on deny, the entry for that principal is invalidated.
+
+Entries are tagged with a source field: `'ca'` (populated by a
+successful live CA call) or `'bypass'` (populated by an
+operator-presented bypass cert — see below). Lookup is
+source-agnostic; tag is for visibility + diagnostics.
+
+**Why this is safe to introduce.** Cache TTL = the cert's own
+`not_after`. CA-side deny propagates immediately on the next
+connection (cache invalidated). CRL propagates asynchronously (next
+section). Evicting a valid cache entry is at worst a liveness
+issue, never a security regression — see the eviction discussion
+below.
+
+### CA-bypass cert (operator break-glass)
+
+A bypass cert is a normal X.509 authz cert with one extra critical
+extension marker: `OID_CA_BYPASS = 1.3.6.1.4.1.55555.1.8`. Issued
+ahead-of-time by the CA via `mssh-admin bypass-cert mint`
+(superuser-only). Operator stores it offline (e.g., in a safe).
+
+When the CA is unreachable, an operator presents the bypass cert
+via `mssh --inject-bypass-cert <cert>`. msshd validates:
+
+  1. cert chains to the trusted CA root
+  2. cert has the OID_CA_BYPASS critical extension
+  3. cert is within its validity window
+  4. cert's bound principal matches the mTLS handshake principal
+     ("presented by the rightful owner only" — prevents a stolen
+     bypass cert being injected by an attacker who has a different
+     mTLS cert)
+
+On success: msshd writes the cert into the authz cache tagged
+'bypass'. Operator's next normal `mssh srv-acct` connection finds
+it in the cache and proceeds without a CA call.
+
+The two-step UX is intentional friction: bypass certs live in
+safes, not on disk. Misuse is discouraged by inconvenience.
+
+### CRL — sequence-based revocation channel
+
+Eviction on revoke goes through a CRL log at the CA. Each entry is
+`{seq, revoked_at, serials, revoked_by, reason}`. Sequence numbers
+are forever-incrementing; entries are atomic diffs (not time-window
+snapshots).
+
+Authorize response carries `current_crl_seq: M`. msshd persists its
+`last_applied_seq: N`. When M > N, msshd fetches `(N, M]` via
+`GET /v1/crl?after=N&limit=K`, applies each entry's serials to its
+authz cache (via `invalidate_by_serial`), advances `last_applied_seq`.
+
+Strict-mode gate: if `(current_crl_seq - last_applied) > threshold`
+(default 50; configurable; 0 disables), msshd refuses cache hits
+and forces live CA calls until catch-up completes.
+
+Invalidation is **source-agnostic**: a revoked bypass cert is
+dropped exactly like a revoked CA-grant cert. "CA is the oracle
+when reachable" — Kurt's resolution. Admin can re-inject bypass
+if still wanted after a revoke.
+
+### Eviction-on-capacity (NOT a security control)
+
+The authz cache has two configurable caps:
+`performance.authz_cache_max_per_principal` (default 10; primary
+fairness primitive — forward-compat for multi-key cache) and
+`performance.authz_cache_max_total` (default 10000; safety net).
+FIFO by injected_at when caps are exceeded. Logged WARNING per
+eviction.
+
+**This is resource control, not a security boundary.** Evicting a
+valid entry forces the next connection to re-call the CA. If CA is
+down at that moment, that principal is briefly denied — same state
+as a cold-restart cache. No new attack surface introduced.
+
+### Cross-references
+
+- Operational design rationale: [design/notes-bypass-cache.md](notes-bypass-cache.md)
+- PKI hierarchy migration plan (multiple intermediates with
+  per-issuer CRL): [design/notes-pki-hierarchy.md](notes-pki-hierarchy.md)
+- API surface for these features: [design/api.md](api.md)
