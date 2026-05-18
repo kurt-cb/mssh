@@ -325,6 +325,19 @@ def _build_ubuntu_fixed() -> None:
         # Networking only — no cloud-init to wait on.
         get_ip(tmp)
 
+        print('  waiting for systemd to settle before purge',
+              file=sys.stderr, flush=True)
+        # Block until systemd has finished bringing the system up.
+        # Without this wait, snapd may still be mid-startup when we
+        # try to stop/purge it — the apt-get purge then silently
+        # appears to succeed but leaves snapd installed (snapd's
+        # postrm bails because the daemon is still active). Empirical
+        # finding from a prior prebake that left snapd intact in the
+        # published image despite running the purge commands.
+        lxc_exec(tmp, 'sh', '-c',
+                 'systemctl is-system-running --wait || true',
+                 check=False, timeout=120)
+
         print('  masking apt-daily / unattended-upgrades / apport / motd-news, '
               'purging snapd',
               file=sys.stderr, flush=True)
@@ -333,14 +346,12 @@ def _build_ubuntu_fixed() -> None:
             systemctl stop  apt-daily.timer apt-daily-upgrade.timer \
                            apt-daily.service apt-daily-upgrade.service \
                            unattended-upgrades.service apport.service \
-                           motd-news.timer motd-news.service \
-                           2>/dev/null
+                           motd-news.timer motd-news.service
             systemctl mask apt-daily.timer apt-daily-upgrade.timer \
                            apt-daily.service apt-daily-upgrade.service \
                            unattended-upgrades.service \
                            apport.service \
-                           motd-news.timer motd-news.service \
-                           2>/dev/null
+                           motd-news.timer motd-news.service
 
             # ---- snapd removal ----------------------------------------
             # snapd inside an LXC container is pure overhead: the test
@@ -350,22 +361,25 @@ def _build_ubuntu_fixed() -> None:
             # spawns helper processes that eat CPU + memory on
             # already-resource-pressured hosts. Stop + mask + purge it
             # at prebake time so the published image is snapd-free.
+            #
+            # Stop FIRST so the package's postrm scripts see the
+            # daemon as down; otherwise apt-get purge may leave snapd
+            # half-installed.
             systemctl stop  snapd.service snapd.socket snapd.seeded.service \
-                           snapd.system-shutdown.service snapd.apparmor.service \
-                           2>/dev/null
+                           snapd.system-shutdown.service snapd.apparmor.service
             systemctl mask snapd.service snapd.socket snapd.seeded.service \
                            snapd.system-shutdown.service snapd.apparmor.service \
                            snapd.failure.service snapd.mounts.target \
-                           snapd.mounts-pre.target snapd.recovery-chooser-trigger.service \
-                           2>/dev/null
+                           snapd.mounts-pre.target snapd.recovery-chooser-trigger.service
             # Purge the package + the seed/cache directories. apt-mark
             # hold prevents accidental reinstall on a future apt-get
             # dist-upgrade (Ubuntu's metapackages occasionally pull
             # snapd back in as a recommended dep).
-            DEBIAN_FRONTEND=noninteractive apt-get purge -y -q snapd 2>/dev/null
-            apt-mark hold snapd 2>/dev/null
+            DEBIAN_FRONTEND=noninteractive apt-get purge -y -q snapd
+            apt-mark hold snapd
             rm -rf /snap /var/snap /var/lib/snapd /var/cache/snapd \
-                   /root/snap /home/*/snap 2>/dev/null
+                   /root/snap /home/*/snap
+
             # Pin to keep apt from offering it back if a future
             # release recommends it.
             mkdir -p /etc/apt/preferences.d
@@ -376,17 +390,23 @@ Pin-Priority: -10
 PREF
 
             DEBIAN_FRONTEND=noninteractive apt-get purge -y -q \
-                           unattended-upgrades apport 2>/dev/null
+                           unattended-upgrades apport
             # Pre-warm the apt cache so per-test package installs don't fetch.
-            DEBIAN_FRONTEND=noninteractive apt-get update -q 2>/dev/null
+            DEBIAN_FRONTEND=noninteractive apt-get update -q
             # Enable verbose sshd logging so /var/log/auth.log captures
             # enough detail to diagnose authentication failures during the
             # test phases.
             if [ -f /etc/ssh/sshd_config ]; then
                 sed -i 's/^#*LogLevel .*/LogLevel VERBOSE/' /etc/ssh/sshd_config
             fi
+            # Verify snapd is gone; fail loudly if not (the publish
+            # would otherwise bake a snapd-still-installed image).
+            if dpkg -l snapd 2>/dev/null | grep -q '^ii'; then
+                echo "FATAL: snapd still installed after purge" >&2
+                exit 1
+            fi
             exit 0
-        """, check=False, timeout=300)
+        """, check=True, timeout=600)
 
         print('  stopping container', file=sys.stderr, flush=True)
         lxc('stop', tmp, timeout=120)

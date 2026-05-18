@@ -1,0 +1,27 @@
+Flow for auth with msshd
+
+mssh connects to msshd and asks for permission to connect
+mssh checks for permissoins already granted in previous CA response,  
+if so, 
+    let in, no CA access
+if not,
+    ask CA for authorication
+    CA grants, and mssh stores in allready granted list
+
+auth done
+
+
+
+Failure mode:
+mssh connects to msshd and asks for permission to connect
+mssh checks for permissoins already granted in previous CA response,  
+if so, 
+    let in, no CA access
+if not,
+    FAILURE
+
+Bypass cert:
+mssh connects to msshd and asks for permission to connect
+mssh sees it is a bypass and stores authorization into already granted list
+
+Operator tries again with Failure mode, but it works due to cache hit

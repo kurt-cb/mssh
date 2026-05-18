@@ -39,7 +39,7 @@ if [ "$RC" != "0" ]; then
     exit 1
 fi
 
-scp ansible-project/test_*.yml ca_server:
+scp ansible-projecanst/test_*.yml ca_server:
 
 # shell out
 echo "Shell-ing out with adhoc-env setup; ADHOC_TEST_ENV.md has details."
@@ -47,6 +47,7 @@ cat > adhoc-rc.sh <<EOF
 source ./adhoc-env.sh
 export PS1="adhoc> "
 unset PROMPT_COMMAND
+export ANSIBLE_CONFIG=$(pwd)/ansible-project/ansible.cfg
 EOF
 
 bash --rcfile ./adhoc-rc.sh -i
