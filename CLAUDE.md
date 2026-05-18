@@ -63,6 +63,56 @@ Operator adoption journey: fallback → gated → enforce, reversible.
   than expected (musl support); Rust is the cleanest cross-distro
   cross-language option. See design/future-ideas.md § distro packaging.
 
+### Amendment 2026-05-18 — authz cache + CA-bypass cert
+
+msshd now has an **authz cache** (`python/src/mssh/msshd/authz_cache.py`).
+On every connection msshd checks the cache first; on hit, no CA call.
+On miss, msshd calls the CA, stores the grant, uses it. On CA deny,
+the cache entry is invalidated regardless of source (CA is the
+oracle when reachable). On CA unreachable + cache miss, deny.
+
+Entries are tagged `'ca'` or `'bypass'` for diagnostic visibility.
+Persistence: on-disk JSON at `<state_dir>/authz_cache.json`, mode
+0600, atomic writes. Cache survives msshd restart so operators
+fixing things across reboots don't have to re-inject.
+
+The **CA-bypass cert** mechanism (`OID_CA_BYPASS` = 1.3.6.1.4.1.55555.1.8)
+lets an operator pre-mint an authz cert offline (while CA is up) and
+present it later — when the CA is down — to populate the msshd's
+authz cache directly. The cert is a normal authz cert with one extra
+critical marker extension. Presented via the mssh client's
+`--inject-bypass-cert` flag, which sends the cert in an extra
+`bypass_cert` field of the v1 JSON header. msshd validates (chain,
+marker, validity, mTLS-principal-match), injects into the cache,
+acks, closes.
+
+Two-step operator UX:
+```
+mssh --inject-bypass-cert alice-bypass.crt srv-acct   # injects
+mssh srv-acct -- whoami                                # cache hit, works
+```
+
+The inconvenience is the point: bypass certs live in a safe, not on
+disk. Minting requires superuser on the CA:
+`mssh-admin bypass-cert mint alice --pubkey ~/.ssh/alice.pub
+--valid-days 90 --out alice-bypass.crt`. Operator stores the result
+offline.
+
+See [design/notes-bypass-cache.md](design/notes-bypass-cache.md) for
+the design rationale (decisions on cache key, TTL, invalidation
+policy, source tags) and the resolutions Kurt agreed to.
+
+This supersedes the earlier "emergency template" scaffolding
+(emergency.py + sshd_config.emergency.template), which has been
+ripped. The old emergency_cert field in wrapper.yaml is preserved
+for the akc_shim legacy path only.
+
+**Known open design hole, unrelated to bypass:** the authz cache has
+no eviction-on-capacity policy. Acknowledged as a TODO. With
+unbounded entries + long-lived bypass certs, the cache could grow
+in pathological cases. Real-world sizes are small (one entry per
+active principal) so the bound matters less than the semantics.
+
 ## Docs
 
 ### Operator-facing
