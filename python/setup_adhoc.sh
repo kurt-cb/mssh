@@ -29,9 +29,10 @@ case "$TIER" in
         ;;
 esac
 PHASE="${2:-2}"
+RND=$(openssl rand -base64 4)
 
 echo "Provisioning $TIER lab via $TEST_FILE"
-pytest "$TEST_FILE" -s --log-file=pytest.log --log-cli-level=$LEVEL -v -m "$MARKER" --phase $PHASE --lxc-prefix $USER
+pytest "$TEST_FILE" -s --log-file=pytest.log --log-cli-level=$LEVEL -v -m "$MARKER" --phase $PHASE --lxc-prefix $USER$RND
 RC=$?
 
 if [ "$RC" != "0" ]; then
