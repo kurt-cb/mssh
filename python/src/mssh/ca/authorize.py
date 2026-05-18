@@ -36,6 +36,13 @@ class AuthorizeContext:
     # response so msshd knows when it's behind and should fetch.
     # See ca/crl.py.
     crl: Any = None             # CRLStore | None
+    # Named intermediates dict (Phase 2 of the PKI hierarchy work).
+    # When populated, mint_authorization_cert can use the
+    # 'user-mint' entry directly. Today this is OPTIONAL and the
+    # legacy signing_key/signing_cert path is still used. See
+    # design/notes-pki-hierarchy.md.
+    intermediates: Any = None   # dict[str, Intermediate] | None
+    root_cert: Any = None       # x509.Certificate | None — trust anchor
 
 
 def _now() -> _dt.datetime:

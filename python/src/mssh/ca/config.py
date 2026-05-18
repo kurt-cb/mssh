@@ -12,8 +12,18 @@ class CAConfig:
     listen_host: str = '127.0.0.1'
     listen_port: int = 8443
 
+    # Legacy single-signer paths. Still the operative config today;
+    # PKI hierarchy migration (intermediates) is Phase 2+ — see
+    # design/notes-pki-hierarchy.md.
     signing_key: str = ''
     signing_cert: str = ''
+
+    # Optional: directory containing the full PKI layout (root +
+    # intermediates). When set, the CA prefers loading from here
+    # over the legacy single-signer paths. v1 deployments don't
+    # use this; v2 deployments bootstrap with cert_minter.bootstrap_ca
+    # which produces this layout.
+    ca_dir: str = ''
 
     tls_cert: str = ''
     tls_key: str = ''
@@ -42,6 +52,7 @@ class CAConfig:
             listen_port=int(port or 8443),
             signing_key=str(data.get('signing_key') or ''),
             signing_cert=str(data.get('signing_cert') or ''),
+            ca_dir=str(data.get('ca_dir') or ''),
             tls_cert=str(data.get('tls_cert') or ''),
             tls_key=str(data.get('tls_key') or ''),
             client_ca_cert=str(data.get('client_ca_cert') or ''),
