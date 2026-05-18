@@ -1,0 +1,8 @@
+---
+# LXC Container Spinup Defaults
+container_name: ""
+image_name: "mssh-alpine-fixed"
+container_user: root
+ssh_key_path: "./ansible_id_ed25519"
+wait_timeout: 30
+inventory_file: ""  # Optional: path to inventory file to update

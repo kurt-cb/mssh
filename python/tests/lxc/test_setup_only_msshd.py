@@ -909,7 +909,7 @@ def _setup_ansible_on_ca(ips: dict, prefix: str,
     lxc_exec(CA_NAME, 'sh', '-c',
              'DEBIAN_FRONTEND=noninteractive apt-get install -y -q '
              'ansible-core 2>&1 | tail -5',
-             check=False, timeout=180)
+             check=False, timeout=600)
 
     # 2. Generate the ansible keypair on the HOST inside the rendered
     #    ansible-project dir. Idempotent: skip if it already exists from

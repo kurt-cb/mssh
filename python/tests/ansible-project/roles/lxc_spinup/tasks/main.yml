@@ -1,0 +1,71 @@
+---
+- name: Create LXC container
+  ansible.builtin.shell: lxc launch {{ image_name }} {{ container_name }}
+  register: launch_result
+  failed_when:
+    - launch_result.rc != 0
+    - "'already exists' not in launch_result.stderr"
+
+- name: Wait for container to be ready
+  pause:
+    seconds: 3
+
+- name: Install OpenSSH server
+  ansible.builtin.shell: |
+    lxc exec {{ container_name }} -- apt-get update
+    lxc exec {{ container_name }} -- apt-get install -y openssh-server
+
+- name: Start SSH service
+  ansible.builtin.shell: lxc exec {{ container_name }} -- systemctl start ssh
+
+- name: Create .ssh directory
+  ansible.builtin.shell: |
+    lxc exec {{ container_name }} -- mkdir -p /root/.ssh
+    lxc exec {{ container_name }} -- chmod 700 /root/.ssh
+
+- name: Push SSH public key
+  ansible.builtin.shell: lxc file push {{ ssh_key_path }}.pub {{ container_name }}/root/.ssh/authorized_keys --mode=0600
+
+- name: Fix SSH key permissions
+  ansible.builtin.shell: |
+    lxc exec {{ container_name }} -- chown root:root /root/.ssh/authorized_keys
+    lxc exec {{ container_name }} -- chmod 600 /root/.ssh/authorized_keys
+
+- name: Restart SSH service
+  ansible.builtin.shell: lxc exec {{ container_name }} -- systemctl restart ssh
+
+- name: Get container IP address
+  ansible.builtin.shell: lxc list {{ container_name }} --format=json | jq -r '.[0].state.network.eth0.addresses[0].address'
+  register: ip_result
+  changed_when: false
+
+- name: Set container IP fact
+  set_fact:
+    container_ip: "{{ ip_result.stdout }}"
+
+- name: Add container to inventory
+  add_host:
+    name: "{{ container_name }}"
+    ansible_host: "{{ container_ip }}"
+    ansible_user: "{{ container_user }}"
+    ansible_ssh_private_key_file: "{{ ssh_key_path }}"
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+    groups: spinned_up_hosts
+
+- name: Wait for SSH to be ready
+  wait_for:
+    host: "{{ container_ip }}"
+    port: 22
+    state: started
+    timeout: "{{ wait_timeout }}"
+
+- name: Update inventory file with container IP
+  ansible.builtin.lineinfile:
+    path: "{{ inventory_file }}"
+    regexp: "^{{ container_name }}[ \t]+ansible_host="
+    line: "{{ container_name }}  ansible_host={{ container_ip }}"
+    state: present
+    create: no
+  when: inventory_file is defined
+  delegate_to: localhost
+  become: no

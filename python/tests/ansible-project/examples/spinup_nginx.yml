@@ -1,0 +1,57 @@
+---
+# Example: Spinup and configure Nginx web server
+# Usage: ansible-playbook examples/spinup_nginx.yml
+#
+# Demonstrates reusing the lxc_spinup role for a different service
+
+- name: Spinup Nginx Web Server Host
+  hosts: localhost
+  gather_facts: no
+  roles:
+    - role: lxc_spinup
+      vars:
+        container_name: web-server
+        image_name: mssh-alpine-fixed
+        ssh_key_path: /home/kgodwin/msshtest/python/tests/ansible-project/ansible_id_ed25519
+
+- name: Configure Nginx
+  hosts: web-server
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Install Nginx
+      ansible.builtin.package:
+        name: nginx
+        state: present
+
+    - name: Start and enable Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Allow HTTP in firewall
+      ansible.builtin.ufw:
+        rule: allow
+        port: "80"
+        proto: tcp
+      when: ansible_os_family == "Debian"
+
+    - name: Allow HTTPS in firewall
+      ansible.builtin.ufw:
+        rule: allow
+        port: "443"
+        proto: tcp
+      when: ansible_os_family == "Debian"
+
+    - name: Check Nginx status
+      ansible.builtin.shell: systemctl is-active --quiet nginx
+      register: nginx_status
+      changed_when: false
+
+  post_tasks:
+    - name: Display web server info
+      debug:
+        msg: |
+          Nginx web server is running at http://{{ ansible_host }}

@@ -29,9 +29,11 @@ case "$TIER" in
         ;;
 esac
 PHASE="${2:-2}"
+RND=$(openssl rand -base64 10)
+PREFIX=$USER-${RND:0:4}
 
 echo "Provisioning $TIER lab via $TEST_FILE"
-pytest "$TEST_FILE" -s --log-file=pytest.log --log-cli-level=$LEVEL -v -m "$MARKER" --phase $PHASE --lxc-prefix $USER
+pytest "$TEST_FILE" -s --log-file=pytest.log --log-cli-level=$LEVEL -v -m "$MARKER" --phase $PHASE --lxc-prefix $PREFIX
 RC=$?
 
 if [ "$RC" != "0" ]; then
@@ -45,7 +47,7 @@ scp ansible-projecanst/test_*.yml ca_server:
 echo "Shell-ing out with adhoc-env setup; ADHOC_TEST_ENV.md has details."
 cat > adhoc-rc.sh <<EOF
 source ./adhoc-env.sh
-export PS1="adhoc> "
+export PS1="adhoc $PREFIX> "
 unset PROMPT_COMMAND
 export ANSIBLE_CONFIG=$(pwd)/ansible-project/ansible.cfg
 EOF
