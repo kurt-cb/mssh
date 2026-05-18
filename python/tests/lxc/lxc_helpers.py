@@ -325,7 +325,8 @@ def _build_ubuntu_fixed() -> None:
         # Networking only — no cloud-init to wait on.
         get_ip(tmp)
 
-        print('  masking apt-daily / unattended-upgrades / apport / motd-news',
+        print('  masking apt-daily / unattended-upgrades / apport / motd-news, '
+              'purging snapd',
               file=sys.stderr, flush=True)
         lxc_exec(tmp, 'sh', '-c', r"""
             set +e
@@ -340,6 +341,40 @@ def _build_ubuntu_fixed() -> None:
                            apport.service \
                            motd-news.timer motd-news.service \
                            2>/dev/null
+
+            # ---- snapd removal ----------------------------------------
+            # snapd inside an LXC container is pure overhead: the test
+            # containers never run snap packages, but the daemon still
+            # mounts squashfs images (lxcfs / snap-confine), kicks off
+            # periodic refresh.timer / autoimport.service work, and
+            # spawns helper processes that eat CPU + memory on
+            # already-resource-pressured hosts. Stop + mask + purge it
+            # at prebake time so the published image is snapd-free.
+            systemctl stop  snapd.service snapd.socket snapd.seeded.service \
+                           snapd.system-shutdown.service snapd.apparmor.service \
+                           2>/dev/null
+            systemctl mask snapd.service snapd.socket snapd.seeded.service \
+                           snapd.system-shutdown.service snapd.apparmor.service \
+                           snapd.failure.service snapd.mounts.target \
+                           snapd.mounts-pre.target snapd.recovery-chooser-trigger.service \
+                           2>/dev/null
+            # Purge the package + the seed/cache directories. apt-mark
+            # hold prevents accidental reinstall on a future apt-get
+            # dist-upgrade (Ubuntu's metapackages occasionally pull
+            # snapd back in as a recommended dep).
+            DEBIAN_FRONTEND=noninteractive apt-get purge -y -q snapd 2>/dev/null
+            apt-mark hold snapd 2>/dev/null
+            rm -rf /snap /var/snap /var/lib/snapd /var/cache/snapd \
+                   /root/snap /home/*/snap 2>/dev/null
+            # Pin to keep apt from offering it back if a future
+            # release recommends it.
+            mkdir -p /etc/apt/preferences.d
+            cat > /etc/apt/preferences.d/no-snap <<'PREF'
+Package: snapd
+Pin: release a=*
+Pin-Priority: -10
+PREF
+
             DEBIAN_FRONTEND=noninteractive apt-get purge -y -q \
                            unattended-upgrades apport 2>/dev/null
             # Pre-warm the apt cache so per-test package installs don't fetch.
