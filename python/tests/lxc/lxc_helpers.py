@@ -392,7 +392,10 @@ PREF
         lxc('stop', tmp, timeout=120)
         print(f'  publishing as {UBUNTU_FIXED_ALIAS}',
               file=sys.stderr, flush=True)
-        lxc('publish', tmp, '--alias', UBUNTU_FIXED_ALIAS, timeout=600)
+        # Publish can take several minutes on a memory-pressured host —
+        # the working image is ~1.2 GB before compression, and ZFS-on-
+        # loop-on-ext4 slows the pack. 20-minute ceiling is generous.
+        lxc('publish', tmp, '--alias', UBUNTU_FIXED_ALIAS, timeout=1200)
     finally:
         subprocess.run(['lxc', 'delete', '--force', tmp], capture_output=True)
 
