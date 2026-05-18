@@ -160,6 +160,36 @@ See [design/notes-bypass-cache.md](design/notes-bypass-cache.md)
 "Amendment 2026-05-18 (b)" for the design rationale + edge cases
 (CA seq reset, multi-msshd coordination).
 
+### Amendment 2026-05-18 (c) — eviction-on-capacity
+
+Closes the prior amendment's open hole. Two configurable caps in
+`wrapper.yaml`:
+
+```yaml
+performance:
+  authz_cache_max_per_principal: 10     # per-user, forward-compat
+  authz_cache_max_total:         10000  # global safety net
+```
+
+`max_per_principal` is the primary fairness primitive; today it has
+no observable effect because the cache is principal-keyed (one entry
+per user, replaces on put). Becomes meaningful when/if the cache key
+broadens. `max_total` is the operative control today: FIFO eviction
+of the globally-oldest entry by `injected_at` when total exceeds the
+cap. Logged WARNING on each eviction.
+
+No source-based exemption — bypass entries follow the same rules
+(per "same policy for any cert"). A recently-injected bypass cert is
+MRU and won't be near eviction; a long-dormant one is fair game.
+
+Liveness implication (not a regression): evicting a valid entry
+forces the next connection from that principal to re-call the CA.
+If CA is down at that moment, that principal is briefly denied — same
+state as a cold-restart cache.
+
+See [design/notes-bypass-cache.md](design/notes-bypass-cache.md)
+"Amendment 2026-05-18 (c)" for full rationale.
+
 ## Docs
 
 ### Operator-facing

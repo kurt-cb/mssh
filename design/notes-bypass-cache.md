@@ -264,3 +264,80 @@ have last_applied >0, the new entries won't reach them. That's a
 multi-msshd-coordination problem the simple design doesn't solve.
 Operator-side mitigation today: rebuild msshd state when
 reseeding the CA.
+
+
+---
+
+## Amendment 2026-05-18 (c) — Eviction-on-capacity policy
+
+Closes the original "design hole #4" (capacity-based eviction).
+
+### Kurt's framing
+
+> "FIFO should probably evict based on user, as blind eviction does
+> not take into account who is using the machine the most. I would
+> say only keep last 10 of each user, this scales to a larger
+> machine with more users, and more disk space. Maybe a cap. But
+> both parameters should be configurable. So when a cert gets put
+> into the cache, the time in the cache and the identity is all that
+> needs to be considered."
+
+> "bypass is still irrelevant, as it would be MRU, not LRU."
+
+### Resolution
+
+Two configurable caps in `wrapper.yaml`:
+
+```yaml
+performance:
+  authz_cache_max_per_principal: 10     # per-user cap
+  authz_cache_max_total:         10000  # global safety net
+```
+
+Both default to those values; 0 on either disables that level.
+
+**Per-principal cap is the primary policy.** Forward-looking: today
+the cache is keyed by principal (one entry per user), so the cap is
+structurally enforced at 1 — the knob has no observable effect.
+When/if the cache key broadens (e.g. `(principal, identity_fingerprint)`
+for multi-device users), the per-principal cap becomes the
+fairness primitive Kurt described: each user keeps their N most
+recent entries; heavy users can't be starved by other users' churn.
+
+**Global cap is the safety net.** When total entries exceed
+`max_total`, the globally-oldest entry (by `injected_at`) is
+evicted. FIFO by injection time. Logged at WARNING.
+
+**No source-based exemption.** Bypass entries follow the same rules.
+Per Kurt's "bypass is irrelevant" point: a bypass cert that was
+recently injected is MRU and won't be near eviction; a bypass cert
+that's been sitting unused is dormant cache pressure — fair game.
+
+### Liveness implication (not a regression)
+
+Evicting a valid entry forces the next connection from that
+principal to re-call the CA. If CA is reachable, the cache refills.
+If CA is unreachable at that moment, that principal is briefly
+denied even though their cert is technically still valid — same
+state as "msshd just restarted, cache is cold." The CRL mechanism
+(prior amendment) handles the security-correctness case; eviction
+is purely resource control.
+
+### What's NOT addressed by this
+
+- The cache stays principal-keyed today. A multi-key cache (where
+  per-principal cap actually matters) is a separate change.
+- We don't update `injected_at` on cache hit. So FIFO is strict
+  insertion order, not LRU. Kurt's MRU/LRU framing actually points
+  toward access-time tracking, which would tighten the semantics —
+  but the cache hit path is the hot path and touching disk per
+  access has costs. Deferred unless real workloads suggest it
+  matters.
+
+### Hole genuinely closed
+
+The unbounded-cache concern from the original note is gone. With
+the default global cap of 10000, even a deployment that mints many
+distinct bypass certs over time hits a finite ceiling; oldest
+bypass entries get evicted (operator can re-inject). The "growth-
+by-mint" scenario from the prior CRL amendment is bounded.

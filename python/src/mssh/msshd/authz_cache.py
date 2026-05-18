@@ -78,15 +78,32 @@ class AuthzCache:
     Thread-safe under the asyncio single-thread assumption.
     """
 
-    def __init__(self, persist_path: str | Path | None = None):
+    def __init__(self, persist_path: str | Path | None = None, *,
+                 max_per_principal: int = 0,
+                 max_total: int = 0):
         """``persist_path`` enables on-disk persistence. ``None`` =
         in-memory only (useful for tests). The file is created with
-        mode 0600 on first write."""
+        mode 0600 on first write.
+
+        ``max_per_principal`` and ``max_total`` are eviction caps
+        (FIFO by injected_at). 0 disables that level entirely. See
+        design/notes-bypass-cache.md "Eviction Amendment".
+
+        - max_per_principal: cap on entries with the same principal
+          key. Today the cache is principal-keyed (one entry per
+          principal); the cap is structurally enforced at 1, so this
+          knob is forward-compat for a multi-key cache. Setting it
+          > 0 has no observable effect today.
+        - max_total: global cap. On put() that would exceed the cap,
+          the globally-oldest entry is evicted first.
+        """
         self._entries: dict[str, CachedGrant] = {}
         # Last applied CRL sequence number (sequence-based revocation
         # log — see ca/crl.py). 0 = "nothing applied yet". Persisted
         # alongside the cache entries.
         self.last_crl_seq: int = 0
+        self.max_per_principal = int(max_per_principal)
+        self.max_total = int(max_total)
         self._persist_path: Optional[Path] = (
             Path(persist_path) if persist_path else None)
         if self._persist_path is not None:
@@ -122,6 +139,12 @@ class AuthzCache:
                             source=source, injected_at=_now())
         prev = self._entries.get(principal)
         self._entries[principal] = entry
+        # Eviction caps (no-op if both are 0). Per-principal first,
+        # then global. The per-principal cap is structurally enforced
+        # at 1 today by the dict-keyed-by-principal layout, so it's a
+        # forward-compat knob — meaningful only if/when the cache key
+        # broadens. The global cap is the operative control today.
+        self._enforce_caps()
         self._persist()
         if prev is None:
             log.info('authz_cache: stored grant for %s '
@@ -132,6 +155,52 @@ class AuthzCache:
                      '(prev source=%s, new source=%s)',
                      principal, prev.source, source)
         return entry
+
+    def _enforce_caps(self) -> None:
+        """Apply per-principal then global caps. FIFO by injected_at.
+        Called from put(); no-op if both caps are 0."""
+        # Per-principal cap. With today's dict-keyed-by-principal
+        # layout, every principal has exactly one entry — the loop
+        # below is a no-op until the cache key broadens. The shape
+        # is in place so that a future multi-key cache doesn't have
+        # to re-derive this policy.
+        if self.max_per_principal > 0:
+            by_p: dict[str, list[CachedGrant]] = {}
+            for e in self._entries.values():
+                by_p.setdefault(e.principal, []).append(e)
+            for principal, group in by_p.items():
+                if len(group) > self.max_per_principal:
+                    group.sort(key=lambda e: e.injected_at)
+                    to_evict = group[:len(group) - self.max_per_principal]
+                    for victim in to_evict:
+                        log.warning(
+                            'authz_cache: per-principal cap '
+                            'reached for %s (%d > %d) — evicting '
+                            'oldest entry (injected_at=%s, '
+                            'source=%s)',
+                            principal, len(group),
+                            self.max_per_principal,
+                            victim.injected_at, victim.source)
+                        # In today's dict-keyed-by-principal layout
+                        # this code path is unreachable. Future
+                        # multi-key cache would index differently.
+                        if (cur := self._entries.get(victim.principal)) \
+                                is not None and cur is victim:
+                            del self._entries[victim.principal]
+
+        # Global cap. Evict globally-oldest until at-or-under the cap.
+        if self.max_total > 0:
+            while len(self._entries) > self.max_total:
+                victim = min(self._entries.values(),
+                             key=lambda e: e.injected_at)
+                log.warning(
+                    'authz_cache: global cap reached (%d > %d) — '
+                    'evicting oldest entry (principal=%s, '
+                    'injected_at=%s, source=%s)',
+                    len(self._entries), self.max_total,
+                    victim.principal, victim.injected_at,
+                    victim.source)
+                del self._entries[victim.principal]
 
     def invalidate(self, principal: str) -> bool:
         """Drop the entry for ``principal``. Returns True if anything

@@ -139,8 +139,14 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
         # 3b. Authz cache (persistent on-disk, loaded at startup).
         # Stores the same grants the CA would return; operator can
         # also inject bypass-cert entries that survive CA outages.
+        # Eviction caps configurable via wrapper.yaml's
+        # performance.authz_cache_max_per_principal +
+        # performance.authz_cache_max_total.
         authz_cache = AuthzCache(
-            persist_path=os.path.join(state_dir, 'authz_cache.json'))
+            persist_path=os.path.join(state_dir, 'authz_cache.json'),
+            max_per_principal=cfg.performance.authz_cache_max_per_principal,
+            max_total=cfg.performance.authz_cache_max_total,
+        )
 
         # 3c. CRL sync — pulls revocations from the CA in the
         # background after each authorize call. See crl_sync.py.

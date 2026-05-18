@@ -96,6 +96,22 @@ class LoggingConfig:
 class PerformanceConfig:
     inner_cipher_none: bool = False
     max_concurrent_sessions: int = 200
+    # Authz cache eviction policy. Per-principal cap is the primary
+    # control; global cap is the safety net. Both can be set to 0 to
+    # disable that level. See design/notes-bypass-cache.md "Eviction
+    # Amendment".
+    #
+    # On put(): if a principal would exceed `authz_cache_max_per_principal`
+    # entries, the oldest entry FOR THAT PRINCIPAL is evicted first.
+    # Then if the total cache size exceeds `authz_cache_max_total`,
+    # the globally-oldest entry is evicted. FIFO by injected_at.
+    #
+    # Today the cache key is the principal alone (one entry per
+    # principal); the per-principal cap is structurally enforced
+    # at 1, so the knob is forward-compat for a future multi-key
+    # cache. The total cap is the meaningful control today.
+    authz_cache_max_per_principal: int = 10
+    authz_cache_max_total: int = 10000
 
 
 @dataclass
@@ -195,6 +211,14 @@ class WrapperConfig:
                 inner_cipher_none=bool(perf.get('inner_cipher_none')),
                 max_concurrent_sessions=int(
                     perf.get('max_concurrent_sessions') or 200),
+                authz_cache_max_per_principal=int(
+                    perf.get('authz_cache_max_per_principal')
+                    if perf.get('authz_cache_max_per_principal') is not None
+                    else 10),
+                authz_cache_max_total=int(
+                    perf.get('authz_cache_max_total')
+                    if perf.get('authz_cache_max_total') is not None
+                    else 10000),
             ),
             banner=BannerConfig(
                 template_path=str((data.get('banner') or {})

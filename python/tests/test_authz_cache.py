@@ -203,3 +203,110 @@ def test_persist_disabled_when_no_path():
     # No exception, no disk artifacts. Cache works in memory.
     assert c.get('alice') is not None
     assert c._persist_path is None
+
+
+# ---------------------------------------------------------------------------
+# Eviction (capacity caps)
+# ---------------------------------------------------------------------------
+
+
+def test_eviction_default_no_caps_active():
+    """Default constructor: no caps. Cache grows unbounded."""
+    c = AuthzCache()
+    for i in range(1000):
+        c.put(f'user-{i}', _grant(f'serial-{i}'), source=SOURCE_CA)
+    assert len(c._entries) == 1000
+
+
+def test_global_cap_evicts_oldest_first():
+    c = AuthzCache(max_total=3)
+    # Insert in order so injected_at is monotonic.
+    c.put('alice',   _grant('a1'), source=SOURCE_CA)
+    c.put('bob',     _grant('b1'), source=SOURCE_CA)
+    c.put('carol',   _grant('c1'), source=SOURCE_CA)
+    assert len(c._entries) == 3
+    # Fourth entry triggers eviction of oldest (alice).
+    c.put('dave',    _grant('d1'), source=SOURCE_CA)
+    assert len(c._entries) == 3
+    assert c.get('alice') is None
+    assert c.get('bob') is not None
+    assert c.get('carol') is not None
+    assert c.get('dave') is not None
+
+
+def test_global_cap_treats_bypass_identically():
+    """Bypass-tagged entries follow the same eviction rules; no
+    source-based exemption (per the agreed 'same policy for any cert'
+    resolution)."""
+    c = AuthzCache(max_total=2)
+    c.put('alice', _grant('a1'), source=SOURCE_BYPASS)   # oldest
+    c.put('bob',   _grant('b1'), source=SOURCE_CA)
+    c.put('carol', _grant('c1'), source=SOURCE_CA)
+    # alice (oldest, bypass) evicted.
+    assert c.get('alice') is None
+    assert c.get('bob') is not None
+    assert c.get('carol') is not None
+
+
+def test_global_cap_replaces_existing_doesnt_grow():
+    """A put() that replaces an existing principal's entry shouldn't
+    trip the cap (since count is unchanged)."""
+    c = AuthzCache(max_total=2)
+    c.put('alice', _grant('a1'), source=SOURCE_CA)
+    c.put('bob',   _grant('b1'), source=SOURCE_CA)
+    # Replace alice with a fresh grant — total count stays at 2.
+    c.put('alice', _grant('a2'), source=SOURCE_CA)
+    assert len(c._entries) == 2
+    assert c.get('alice').grant.serial == 'a2'
+    assert c.get('bob') is not None
+
+
+def test_global_cap_zero_disables():
+    c = AuthzCache(max_total=0)
+    for i in range(100):
+        c.put(f'user-{i}', _grant(f's-{i}'), source=SOURCE_CA)
+    assert len(c._entries) == 100
+
+
+def test_per_principal_cap_structural_today():
+    """Per-principal cap > 0 is forward-compat: today the cache is
+    keyed by principal so the cap is structurally enforced at 1.
+    The knob doesn't change observable behavior."""
+    c = AuthzCache(max_per_principal=10, max_total=0)
+    for i in range(5):
+        c.put('alice', _grant(f's-{i}'), source=SOURCE_CA)
+    # Always exactly one entry per principal today.
+    assert len(c._entries) == 1
+    assert c.get('alice').grant.serial == 's-4'
+
+
+def test_global_cap_persists_after_eviction(tmp_path):
+    """Eviction triggers persist; reloading from disk shows the
+    post-eviction state."""
+    p = tmp_path / 'cache.json'
+    c = AuthzCache(persist_path=p, max_total=2)
+    c.put('alice', _grant('a1'), source=SOURCE_CA)
+    c.put('bob',   _grant('b1'), source=SOURCE_CA)
+    c.put('carol', _grant('c1'), source=SOURCE_CA)
+    # alice was evicted; reload should NOT have alice.
+    c2 = AuthzCache(persist_path=p, max_total=2)
+    assert c2.get('alice') is None
+    assert c2.get('bob') is not None
+    assert c2.get('carol') is not None
+
+
+def test_cap_lowered_on_construction_evicts_immediately(tmp_path):
+    """If on-disk has more entries than max_total at load time, the
+    NEXT put() trims down. Reloading with a lower cap doesn't
+    proactively trim (read is read-only), but the next mutating
+    operation enforces the cap."""
+    p = tmp_path / 'cache.json'
+    c1 = AuthzCache(persist_path=p)
+    for i in range(5):
+        c1.put(f'user-{i}', _grant(f's-{i}'), source=SOURCE_CA)
+    # Reload with a much smaller cap.
+    c2 = AuthzCache(persist_path=p, max_total=2)
+    assert len(c2._entries) == 5    # not yet trimmed
+    # First write trims down to 2.
+    c2.put('newcomer', _grant('new'), source=SOURCE_CA)
+    assert len(c2._entries) == 2
