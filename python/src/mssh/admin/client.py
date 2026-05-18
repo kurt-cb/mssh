@@ -152,3 +152,33 @@ class CAClient:
         return self._request(
             'GET', f'/v1/admin/template/effective/{server_name}',
             params={'kind': kind})
+
+    # ---- CA-bypass cert ----
+    def bypass_cert_mint(self, username: str, pubkey_b64: str, *,
+                         validity_days: int = 90,
+                         source_bind: str | None = None,
+                         server_bind: str | None = None,
+                         channels: list[str] | None = None,
+                         force_command: str | None = None,
+                         max_session_seconds: int | None = None) -> dict[str, Any]:
+        """Mint a CA-bypass authz cert for the named user.
+
+        The cert is PEM-returned; operator stores it offline and
+        presents it via ``mssh --inject-bypass-cert <cert>`` to
+        inject directly into a msshd's authz cache.
+        """
+        body: dict[str, Any] = {
+            'username': username, 'pubkey_b64': pubkey_b64,
+            'validity_days': validity_days,
+        }
+        if source_bind is not None:
+            body['source_bind'] = source_bind
+        if server_bind is not None:
+            body['server_bind'] = server_bind
+        if channels is not None:
+            body['channels'] = list(channels)
+        if force_command is not None:
+            body['force_command'] = force_command
+        if max_session_seconds is not None:
+            body['max_session_seconds'] = max_session_seconds
+        return self._request('POST', '/v1/admin/bypass-cert/mint', json=body)

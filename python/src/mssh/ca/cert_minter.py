@@ -30,6 +30,10 @@ OID_FORCE_COMMAND   = x509.ObjectIdentifier(f'{_OID_BASE}.4')
 OID_ENVIRONMENT     = x509.ObjectIdentifier(f'{_OID_BASE}.5')
 OID_MAX_SESSION     = x509.ObjectIdentifier(f'{_OID_BASE}.6')
 OID_2FA_EVIDENCE    = x509.ObjectIdentifier(f'{_OID_BASE}.7')
+# Marker for operator-injectable bypass certs. When set (critical),
+# msshd accepts the cert as a cache-injectable authz cert without
+# a live CA call. See design/notes-bypass-cache.md.
+OID_CA_BYPASS       = x509.ObjectIdentifier(f'{_OID_BASE}.8')
 
 
 # ---------------------------------------------------------------------------
@@ -281,8 +285,14 @@ def mint_authorization_cert(
     environment: dict[str, str] | None = None,
     max_session_seconds: int | None = None,
     two_fa_evidence: str | None = None,
+    ca_bypass: bool = False,
 ) -> tuple[x509.Certificate, str]:
     """Mint an X.509 authorization cert.
+
+    ``ca_bypass=True`` adds the mssh-ca-bypass critical extension
+    marker; the resulting cert is operator-presentable as a bypass
+    cert (injected into msshd's authz cache without a live CA call).
+    See design/notes-bypass-cache.md.
 
     Returns (cert, serial_hex).
     """
@@ -320,6 +330,12 @@ def mint_authorization_cert(
     if two_fa_evidence:
         builder = builder.add_extension(
             _utf8_ext(OID_2FA_EVIDENCE, two_fa_evidence), critical=False)
+    if ca_bypass:
+        # Marker-only critical extension. Value is the literal string
+        # 'true' for human-readability in cert dumps; the presence +
+        # critical-flag are what msshd checks for.
+        builder = builder.add_extension(
+            _utf8_ext(OID_CA_BYPASS, 'true'), critical=True)
 
     cert = builder.sign(private_key=signing_key, algorithm=_sig_hash_for(signing_key))
     return cert, serial_hex

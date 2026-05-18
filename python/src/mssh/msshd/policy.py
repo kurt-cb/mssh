@@ -51,6 +51,11 @@ OID_FORCE_COMMAND   = '1.3.6.1.4.1.55555.1.4'
 OID_ENVIRONMENT     = '1.3.6.1.4.1.55555.1.5'
 OID_MAX_SESSION     = '1.3.6.1.4.1.55555.1.6'
 OID_2FA_EVIDENCE    = '1.3.6.1.4.1.55555.1.7'
+# mssh-ca-bypass marker. Present on certs that the CA explicitly
+# minted as "operator-presentable bypass certs" — these can be
+# injected into msshd's authz cache without a live CA call. See
+# design/notes-bypass-cache.md.
+OID_CA_BYPASS       = '1.3.6.1.4.1.55555.1.8'
 
 # Critical extensions the wrapper recognises. If the CA returns a
 # cert with a critical extension NOT in this set, reject the cert
@@ -59,6 +64,7 @@ KNOWN_CRITICAL = {
     OID_SOURCE_BIND,
     OID_SERVER_BIND,
     OID_CHANNEL_POLICY,
+    OID_CA_BYPASS,
     '2.5.29.19',                   # basicConstraints
     '2.5.29.15',                   # keyUsage
 }

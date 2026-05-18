@@ -162,8 +162,16 @@ def build_header(target: Target, *,
                  term: Optional[str] = None,
                  rows: Optional[int] = None,
                  cols: Optional[int] = None,
-                 env: Optional[dict[str, str]] = None) -> bytes:
-    """Construct the v1 outer-protocol header line (newline-terminated)."""
+                 env: Optional[dict[str, str]] = None,
+                 bypass_cert_b64: Optional[str] = None) -> bytes:
+    """Construct the v1 outer-protocol header line (newline-terminated).
+
+    ``bypass_cert_b64`` is the optional base64-DER of an
+    operator-presentable CA-bypass cert. When present, msshd treats
+    the connection as a bypass-injection request (validates the cert,
+    stores it in the authz cache, acks, closes — no SSH session).
+    See design/notes-bypass-cache.md.
+    """
     body = {
         'v': PROTOCOL_VERSION,
         'command': command,
@@ -177,6 +185,8 @@ def build_header(target: Target, *,
         # from the mTLS cert — but it's useful in audit logs.
         'principal_hint': target.user,
     }
+    if bypass_cert_b64 is not None:
+        body['bypass_cert'] = bypass_cert_b64
     encoded = json.dumps(body, separators=(',', ':')).encode('utf-8') + b'\n'
     if len(encoded) > MAX_HEADER_BYTES:
         raise ValueError(
@@ -391,6 +401,11 @@ def main(argv: list[str] | None = None) -> int:
                              'is not a tty')
     parser.add_argument('-T', '--no-tty', action='store_true',
                         help='do not request a PTY')
+    parser.add_argument('--inject-bypass-cert',
+                        metavar='CERT_PATH',
+                        help='Present this CA-bypass cert to msshd '
+                             '(injects into its authz cache, then exits). '
+                             'See design/notes-bypass-cache.md.')
     parser.add_argument('command', nargs=argparse.REMAINDER,
                         help='optional remote command (after --)')
 
@@ -454,9 +469,80 @@ def main(argv: list[str] | None = None) -> int:
     log.debug('target=%s interactive=%s command=%r',
               target, interactive, remote_command)
 
+    if args.inject_bypass_cert:
+        return run_bypass_injection(target, ident, args.inject_bypass_cert)
+
     return run_session(target, ident,
                        command=remote_command,
                        interactive=interactive)
+
+
+def run_bypass_injection(target: Target, ident: Identity,
+                         bypass_cert_path: str) -> int:
+    """Open the mTLS session, send the bypass cert in the v1 header,
+    read the ack, exit. No SSH session is established.
+
+    Returns 0 on injection-accepted, non-zero otherwise. Prints the
+    server's reason string to stderr for both success and failure
+    paths so the operator sees what was injected (and when it expires)
+    or why it was rejected.
+    """
+    import base64 as _b64
+    try:
+        cert_pem = Path(bypass_cert_path).read_bytes()
+    except OSError as e:
+        print(f'mssh: cannot read bypass cert {bypass_cert_path}: {e}',
+              file=sys.stderr)
+        return 2
+    # The wire form is base64 of DER. cryptography lib normalizes
+    # PEM↔DER, but importing it here is a heavyweight dep for the
+    # client — strip the PEM banners and re-base64 instead.
+    try:
+        body = cert_pem.decode('ascii').strip()
+        # Strip PEM banners + whitespace; what remains is base64 DER.
+        lines = [ln.strip() for ln in body.splitlines()
+                 if ln.strip() and not ln.startswith('-----')]
+        cert_der_b64 = ''.join(lines)
+        # Validate that it round-trips through base64 cleanly.
+        _b64.b64decode(cert_der_b64, validate=True)
+    except Exception as e:
+        print(f'mssh: bypass cert {bypass_cert_path} not a valid PEM: {e}',
+              file=sys.stderr)
+        return 2
+
+    ctx = _build_ssl_context(ident)
+    try:
+        sock = socket.create_connection((target.host, target.port),
+                                        timeout=10.0)
+        sock = ctx.wrap_socket(sock, server_hostname=target.host)
+    except (ssl.SSLError, OSError) as e:
+        print(f'mssh: TLS to {target.host}:{target.port} failed: {e}',
+              file=sys.stderr)
+        return 2
+
+    try:
+        header = build_header(target, command=None, interactive=False,
+                              bypass_cert_b64=cert_der_b64)
+        sock.sendall(header)
+        ack_line = _read_line(sock, MAX_HEADER_BYTES)
+        try:
+            ok, reason = parse_ack(ack_line)
+        except ValueError as e:
+            print(f'mssh: malformed ack: {e}', file=sys.stderr)
+            return 3
+        if ok:
+            # Server returns reason like 'injected:serial=… not_after=…'
+            print(f'mssh: bypass cert injected ({reason or "OK"})',
+                  file=sys.stderr)
+            return 0
+        print(f'mssh: bypass injection rejected: {reason}',
+              file=sys.stderr)
+        return 4
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

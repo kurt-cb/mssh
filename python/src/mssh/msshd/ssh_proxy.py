@@ -91,9 +91,16 @@ async def proxy_to_inner_ssh(
     max_session_seconds: Optional[int] = None,
     forced_command: Optional[str] = None,
     forced_env: Optional[dict[str, str]] = None,
+    prefetched_header: Optional[dict] = None,
 ) -> None:
-    """Read the v1 header from the outer stream, ack, then drive
-    asyncssh against the inner sshd.
+    """Drive asyncssh against the inner sshd.
+
+    If ``prefetched_header`` is None, this function reads the v1
+    outer-protocol header from ``outer_reader`` itself (legacy
+    behavior). If the caller has already read the header (the
+    enforce_listener path, which reads the header before its CA call
+    so it can route bypass-cert injection), pass it through here so
+    we don't try to double-read the same stream.
 
     Cert-mandated overrides:
       - ``forced_command`` (from mssh-force-command) overrides
@@ -101,22 +108,25 @@ async def proxy_to_inner_ssh(
       - ``forced_env`` (from mssh-environment) overrides /
         augments the client's ``env`` map.
     """
-    # ---- 1. read header ----
-    try:
-        header = await _read_header_line(outer_reader)
-    except asyncio.TimeoutError:
-        log.warning('[%s] outer client did not send header in time', conn_id)
-        _write_ack(outer_writer, ok=False, reason='header_timeout')
-        await _drain_and_close(outer_writer)
-        return
-    except (json.JSONDecodeError, ValueError, asyncio.IncompleteReadError) as e:
-        log.warning('[%s] outer header invalid: %s', conn_id, e)
+    # ---- 1. read header (or use prefetched one) ----
+    if prefetched_header is not None:
+        header = prefetched_header
+    else:
         try:
-            _write_ack(outer_writer, ok=False, reason=f'bad_header: {e}')
-        except Exception:
-            pass
-        await _drain_and_close(outer_writer)
-        return
+            header = await _read_header_line(outer_reader)
+        except asyncio.TimeoutError:
+            log.warning('[%s] outer client did not send header in time', conn_id)
+            _write_ack(outer_writer, ok=False, reason='header_timeout')
+            await _drain_and_close(outer_writer)
+            return
+        except (json.JSONDecodeError, ValueError, asyncio.IncompleteReadError) as e:
+            log.warning('[%s] outer header invalid: %s', conn_id, e)
+            try:
+                _write_ack(outer_writer, ok=False, reason=f'bad_header: {e}')
+            except Exception:
+                pass
+            await _drain_and_close(outer_writer)
+            return
 
     raw_command = header.get('command')
     interactive = bool(header.get('interactive'))

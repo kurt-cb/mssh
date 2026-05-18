@@ -611,5 +611,99 @@ def template_diff(ctx, server_name, kind, against):
         click.echo(diff_text, nl=False)
 
 
+# ---------------------------------------------------------------------------
+# CA-bypass cert
+# ---------------------------------------------------------------------------
+
+@cli.group('bypass-cert')
+def bypass_cert_group():
+    """Mint operator-presentable CA-bypass authz certs.
+
+    A bypass cert is a normal authz cert with one extra marker
+    extension. The operator stores it offline; when presented via
+    `mssh --inject-bypass-cert <cert>`, msshd validates the cert and
+    injects it directly into its authz cache without a live CA call.
+    Lets the operator reach msshd hosts whose CA is currently
+    unreachable. See design/notes-bypass-cache.md.
+    """
+
+
+def _read_ssh_pubkey_blob(path: str) -> bytes:
+    """Read an OpenSSH-format ``.pub`` file and return the raw
+    wire-format pubkey blob (the bit between ``ssh-ed25519 `` and the
+    optional comment)."""
+    text = Path(path).read_text().strip()
+    parts = text.split()
+    if len(parts) < 2:
+        raise click.ClickException(
+            f'{path}: not an SSH public key (expected '
+            f'"<type> <base64> [comment]")')
+    import base64 as _b64
+    try:
+        return _b64.b64decode(parts[1], validate=True)
+    except Exception as e:
+        raise click.ClickException(f'{path}: bad base64: {e}')
+
+
+@bypass_cert_group.command('mint')
+@click.argument('username')
+@click.option('--pubkey', 'pubkey_path', required=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help="Path to the user's .pub file (the SSH pubkey to "
+                   'bind into the bypass cert).')
+@click.option('--valid-days', type=int, default=90,
+              show_default=True,
+              help='Bypass cert validity window in days.')
+@click.option('--source-bind', default=None,
+              help='Restrict bypass to a source CIDR. Default: any.')
+@click.option('--server-bind', default=None,
+              help='Restrict bypass to a server pattern. '
+                   'Default: any.')
+@click.option('--force-command', default=None,
+              help='Force a specific command for bypass sessions '
+                   '(e.g. /usr/local/bin/emergency-shell).')
+@click.option('--max-session-seconds', type=int, default=None,
+              help='Cap each bypass session duration.')
+@click.option('--out', 'out_path',
+              type=click.Path(dir_okay=False),
+              help='Write the minted PEM cert to this path '
+                   '(default: stdout).')
+@click.pass_context
+def bypass_cert_mint_cmd(ctx, username, pubkey_path, valid_days,
+                         source_bind, server_bind, force_command,
+                         max_session_seconds, out_path):
+    """Mint a CA-bypass authz cert for USERNAME and write the PEM.
+
+    Example:
+        mssh-admin bypass-cert mint alice \
+            --pubkey ~/.ssh/alice.pub \
+            --valid-days 90 \
+            --out alice-bypass.crt
+    """
+    import base64 as _b64
+    c = _make_client(ctx)
+    pubkey_blob = _read_ssh_pubkey_blob(pubkey_path)
+    pubkey_b64 = _b64.b64encode(pubkey_blob).decode('ascii')
+
+    out = _handle_call(
+        c.bypass_cert_mint, username, pubkey_b64,
+        validity_days=valid_days,
+        source_bind=source_bind, server_bind=server_bind,
+        force_command=force_command,
+        max_session_seconds=max_session_seconds,
+    )
+
+    cert_pem = out.get('cert_pem', '')
+    if out_path:
+        Path(out_path).write_text(cert_pem)
+        click.echo(f'wrote {out_path}', err=True)
+    else:
+        click.echo(cert_pem, nl=False)
+    click.echo(
+        f'\n# username={out["username"]} serial={out["serial"]} '
+        f'not_after={out["not_after"]}',
+        err=True)
+
+
 if __name__ == '__main__':
     sys.exit(cli())  # pragma: no cover

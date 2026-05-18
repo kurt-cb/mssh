@@ -1,0 +1,251 @@
+"""Authorization cache for msshd.
+
+msshd consults this cache **first** on every connection. On hit, no
+CA call. On miss, msshd calls the CA; if the CA grants, the result is
+stored here for future hits. If the CA denies, the cache entry for
+that principal is invalidated. If the CA is unreachable AND the cache
+miss has no entry, the connection is denied.
+
+Two sources of cache entries, tagged on the entry itself:
+
+  - ``'ca'``     — populated by a successful live CA call.
+  - ``'bypass'`` — populated by an operator-presented bypass cert
+                   (an X.509 authz cert with the mssh-ca-bypass
+                   critical extension). The bypass-injection code
+                   path in ``enforce_listener`` stores entries with
+                   this tag.
+
+Source-tag policy (per design/notes-bypass-cache.md):
+
+  - Lookups don't care about source. Any non-expired entry is a hit.
+  - CA deny invalidates ALL entries for the principal regardless of
+    source. CA is the oracle when reachable. Admin re-injects bypass
+    if they still need it.
+  - Persistence: on-disk JSON, mode 0600. Lazy expiry on load.
+  - Eviction-on-capacity is NOT implemented (acknowledged design
+    hole; TODO outside the scope of bypass-cert work).
+
+This module has no I/O dependencies beyond the filesystem and is
+synchronous — all calls are fast in-memory operations plus an
+atomic disk write on mutations. Concurrency is single-thread by
+construction (msshd is asyncio-on-one-thread).
+"""
+from __future__ import annotations
+
+import base64
+import datetime as _dt
+import json
+import logging
+import os
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from .ca import AuthorizationGrant
+
+
+log = logging.getLogger('msshd.authz_cache')
+
+
+SOURCE_CA = 'ca'
+SOURCE_BYPASS = 'bypass'
+_VALID_SOURCES = (SOURCE_CA, SOURCE_BYPASS)
+
+
+@dataclass
+class CachedGrant:
+    """A grant in the authz cache, plus its provenance.
+
+    Composes the ``AuthorizationGrant`` dataclass — the wire-level
+    grant is unchanged — and adds ``source`` (provenance tag) and
+    ``injected_at`` (operator-visible timestamp).
+    """
+    principal: str
+    grant: AuthorizationGrant
+    source: str                          # 'ca' or 'bypass'
+    injected_at: _dt.datetime
+
+    def is_expired(self, now: _dt.datetime | None = None) -> bool:
+        now = now or _now()
+        return self.grant.not_after <= now
+
+
+class AuthzCache:
+    """Source-tagged authz cache with optional on-disk persistence.
+
+    Construct once at msshd startup, hand to ``EnforceListener``.
+    Thread-safe under the asyncio single-thread assumption.
+    """
+
+    def __init__(self, persist_path: str | Path | None = None):
+        """``persist_path`` enables on-disk persistence. ``None`` =
+        in-memory only (useful for tests). The file is created with
+        mode 0600 on first write."""
+        self._entries: dict[str, CachedGrant] = {}
+        self._persist_path: Optional[Path] = (
+            Path(persist_path) if persist_path else None)
+        if self._persist_path is not None:
+            self._load()
+
+    # ----------------------------------------------------------------
+    # Public API
+    # ----------------------------------------------------------------
+
+    def get(self, principal: str) -> Optional[CachedGrant]:
+        """Return a non-expired cached grant for ``principal`` or
+        ``None``. Expired entries are evicted on access."""
+        entry = self._entries.get(principal)
+        if entry is None:
+            return None
+        if entry.is_expired():
+            log.info('authz_cache: evicting expired entry for %s '
+                     '(source=%s, expired_at=%s)',
+                     principal, entry.source, entry.grant.not_after)
+            del self._entries[principal]
+            self._persist()
+            return None
+        return entry
+
+    def put(self, principal: str, grant: AuthorizationGrant,
+            *, source: str) -> CachedGrant:
+        """Insert or replace the entry for ``principal``. ``source``
+        must be ``'ca'`` or ``'bypass'``."""
+        if source not in _VALID_SOURCES:
+            raise ValueError(
+                f'source must be one of {_VALID_SOURCES}, got {source!r}')
+        entry = CachedGrant(principal=principal, grant=grant,
+                            source=source, injected_at=_now())
+        prev = self._entries.get(principal)
+        self._entries[principal] = entry
+        self._persist()
+        if prev is None:
+            log.info('authz_cache: stored grant for %s '
+                     '(source=%s, not_after=%s)',
+                     principal, source, grant.not_after)
+        else:
+            log.info('authz_cache: replaced grant for %s '
+                     '(prev source=%s, new source=%s)',
+                     principal, prev.source, source)
+        return entry
+
+    def invalidate(self, principal: str) -> bool:
+        """Drop the entry for ``principal``. Returns True if anything
+        was removed.
+
+        CA-deny path calls this regardless of the entry's source —
+        when the CA is reachable, it is the oracle of truth and
+        revocation overrides any pre-cached grant (including bypass).
+        Operator can re-inject afterward if needed."""
+        if principal in self._entries:
+            prev = self._entries.pop(principal)
+            self._persist()
+            log.info('authz_cache: invalidated entry for %s (source=%s)',
+                     principal, prev.source)
+            return True
+        return False
+
+    def list_all(self) -> list[CachedGrant]:
+        """All non-expired entries, for diagnostic / admin tooling.
+        Filters out expired entries lazily as a side effect."""
+        now = _now()
+        keep, drop = [], []
+        for p, e in self._entries.items():
+            (drop if e.is_expired(now) else keep).append((p, e))
+        for p, _ in drop:
+            del self._entries[p]
+        if drop:
+            self._persist()
+        return [e for _, e in keep]
+
+    # ----------------------------------------------------------------
+    # On-disk persistence
+    # ----------------------------------------------------------------
+
+    def _persist(self) -> None:
+        if self._persist_path is None:
+            return
+        body = {
+            'version': 1,
+            'entries': [
+                {
+                    'principal':    e.principal,
+                    'cert_der_b64': base64.b64encode(e.grant.cert_der).decode('ascii'),
+                    'serial':       e.grant.serial,
+                    'not_after':    e.grant.not_after.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                    'inner_sshd_config': e.grant.inner_sshd_config,
+                    'protocol_version':  e.grant.protocol_version,
+                    'source':       e.source,
+                    'injected_at':  e.injected_at.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                }
+                for e in self._entries.values()
+            ],
+        }
+        # Atomic write: temp file in same dir, then rename. Mode 0600
+        # set on the temp file before rename so the cache file is never
+        # world-readable even transiently.
+        self._persist_path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(self._persist_path.parent, 0o0700) if not self._persist_path.parent.exists() else None
+        with tempfile.NamedTemporaryFile(
+                mode='w', dir=self._persist_path.parent,
+                prefix='.authz_cache.', suffix='.tmp',
+                delete=False) as tmp:
+            json.dump(body, tmp, indent=2, sort_keys=True)
+            tmp_path = Path(tmp.name)
+        os.chmod(tmp_path, 0o0600)
+        os.replace(tmp_path, self._persist_path)
+
+    def _load(self) -> None:
+        if self._persist_path is None or not self._persist_path.exists():
+            return
+        try:
+            body = json.loads(self._persist_path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            log.warning('authz_cache: failed to load %s, starting empty: %s',
+                        self._persist_path, e)
+            return
+        if not isinstance(body, dict) or body.get('version') != 1:
+            log.warning('authz_cache: unexpected on-disk format at %s, '
+                        'starting empty', self._persist_path)
+            return
+        loaded, skipped = 0, 0
+        now = _now()
+        for raw in body.get('entries', []):
+            try:
+                grant = AuthorizationGrant(
+                    cert_der=base64.b64decode(raw['cert_der_b64']),
+                    serial=str(raw.get('serial') or ''),
+                    not_after=_parse_iso(raw['not_after']),
+                    inner_sshd_config=str(raw.get('inner_sshd_config') or ''),
+                    protocol_version=str(raw.get('protocol_version') or ''),
+                )
+                source = str(raw.get('source') or '')
+                if source not in _VALID_SOURCES:
+                    skipped += 1
+                    continue
+                entry = CachedGrant(
+                    principal=str(raw['principal']),
+                    grant=grant,
+                    source=source,
+                    injected_at=_parse_iso(raw['injected_at']),
+                )
+                if entry.is_expired(now):
+                    skipped += 1
+                    continue
+                self._entries[entry.principal] = entry
+                loaded += 1
+            except (KeyError, ValueError, TypeError) as e:
+                log.warning('authz_cache: skipping malformed entry: %s', e)
+                skipped += 1
+        log.info('authz_cache: loaded %d entries from %s (%d skipped)',
+                 loaded, self._persist_path, skipped)
+
+
+def _now() -> _dt.datetime:
+    return _dt.datetime.now(_dt.timezone.utc)
+
+
+def _parse_iso(s: str) -> _dt.datetime:
+    if s.endswith('Z'):
+        s = s[:-1] + '+00:00'
+    return _dt.datetime.fromisoformat(s)

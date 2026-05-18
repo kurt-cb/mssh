@@ -44,6 +44,10 @@ _PERMISSIONS = {
     'template.unset':   {'superuser', 'server-admin'},
     'template.list':    {'superuser', 'server-admin', 'user-admin', 'auditor'},
     'template.show':    {'superuser', 'server-admin', 'user-admin', 'auditor'},
+    # CA-bypass cert minting. Sensitive: a bypass cert lets the
+    # holder inject directly into msshd's authz cache, sidestepping
+    # the live CA. Restrict to superuser only.
+    'bypass_cert.mint': {'superuser'},
 }
 
 
@@ -60,6 +64,12 @@ class AdminContext:
     server_cert_validity_days: int
     admin_cert_validity_days: int
     mtls_key_type: str
+    # Authorization signing key + cert, used for minting CA-bypass
+    # authz certs from the admin endpoint (a normal authz cert with
+    # the OID_CA_BYPASS critical marker; presented offline by the
+    # operator and injected into msshd's authz cache).
+    signing_key: Any = None
+    signing_cert: Any = None
 
 
 def _now_iso() -> str:
@@ -585,4 +595,123 @@ def template_effective(ctx: AdminContext, admin: Admin,
         'source': source,
         'source_detail': detail,
         'content': content,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CA-bypass cert mint
+# ---------------------------------------------------------------------------
+
+def bypass_cert_mint(ctx: AdminContext, admin: Admin,
+                     body: dict) -> tuple[int, dict]:
+    """Mint a CA-bypass authz cert for an enrolled user.
+
+    The cert is a normal X.509 authz cert with the OID_CA_BYPASS
+    critical extension marker. The operator stores it offline; when
+    presented via the mssh client's ``--inject-bypass-cert`` flag,
+    msshd validates it and injects directly into the authz cache
+    without a live CA call. See design/notes-bypass-cache.md for the
+    full design rationale.
+
+    Body shape:
+        {
+          "username":     "alice",
+          "pubkey_b64":   "<base64 of raw SSH pubkey blob>",
+          "validity_days": 90,
+          "source_bind":  "0.0.0.0/0",     // optional, default wildcard
+          "server_bind":  "*",              // optional, default wildcard
+          "channels":     ["session"],      // optional
+          "force_command": "...",           // optional
+          "max_session_seconds": 3600,      // optional
+        }
+    """
+    if (err := _check('bypass_cert.mint', admin)):
+        return err
+    if ctx.signing_key is None or ctx.signing_cert is None:
+        return _err(500, 'internal',
+                    'CA signing key not configured for bypass-cert mint')
+
+    username = body.get('username')
+    if not isinstance(username, str) or not username:
+        return _err(400, 'bad_request', 'username required')
+    if username not in ctx.enrollment.users:
+        return _err(404, 'not_found', f'user {username!r} not enrolled')
+
+    pubkey_b64 = body.get('pubkey_b64')
+    if not isinstance(pubkey_b64, str) or not pubkey_b64:
+        return _err(400, 'bad_request',
+                    'pubkey_b64 required (base64 of the raw SSH pubkey blob)')
+    try:
+        pubkey_blob = base64.b64decode(pubkey_b64, validate=True)
+    except Exception as e:
+        return _err(400, 'bad_request', f'invalid pubkey_b64: {e}')
+
+    # `or 90` would coerce 0 to the default; use explicit None check so
+    # validity_days=0 hits the range validator below.
+    raw_days = body.get('validity_days')
+    if raw_days is None:
+        validity_days = 90
+    else:
+        try:
+            validity_days = int(raw_days)
+        except (TypeError, ValueError):
+            return _err(400, 'bad_request',
+                        'validity_days must be an integer')
+    if not (1 <= validity_days <= 3650):
+        return _err(400, 'bad_request',
+                    'validity_days must be 1..3650')
+
+    source_bind = str(body.get('source_bind') or '0.0.0.0/0')
+    server_bind = str(body.get('server_bind') or '*')
+    channels = list(body.get('channels') or ['session'])
+    force_command = body.get('force_command')
+    max_session_seconds = body.get('max_session_seconds')
+    if max_session_seconds is not None:
+        try:
+            max_session_seconds = int(max_session_seconds)
+        except (TypeError, ValueError):
+            return _err(400, 'bad_request',
+                        'max_session_seconds must be an integer')
+
+    not_before = _dt.datetime.now(_dt.timezone.utc)
+    not_after = not_before + _dt.timedelta(days=validity_days)
+
+    try:
+        cert, serial_hex = cert_minter.mint_authorization_cert(
+            subject_username=username,
+            subject_pubkey_blob=pubkey_blob,
+            signing_key=ctx.signing_key,
+            signing_cert=ctx.signing_cert,
+            not_before=not_before,
+            not_after=not_after,
+            source_bind=source_bind,
+            server_bind=server_bind,
+            channels=channels,
+            force_command=force_command if isinstance(force_command, str)
+                          and force_command else None,
+            max_session_seconds=max_session_seconds,
+            ca_bypass=True,
+        )
+    except Exception as e:                                      # noqa: BLE001
+        return _err(500, 'internal', f'mint failed: {e}')
+
+    # Serialize as PEM for operator storage.
+    from cryptography.hazmat.primitives import serialization
+    cert_pem = cert.public_bytes(
+        serialization.Encoding.PEM).decode('ascii')
+
+    _audit_admin(ctx, admin, 'bypass_cert.mint',
+                 {'username': username, 'serial': serial_hex,
+                  'validity_days': validity_days,
+                  'force_command': force_command,
+                  'source_bind': source_bind},
+                 'ok')
+
+    return 201, {
+        'status': 'ok',
+        'username': username,
+        'serial': serial_hex,
+        'not_before': not_before.strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'not_after': not_after.strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'cert_pem': cert_pem,
     }

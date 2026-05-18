@@ -76,9 +76,9 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
     # Lazy imports — enforce mode pulls in asyncssh + cryptography
     # heavy paths only when needed.
     from .. import PROTOCOL_VERSION, __version__ as MSSHD_VERSION
+    from .authz_cache import AuthzCache
     from .ca import WrapperCAClient
     from .config import INNER_MODE_PER_CONNECTION
-    from .emergency import EmergencyConfig, EmergencyConfigError
     from .enforce_listener import EnforceListener
     from .inner import (InnerSshd, PerConnectionInnerSshd,
                         _detect_sshd_version)
@@ -120,22 +120,6 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
         log.error('inner sshd failed to start: %s', e)
         return 3
 
-    # 2a. Emergency template — load + validate at startup if
-    #     ca.emergency_cert is configured. A broken operator override
-    #     surfaces here, not during a real CA outage.
-    emergency_cfg = None
-    if cfg.ca.emergency_cert:
-        try:
-            emergency_cfg = await EmergencyConfig.load(
-                sshd_binary=cfg.inner.sshd_binary,
-                rate_per_minute=cfg.emergency.rate_per_minute,
-                burst=cfg.emergency.burst,
-            )
-        except EmergencyConfigError as e:
-            log.error('emergency template invalid: %s', e)
-            await inner.stop()
-            return 6
-
     try:
         # 3. CA client.
         try:
@@ -151,14 +135,20 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
         inner_sshd_version = await _detect_sshd_version(cfg.inner.sshd_binary)
         log.info('inner sshd version: %s', inner_sshd_version)
 
+        # 3b. Authz cache (persistent on-disk, loaded at startup).
+        # Stores the same grants the CA would return; operator can
+        # also inject bypass-cert entries that survive CA outages.
+        authz_cache = AuthzCache(
+            persist_path=os.path.join(state_dir, 'authz_cache.json'))
+
         # 4. The actual outer mTLS listener.
         listener = EnforceListener(
             cfg, user_ca=user_ca, ca_client=ca_client, inner_sshd=inner,
+            authz_cache=authz_cache,
             inner_sshd_kind='openssh',
             inner_sshd_version=inner_sshd_version,
             msshd_version=MSSHD_VERSION,
             protocol_version=PROTOCOL_VERSION,
-            emergency=emergency_cfg,
         )
         try:
             await listener.start()

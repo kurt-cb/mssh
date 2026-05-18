@@ -132,6 +132,7 @@ def create_app(config: CAConfig) -> Flask:
         server_cert_validity_days=config.server_cert_validity_days,
         admin_cert_validity_days=config.admin_cert_validity_days,
         mtls_key_type=config.mtls_key_type,
+        signing_key=signing_key, signing_cert=signing_cert,
     )
 
     app.config['AUTH_CTX'] = auth_ctx
@@ -374,6 +375,17 @@ def register_routes(app: Flask) -> None:
         kind = request.args.get('kind') or 'openssh'
         status, payload = admin_handlers.template_effective(
             app.config['ADMIN_CTX'], adm, server_name, kind)
+        return jsonify(payload), status
+
+    # ---- CA-bypass cert mint ----
+    @app.post('/v1/admin/bypass-cert/mint')
+    def _bypass_cert_mint():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.bypass_cert_mint(
+            app.config['ADMIN_CTX'], adm, body)
         return jsonify(payload), status
 
 
