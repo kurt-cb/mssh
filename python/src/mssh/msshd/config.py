@@ -90,19 +90,6 @@ class PerformanceConfig:
 
 
 @dataclass
-class EmergencyKnobs:
-    """CA-unreachable break-glass knobs.
-
-    The emergency path is *only* active when ``ca.emergency_cert`` is
-    also set. These knobs tune the rate limiter and override the
-    template-search default. ``rate_per_minute`` + ``burst`` form a
-    token bucket — defaults align with security.md ("minutes per use").
-    """
-    rate_per_minute: float = 1.0
-    burst: int = 5
-
-
-@dataclass
 class BannerConfig:
     """Pre-auth banner customization.
 
@@ -132,7 +119,6 @@ class WrapperConfig:
     logging_: LoggingConfig = field(default_factory=LoggingConfig)
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     banner: BannerConfig = field(default_factory=BannerConfig)
-    emergency: EmergencyKnobs = field(default_factory=EmergencyKnobs)
 
     @classmethod
     def load(cls, path: str | Path) -> 'WrapperConfig':
@@ -201,11 +187,6 @@ class WrapperConfig:
                                   .get('template_path') or ''),
                 values={str(k): str(v) for k, v in
                         ((data.get('banner') or {}).get('values') or {}).items()},
-            ),
-            emergency=EmergencyKnobs(
-                rate_per_minute=float((data.get('emergency') or {})
-                                      .get('rate_per_minute') or 1.0),
-                burst=int((data.get('emergency') or {}).get('burst') or 5),
             ),
         )
 
