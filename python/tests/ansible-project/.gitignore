@@ -1,1 +1,11 @@
 proxy_setup.sh
+
+# Ansible keypair — generated at lab bootstrap time, never committed.
+ansible_id_ed25519
+ansible_id_ed25519.pub
+
+# Squid proxy server tooling — personal lab infrastructure, not part of the project.
+deploy_squid.sh
+task_squid_server.yml
+examples/spinup_squid.yml
+templates/squid.conf.j2

@@ -874,10 +874,9 @@ def _write_ansible_project(out_dir: Path, ips: dict, prefix: str) -> None:
     explanation of the same.
     """
     template = _ansible_template_dir()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for src in template.iterdir():
-        if src.is_file():
-            shutil.copy2(src, out_dir / src.name)
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    shutil.copytree(template, out_dir)
     # Overwrite hosts.ini with one rendered against the live lab.
     (out_dir / 'hosts.ini').write_text(
         _render_ansible_hosts_ini(ips, prefix))
@@ -972,17 +971,17 @@ def _setup_ansible_on_ca(ips: dict, prefix: str,
     # 4. Push the rendered project to the CA. Pre-cleanup so re-runs
     #    don't accumulate stale tasks.
     lxc_exec(CA_NAME, 'rm', '-rf', '/root/ansible-project', check=False)
-    lxc_exec(CA_NAME, 'mkdir', '-p', '/root/ansible-project')
-    for f in sorted(ansible_project_host_dir.iterdir()):
-        if f.is_file():
-            # The private key MUST land at 0600 or ssh/ansible refuse
-            # to use it. Everything else (yaml/cfg/ini/pubkey) at 0644.
-            if f.name == 'ansible_id_ed25519':
-                push_file(CA_NAME, f,
-                          f'/root/ansible-project/{f.name}', mode='600')
-            else:
-                push_file(CA_NAME, f,
-                          f'/root/ansible-project/{f.name}', mode='644')
+    for f in sorted(ansible_project_host_dir.rglob('*')):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(ansible_project_host_dir)
+        remote = f'/root/ansible-project/{rel}'
+        remote_dir = str(Path(remote).parent)
+        lxc_exec(CA_NAME, 'mkdir', '-p', remote_dir)
+        # The private key MUST land at 0600 or ssh/ansible refuse
+        # to use it. Everything else (yaml/cfg/ini/pubkey) at 0644.
+        mode = '600' if f.name == 'ansible_id_ed25519' else '644'
+        push_file(CA_NAME, f, remote, mode=mode)
 
 
 def _write_root_readme(container: str, ca_ip: str, stop_at_phase: int) -> None:

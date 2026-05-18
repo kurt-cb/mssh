@@ -12,7 +12,7 @@
       vars:
         container_name: web-server
         image_name: mssh-alpine-fixed
-        ssh_key_path: /home/kgodwin/msshtest/python/tests/ansible-project/ansible_id_ed25519
+        ssh_key_path: "{{ playbook_dir }}/../ansible_id_ed25519"
 
 - name: Configure Nginx
   hosts: web-server
