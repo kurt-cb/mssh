@@ -20,7 +20,7 @@ Banner {{BANNER_FILE}}
 AuthenticationMethods publickey
 PubkeyAuthentication yes
 TrustedUserCAKeys {{USER_CA_PUBKEY}}
-AuthorizedKeysFile /dev/null
+AuthorizedKeysFile none
 AuthorizedKeysCommand none
 AuthorizedPrincipalsFile none
 PasswordAuthentication no
