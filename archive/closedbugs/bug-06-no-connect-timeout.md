@@ -1,6 +1,6 @@
 # Bug #6 — mssh hangs on unreachable IP (no connect timeout)
 
-**Status:** OPEN.
+**Status:** CLOSED in v0.1.0 (commit pending) — mssh now uses a 5s connect timeout. Regression test: `python/tests/test_client_connect_timeout.py`.
 
 _Originally tracked in `adhoc-bugs.md` (rounds 1+2, 2026-05-18 / 2026-05-19)._
 

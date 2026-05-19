@@ -8,9 +8,8 @@ to a few seconds with a clear error.
 192.0.2.1/24 is the RFC 5737 "documentation prefix" — guaranteed not
 to route. No real machine sits there, so connect blocks.
 
-This test is marked **xfail** until Bug #6 is fixed; the day it
-starts passing is the day mssh learned to give up promptly on bad
-IPs.
+Bug #6 was closed in v0.1.0; mssh now bounds connect to 5s. This
+test verifies the fix.
 """
 from __future__ import annotations
 
@@ -63,11 +62,6 @@ def _stub_creds_dir() -> Path:
     return d
 
 
-@pytest.mark.xfail(
-    reason='Bug #6 — mssh has no client-side connect timeout. '
-           'See design/openbugs/bug-06-no-connect-timeout.md.',
-    strict=True,
-)
 def test_connect_timeout_bounded():
     """mssh against an unrouted IP must give up within TIMEOUT_BUDGET
     seconds. Currently hangs ~2 minutes for kernel TCP timeout."""

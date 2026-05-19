@@ -243,11 +243,63 @@ def server_remove(ctx, name):
 
 
 @server.command('list')
-@click.option('--group')
+@click.option('--group', help='Filter to a specific group.')
+@click.option('--name', help='Filter to servers whose name starts with this prefix.')
 @click.pass_context
-def server_list(ctx, group):
+def server_list(ctx, group, name):
     c = _make_client(ctx)
-    _output(ctx, _handle_call(c.server_list, group=group))
+    _output(ctx, _handle_call(c.server_list, group=group, name_prefix=name))
+
+
+@server.command('show')
+@click.option('--name', required=True,
+              help='Server canonical name to look up.')
+@click.pass_context
+def server_show(ctx, name):
+    """Inspect a single server's enrollment record."""
+    c = _make_client(ctx)
+    matches = _handle_call(c.server_list, name_prefix=name)
+    # Walk for an exact name match; --name as prefix is a filter.
+    exact = [s for s in matches if s.get('name') == name]
+    if not exact:
+        click.echo(f'error: no server named {name!r}', err=True)
+        ctx.exit(1)
+    _output(ctx, exact[0])
+
+
+@server.command('groups')
+@click.option('--name', required=True, help='Server to modify.')
+@click.option('--add', multiple=True,
+              help='Add this group (repeatable). e.g. --add ops --add prod')
+@click.option('--remove', multiple=True,
+              help='Remove this group (repeatable).')
+@click.option('--set', 'set_groups', default=None,
+              help='Replace the group list with this comma-separated list. '
+                   'Mutually exclusive with --add / --remove.')
+@click.pass_context
+def server_groups(ctx, name, add, remove, set_groups):
+    """Manage a server's group memberships at runtime.
+
+    Group changes take effect on the next authorize call (CA cache is
+    keyed by principal, not by server-groups).
+    """
+    if set_groups is not None and (add or remove):
+        click.echo('error: --set is mutually exclusive with --add/--remove',
+                   err=True)
+        ctx.exit(2)
+    c = _make_client(ctx)
+    if set_groups is not None:
+        new_groups = [g.strip() for g in set_groups.split(',') if g.strip()]
+    else:
+        # Compute from current state + add/remove.
+        matches = _handle_call(c.server_list, name_prefix=name)
+        srv = next((s for s in matches if s.get('name') == name), None)
+        if srv is None:
+            click.echo(f'error: no server named {name!r}', err=True)
+            ctx.exit(1)
+        current = set(srv.get('groups') or [])
+        new_groups = sorted(current.union(add) - set(remove))
+    _output(ctx, _handle_call(c.server_set_groups, name, new_groups))
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +357,22 @@ def user_remove_key(ctx, username, fingerprint):
 def user_list(ctx, username):
     c = _make_client(ctx)
     _output(ctx, _handle_call(c.user_list, username=username))
+
+
+@user.command('show')
+@click.option('--user', 'username', required=True,
+              help='User to look up.')
+@click.pass_context
+def user_show(ctx, username):
+    """Inspect a single user's enrollment record. Same data as
+    `user list --user X` but errors clearly if the user isn't enrolled."""
+    c = _make_client(ctx)
+    users = _handle_call(c.user_list, username=username)
+    exact = [u for u in users if u.get('username') == username]
+    if not exact:
+        click.echo(f'error: no user named {username!r}', err=True)
+        ctx.exit(1)
+    _output(ctx, exact[0])
 
 
 # ---------------------------------------------------------------------------

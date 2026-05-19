@@ -51,8 +51,20 @@ def _extract_documented_commands() -> set[tuple[str, ...]]:
     Returns a set of token-tuples like ('user', 'add') or ('audit',).
     Argument values and flags are dropped — we only verify the
     command-path exists.
+
+    **Scope:** code blocks inside or after a heading that starts with
+    "## Future" are excluded — those examples illustrate not-yet-built
+    commands and shouldn't trip the alignment gate.
     """
     text = _operations_md_path().read_text()
+    # Drop everything from the first "## Future" heading to EOF (or
+    # to the next non-future top-level heading, if any). The "Future
+    # operator features" section in operations.md is everything from
+    # that heading on.
+    future_match = re.search(r'^## Future\b', text, re.MULTILINE)
+    if future_match:
+        text = text[:future_match.start()]
+
     found: set[tuple[str, ...]] = set()
     for match in _INVOCATION.finditer(text):
         tokens = tuple(match.group(1).split())
@@ -78,13 +90,6 @@ def _run_cli_help(*command_path: str) -> subprocess.CompletedProcess:
     )
 
 
-@pytest.mark.xfail(
-    reason='Bug #7 — docs/operations.md references at least 7 mssh-admin '
-           'commands that the CLI rejects (user del/show, admin del, '
-           'server groups/show, import, user key). Test will pass once '
-           'either the docs or the CLI are aligned. See design/openbugs/bug-07-docs-cli-drift.md.',
-    strict=True,
-)
 def test_every_documented_command_exists():
     """Every `mssh-admin <verb>` mentioned in operations.md must be
     accepted by the CLI (verified via `--help`).

@@ -69,7 +69,7 @@ client auth.
 On your operator workstation, with the bootstrap admin creds:
 
 ```bash
-mssh-admin server add srv-acct-01 --groups accounting,production
+mssh-admin server add --name srv-acct-01 --groups accounting,production
 # → prints the mTLS cert + key (printed once, not retained by CA)
 ```
 
@@ -111,9 +111,9 @@ good before moving on.
 ## Enrol a user
 
 ```bash
-mssh-admin user add alice
-mssh-admin user key add alice --kind ssh-pubkey --blob "$(ssh-keygen -y -f ~alice/.ssh/id_ed25519)"
-mssh-admin policy add alice --server-groups accounting --channels session
+# user add creates the user AND attaches a key if --key is given.
+mssh-admin user add --user alice --key ~alice/.ssh/id_ed25519.pub
+mssh-admin policy add --user alice --server-groups accounting --channels session
 ```
 
 Each `policy add` attaches one rule to the user. Multiple rules
@@ -207,37 +207,54 @@ debugging.
 ### Add a user, give them access
 
 ```bash
-mssh-admin user add alice
-mssh-admin user key add alice --kind ssh-pubkey --blob <pubkey>
-mssh-admin policy add alice --server-groups accounting
+mssh-admin user add --user alice --key /path/to/alice.pub
+mssh-admin policy add --user alice --server-groups accounting --channels session
+```
+
+### Inspect a user
+
+```bash
+mssh-admin user show --user alice
+# Single-user detail (keys, policies). Same as `user list --user alice`
+# but more discoverable.
 ```
 
 ### Revoke a user immediately
 
 ```bash
-mssh-admin user del alice
+mssh-admin user remove --user alice
 # Any in-flight session is unaffected (already authorized) but all
 # future authorize calls deny within the CA's cache TTL (default 1 minute).
+# For propagation to active sessions, see future-ideas.md §22 (push channel).
 ```
 
-### Add a server to a group
+### Add a server to a group / change group membership
 
 ```bash
-mssh-admin server groups srv-new --add accounting
+mssh-admin server groups --name srv-new --add accounting
+# `--remove <group>` and `--set <comma,sep,list>` also work.
+```
+
+### Inspect a server
+
+```bash
+mssh-admin server show --name srv-acct-01
+# Single-server detail (groups, mTLS subject, enrollment timestamp).
 ```
 
 ### Rotate an admin's mTLS cert
 
 ```bash
-mssh-admin admin add bob-2026     # mint new creds
-mssh-admin admin del bob          # revoke old (do this AFTER bob switches)
+mssh-admin admin add --name bob-2026 --role server-admin     # mint new creds
+mssh-admin admin remove --name bob                            # revoke old (do AFTER bob switches)
 ```
 
 ### Search the audit log
 
 ```bash
-mssh-admin audit --since "1 hour ago" --result denied
-# JSON-Lines on stdout. Filter with jq.
+mssh-admin audit --decision denied --limit 20
+# JSON-Lines on stdout. Filter further with jq.
+# (Time-window flags like --since are future work — see future-ideas.md.)
 ```
 
 ### Bounce the CA without dropping sessions

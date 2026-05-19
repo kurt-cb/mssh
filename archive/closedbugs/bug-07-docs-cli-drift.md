@@ -1,6 +1,6 @@
 # Bug #7 — `mssh-admin audit --result` documented but doesn't exist
 
-**Status:** OPEN.
+**Status:** CLOSED in v0.1.0 (commit pending). Docs renamed in `docs/operations.md` (user del→remove, admin del→remove, audit --result→--decision); built `user show`, `server show`, `server groups`. Regression test: `python/tests/test_admin_docs_cli_alignment.py`.
 
 _Originally tracked in `adhoc-bugs.md` (rounds 1+2, 2026-05-18 / 2026-05-19)._
 

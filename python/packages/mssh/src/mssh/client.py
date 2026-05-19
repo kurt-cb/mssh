@@ -246,9 +246,15 @@ def run_session(target: Target, ident: Identity, *,
     until either side closes. Returns 0 on clean close; non-zero on
     handshake / network error."""
     ctx = _build_ssl_context(ident)
+    # 5s connect timeout. Without this, an unreachable IP hangs for the
+    # kernel TCP timeout (~2 min). Users assume mssh is hung.
     try:
         raw_sock = socket.create_connection((target.host, target.port),
-                                            timeout=10.0)
+                                            timeout=5.0)
+    except socket.timeout:
+        print(f'mssh: connect {target.host}:{target.port}: '
+              f'connection timeout (5s)', file=sys.stderr)
+        return 4
     except OSError as e:
         print(f'mssh: connect {target.host}:{target.port}: {e}',
               file=sys.stderr)
@@ -513,8 +519,12 @@ def run_bypass_injection(target: Target, ident: Identity,
     ctx = _build_ssl_context(ident)
     try:
         sock = socket.create_connection((target.host, target.port),
-                                        timeout=10.0)
+                                        timeout=5.0)
         sock = ctx.wrap_socket(sock, server_hostname=target.host)
+    except socket.timeout:
+        print(f'mssh: connect {target.host}:{target.port}: '
+              f'connection timeout (5s)', file=sys.stderr)
+        return 2
     except (ssl.SSLError, OSError) as e:
         print(f'mssh: TLS to {target.host}:{target.port} failed: {e}',
               file=sys.stderr)
