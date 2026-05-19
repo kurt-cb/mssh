@@ -1,0 +1,133 @@
+---
+# Adhoc mssh test environment: spin up containers and install deps.
+#
+# Usage:
+#   ansible-playbook examples/spinup_mssh.yml
+#   ansible-playbook examples/spinup_mssh.yml -e '{"containers":[{"name":"acct-test01","image":"mssh-ubuntu-fixed"}]}'
+#   ansible-playbook examples/spinup_mssh.yml -e skip_squid=true
+#
+# After running, container IPs are written into adhoc-env.sh so you can
+# immediately use mssh_as / ssh_as with the new short name. For a container
+# named "acct-test01" the env var becomes acct_test01_IP and the short
+# name is "acct_test01":
+#
+#   source python/adhoc-env.sh
+#   ssh_as alice acct_test01 whoami
+#
+# What this does NOT do: set up PKI, configure msshd, or enroll users.
+# Those require the Python test bootstrap or manual mssh-admin steps.
+
+- name: Spin up containers
+  hosts: localhost
+  gather_facts: no
+  vars:
+    skip_squid: false
+    # Path to adhoc-env.sh, resolved relative to this playbook's location.
+    # playbook_dir is always .../python/tests/ansible-project/examples, so
+    # three levels up lands in python/.
+    adhoc_env_file: "{{ playbook_dir }}/../../../adhoc-env.sh"
+    containers:
+      - { name: acct-test01, image: mssh-ubuntu-fixed }
+
+  tasks:
+    - name: Launch each container
+      ansible.builtin.include_role:
+        name: lxc_spinup
+      vars:
+        container_name: "{{ item.name }}"
+        image_name: "{{ item.image }}"
+        ssh_key_path: "{{ playbook_dir }}/../ansible_id_ed25519"
+        inventory_file: "{{ playbook_dir }}/../hosts.ini"
+      loop: "{{ containers }}"
+
+    - name: Write container IPs into adhoc-env.sh
+      ansible.builtin.lineinfile:
+        path: "{{ adhoc_env_file }}"
+        regexp: "^export {{ item.name | replace('-', '_') }}_IP="
+        line: "export {{ item.name | replace('-', '_') }}_IP={{ hostvars[item.name]['ansible_host'] }}"
+        insertafter: "^# Server short-name"
+      loop: "{{ containers }}"
+      when: adhoc_env_file | length > 0
+
+- name: Install mssh dependencies
+  hosts: spinned_up_hosts
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Install Python3 and pip (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name: [python3, python3-pip, python3-venv]
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Install Python3 and pip (Alpine)
+      ansible.builtin.command: apk add --no-cache python3 py3-pip
+      when: ansible_os_family == "Alpine"
+
+    # PEP 668 enforcement (Ubuntu 24.04+, Debian 12+, modern Alpine) blocks
+    # system-wide pip installs unless --break-system-packages is set. Older
+    # distros (Ubuntu 22.04) lack the flag entirely, so check the marker.
+    - name: Detect PEP 668 marker
+      ansible.builtin.find:
+        paths: /usr/lib
+        patterns: 'EXTERNALLY-MANAGED'
+        recurse: yes
+        file_type: file
+      register: pep668_marker
+
+    - name: Install mssh runtime deps via pip
+      ansible.builtin.pip:
+        name:
+          - "asyncssh>=2.14"
+          - "cryptography>=41.0"
+          - "flask>=3.0"
+          - "pyyaml>=6.0"
+          - "click>=8.0"
+          - "requests>=2.31"
+        state: present
+        extra_args: "{{ '--break-system-packages' if pep668_marker.matched > 0 else omit }}"
+
+- name: Configure squid proxy client
+  hosts: spinned_up_hosts
+  become: yes
+  gather_facts: yes
+  vars:
+    skip_squid: false
+  vars_files:
+    - "{{ playbook_dir }}/../variables.yml"
+
+  tasks:
+    - name: Apply squid proxy settings
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../task_squid.yml"
+      when: not skip_squid
+
+- name: Summary
+  hosts: localhost
+  gather_facts: no
+  vars:
+    adhoc_env_file: "{{ playbook_dir }}/../../../adhoc-env.sh"
+    containers:
+      - { name: acct-test01, image: mssh-ubuntu-fixed }
+
+  tasks:
+    - name: Display next steps
+      ansible.builtin.debug:
+        msg: |
+          Containers ready: {{ containers | map(attribute='name') | join(', ') }}
+          IPs written to: {{ adhoc_env_file }}
+
+          Re-source adhoc-env.sh and use short names (hyphens become underscores):
+          {% for c in containers %}  source python/adhoc-env.sh   # then: ssh_as alice {{ c.name | replace('-', '_') }} whoami
+          {% endfor %}
+          Next steps (manual or via mssh-admin):
+            1. Generate PKI:    mssh-admin ca init
+            2. Enroll a server: mssh-admin server enroll <name>
+            3. Enroll a user:   mssh-admin user enroll <user> --pubkey ~/.ssh/id_ed25519.pub
+            4. Start msshd on the server container
+            5. Test:            mssh_as alice {{ containers[0].name | replace('-', '_') }}
+
+          To destroy:
+          {% for c in containers %}  lxc delete --force {{ c.name }}
+          {% endfor %}
