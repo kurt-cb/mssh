@@ -1,7 +1,7 @@
 #!/bin/sh
-# install_mssh.sh — install mssh + msshd from a tarball on a clean
-# Linux host. Simulates `apt install mssh msshd` until a real distro
-# package exists. See design/future-ideas.md §15.
+# install_mssh.sh — install mssh + msshd from a pre-built wheel
+# tarball on a clean Linux host. Simulates `apt install mssh msshd`
+# until a real distro package exists. See design/future-ideas.md §15.
 #
 # Usage:
 #   install_mssh.sh <tarball-path>           [--install-dir /opt/mssh]
@@ -10,18 +10,35 @@
 #
 # Assumes:
 #   - Run as root (we touch /opt, /etc, systemd).
-#   - Network access for the package manager (apt/dnf/apk).
+#   - Network access for the package manager (apt/dnf/apk) — for
+#     system deps only. The mssh wheels themselves install offline
+#     from the tarball.
+#
+# Tarball layout expected (produced by `make tarball` at the repo root):
+#
+#   mssh-v0.1.0.tar.gz
+#   ├── dist/                            5 wheels
+#   │   ├── mssh_common-0.1.0-*.whl
+#   │   ├── mssh-0.1.0-*.whl
+#   │   ├── msshd-0.1.0-*.whl
+#   │   ├── mssh_ca-0.1.0-*.whl
+#   │   └── mssh_admin-0.1.0-*.whl
+#   ├── config/                          template files
+#   │   └── sshd_config.template
+#   └── systemd/                         unit files (msshd.service, mssh-ca.service)
 #
 # Does:
 #   1. Detects distro family (apt | dnf | apk).
-#   2. Installs system deps: python3, openssh-server, openssh-client.
+#   2. Installs system deps: python3, python3-pip, cryptography,
+#      flask, asyncssh, openssh-server, openssh-client.
 #   3. Extracts the tarball to <install-dir>.
 #   4. Creates a Python venv at <install-dir>/venv.
-#   5. `pip install -e` the mssh source into that venv.
-#   6. Drops symlinks for mssh/msshd/mssh-ca/mssh-admin into /usr/local/bin.
-#   7. Installs systemd units (DISABLED) for msshd and mssh-ca, if systemd
-#      is present and --no-systemd was not passed.
-#   8. Lays down default config templates in /etc/mssh/ (operator edits these).
+#   5. `pip install` the 5 mssh wheels into that venv.
+#   6. Drops symlinks for the binaries into /usr/local/bin.
+#   7. Installs systemd units (DISABLED) for msshd and mssh-ca, if
+#      systemd is present and --no-systemd was not passed.
+#   8. Lays down sshd_config.template + wrapper.yaml.example into
+#      /etc/mssh/ (operator edits these).
 #   9. Prints next-step instructions.
 #
 # Does NOT:
@@ -29,9 +46,6 @@
 #   - Generate keys.
 #   - Enable or start any service.
 #   The operator does those steps explicitly (see docs/operations.md).
-#
-# Tarball layout expected: a directory containing python/, config/,
-# systemd/ — produced by `make tarball` (or the equivalent here in CI).
 
 set -eu
 
@@ -125,9 +139,10 @@ fi
 echo "==> extracting $TARBALL to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 tar -xzf "$TARBALL" -C "$INSTALL_DIR" --strip-components=0
-# Sanity: the tarball should contain python/, config/, systemd/ at top level.
-if [ ! -d "$INSTALL_DIR/python" ] || [ ! -d "$INSTALL_DIR/config" ]; then
-    echo "tarball did not extract expected python/ and config/ at $INSTALL_DIR" >&2
+# Sanity: the tarball should contain dist/ at top level.
+if [ ! -d "$INSTALL_DIR/dist" ]; then
+    echo "tarball did not extract expected dist/ at $INSTALL_DIR" >&2
+    echo "Expected layout: dist/*.whl, config/, systemd/" >&2
     exit 4
 fi
 chown -R "$RUN_USER:$RUN_USER" "$INSTALL_DIR"
@@ -139,12 +154,19 @@ python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/python" -m ensurepip --upgrade 2>/dev/null || true
 "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
 
-echo "==> installing mssh package into venv"
-"$INSTALL_DIR/venv/bin/pip" install --quiet -e "$INSTALL_DIR/python"
+echo "==> installing mssh wheels into venv"
+# Install by file path so the unrelated 'mssh' on PyPI never gets in
+# the way. Dependency order: common first, then the four binaries.
+"$INSTALL_DIR/venv/bin/pip" install --quiet \
+    "$INSTALL_DIR"/dist/mssh_common-*.whl \
+    "$INSTALL_DIR"/dist/mssh-0*.whl \
+    "$INSTALL_DIR"/dist/msshd-*.whl \
+    "$INSTALL_DIR"/dist/mssh_ca-*.whl \
+    "$INSTALL_DIR"/dist/mssh_admin-*.whl
 
 # ---- 6. Symlinks into /usr/local/bin --------------------------------------
 echo "==> linking binaries into /usr/local/bin"
-for bin in mssh msshd mssh-ca mssh-admin ssh-rt-debug-sshd; do
+for bin in mssh msshd msshd-admin mssh-ca mssh-admin mssh-debug-sshd mssh-mcp; do
     if [ -f "$INSTALL_DIR/venv/bin/$bin" ]; then
         ln -sf "$INSTALL_DIR/venv/bin/$bin" "/usr/local/bin/$bin"
     fi
@@ -191,22 +213,25 @@ mkdir -p /var/lib/mssh /var/lib/mssh/inner-sshd /var/log/mssh
 chown -R "$RUN_USER:$RUN_USER" /var/lib/mssh /var/log/mssh
 
 # ---- 9. Done --------------------------------------------------------------
+INSTALLED_VERSION=$("$INSTALL_DIR/venv/bin/pip" show mssh-common 2>/dev/null \
+    | awk '/^Version:/ {print $2}')
 cat <<EOF
 
-Installed mssh into $INSTALL_DIR.
-Binaries linked into /usr/local/bin: mssh, msshd, mssh-ca, mssh-admin.
+Installed mssh ${INSTALLED_VERSION:-(version unknown)} into $INSTALL_DIR.
+Binaries linked into /usr/local/bin: mssh, msshd, mssh-ca, mssh-admin
+                                      (+ msshd-admin, mssh-debug-sshd, mssh-mcp).
 
 Next steps (NOT done by this script):
 
   1. Enrol this host at your CA:
         # on your operator workstation:
-        mssh-admin server add <this-host-name> --groups <group>
+        mssh-admin server add --name <this-host-name> --groups <group>
      Capture the printed mTLS cert + key and provision them onto
      this host as /etc/mssh/server-mtls.{crt,key}.
 
   2. Edit /etc/mssh/wrapper.yaml:
         cp /etc/mssh/wrapper.yaml.example /etc/mssh/wrapper.yaml
-        $EDITOR /etc/mssh/wrapper.yaml
+        \$EDITOR /etc/mssh/wrapper.yaml
      Start in mode: fallback. Flip to mode: enforce after you've
      verified the gateway is wired in.
 

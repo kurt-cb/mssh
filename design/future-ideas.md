@@ -274,13 +274,17 @@ Path 2 is the more natural fit — passkeys are best understood as
 
 ## 8. Centralized client config — `~/.mssh/` replaces `~/.ssh/`
 
-**Status:** **Partial.** v1 (the file-system layout — `~/.mssh/cert.pem`,
-`~/.mssh/key.pem`, `~/.mssh/ca.pem`, `~/.mssh/config`) is **landed**
-in the mssh client defaults
-([client.py:52-55](../python/packages/mssh/src/mssh/client.py#L52-L55)).
-v2 (CA-managed distribution + sync of these files) is not started —
-that's the "stop being a snowflake" piece this section is really
-about.
+**Status:** **Partial.**
+- **v1 — landed:** the file-system layout (`~/.mssh/cert.pem`,
+  `~/.mssh/key.pem`, `~/.mssh/ca.pem`, `~/.mssh/config`) is
+  recognized by the mssh client by default
+  ([client.py:52-55](../python/packages/mssh/src/mssh/client.py#L52-L55)).
+- **v2 — deferred, scoped:** the "CA-managed distribution + sync"
+  piece (which is the actually-valuable bit — the CA pushes cert/key
+  rotations to every enrolled client without operator action) is its
+  own initiative. Depends on §22 (push channel CA → endpoint), since
+  the mechanism that delivers config is the same one that delivers
+  revocations.
 
 ### Idea
 
@@ -466,12 +470,21 @@ plus the recording / compliance design conversation.
 
 ## 11. In-situ `debug_sshd` swap-in for troubleshooting (sideband CA audit)
 
-**Status:** **Partial.** The `debug_sshd` component exists
-([mssh.debug_sshd.ssh_server](../python/packages/msshd/src/mssh/debug_sshd/))
-and runs as a standalone debug tier via `./setup_adhoc.sh debug`. The
-**in-situ swap-in workflow** described below — bringing it up inside
-an already-running production deployment to diagnose without taking
-the production msshd down — is not built.
+**Status:** **Partial.** Pieces in place + remaining work:
+
+- **Done:** the `debug_sshd` component itself exists
+  ([mssh.debug_sshd.ssh_server](../python/packages/msshd/src/mssh/debug_sshd/))
+  and runs as a standalone debug tier via `./setup_adhoc.sh debug`.
+- **Done (clarified in docs):** the architectural distinction is
+  now explicit — production uses **native OpenSSH** as the hermetic
+  inner sshd; debug_sshd is a smaller **Python** SSH implementation
+  intended *only* for diagnosing the CA/cert/policy decision path.
+  Operators should never deploy debug_sshd as a production inner sshd.
+  See [architecture.md § debug_sshd](architecture.md) and
+  [operations.md § debug mode](../docs/operations.md).
+- **Remaining:** the **in-situ swap-in workflow** below — bringing
+  debug_sshd up inside an already-running production deployment to
+  diagnose without taking the production msshd down — is not built.
 
 ### Idea
 
@@ -743,9 +756,19 @@ shipping a real release becomes a priority.
 
 ## 17. Per-session banner with variable substitution
 
-**Status:** v1 (operator-templated, startup substitution) is **landed**.
-Per-user / per-session substitution remains future work — see "What's
-not done" below.
+**Status:** **Partial — v2 deferred, blocked on §21.**
+- **v1 — landed:** operator-templated, startup substitution. Operators
+  customize via `banner.template_path` in `wrapper.yaml`; rendered at
+  msshd boot.
+- **v2 — deferred:** per-user / per-session substitution AND
+  delivery of the banner to the *mssh client* (closed-bug #11). The
+  per-session render side can plug into the per-connection inner
+  sshd (§1, already landed). But the delivery side requires the
+  framed v1.1 protocol of §21 — without it, the banner is invisible
+  to mssh users (which makes the per-session work moot until §21
+  lands first).
+
+See "What's not done" below for the original v2 sketch.
 
 ### Idea
 

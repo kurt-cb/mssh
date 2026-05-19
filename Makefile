@@ -77,6 +77,30 @@ dev-install:
 	done
 	@echo "✓ installed $(words $(PY_PACKAGES)) packages editable in $(VENV)"
 
+# ---- tarball (for install_mssh.sh) -----------------------------------
+# `make tarball` produces dist/mssh-<version>.tar.gz containing the
+# 5 wheels + config/ + systemd/. install_mssh.sh consumes this on a
+# clean host (simulates what `apt install mssh-server` will install
+# once we have real distro packaging — future-ideas §16).
+.PHONY: tarball
+TARBALL_VERSION ?= $(shell cd $(PY_PKG_DIR)/mssh-common && \
+    $(PYTHON) -c "from setuptools_scm import get_version; \
+                  print(get_version(root='../../..'))" 2>/dev/null \
+    || git describe --tags --dirty 2>/dev/null || echo "0.0.0")
+TARBALL_NAME := mssh-$(TARBALL_VERSION).tar.gz
+
+tarball: clean pkg
+	@echo "── packaging $(TARBALL_NAME) ──"
+	@tmp=$$(mktemp -d) && \
+	    mkdir -p "$$tmp/dist" "$$tmp/config" "$$tmp/systemd" && \
+	    cp $(DIST_DIR)/*.whl "$$tmp/dist/" && \
+	    cp config/sshd_config.template "$$tmp/config/" 2>/dev/null || true && \
+	    cp systemd/*.service "$$tmp/systemd/" 2>/dev/null || true && \
+	    tar -C "$$tmp" -czf $(DIST_DIR)/$(TARBALL_NAME) dist config systemd && \
+	    rm -rf "$$tmp"
+	@echo "✓ wrote $(DIST_DIR)/$(TARBALL_NAME)"
+	@ls -lh $(DIST_DIR)/$(TARBALL_NAME)
+
 # ---- redeploy to running lab -----------------------------------------
 # Builds fresh wheels, pushes them to each container in the running
 # adhoc lab, pip-installs them, and restarts the relevant services.

@@ -84,10 +84,17 @@ connection, mints an ephemeral OpenSSH user cert with a local
 user-CA, hands the cert to a **hermetic inner sshd** that it
 owns, and proxies the byte stream end-to-end-encrypted.
 
-The inner sshd is a stock unmodified OpenSSH instance launched by
+The inner sshd is a **stock unmodified OpenSSH** instance launched by
 msshd with a generated, locked-down `sshd_config` (see
 [§ Hermetic inner sshd](#hermetic-inner-sshd)). msshd manages its
 lifecycle; the operator never edits the inner config directly.
+
+**Why native OpenSSH (not a Python SSH server) for production:** the
+SSH protocol implementation we ship in production has to be the one
+the wider world has spent decades hardening — OpenSSH (or, on size-
+constrained targets, Dropbear). msshd's hermetic config uses OpenSSH's
+own auth machinery and cert validation. We deliberately do **not** ship
+a Python SSH server in the production data path.
 
 msshd supports three modes ([§ Operating modes](#operating-modes)).
 
@@ -97,13 +104,27 @@ Operator CLI for the CA's admin API. Enrols servers, users, keys,
 and policies; rotates certs; runs audits. mTLS-authenticated with
 role-based access control (`superuser`, `admin`, `auditor`).
 
-### `debug_sshd`
+### `debug_sshd` — NOT for production
 
-A standalone SSH server (AsyncSSH-based) that calls the CA inline
-after pubkey auth. **Not a production deployment target** — kept as
-the minimal CA-call surface for isolating CA / policy / cert-parsing
-issues from msshd's gateway machinery. The adoption-time
-helper for "is the CA actually deciding what I expect?"
+A Python AsyncSSH-based server that calls the CA inline after pubkey
+auth. **Not a production deployment target.** It exists exclusively
+as a debugging affordance: when something in the CA → cert →
+authorization path misbehaves, `debug_sshd` lets you stand up a
+diagnostic SSH server with structured, verbose logging of every step
+the auth path takes, so you can see exactly which check failed.
+
+It is intentionally a **smaller** SSH implementation than OpenSSH —
+the trade is "less complete protocol surface, easier to instrument."
+Several SSH features (full PTY mode quirks, X11 forwarding, agent
+forwarding, certain cipher suites) are best-effort or missing in
+debug_sshd. **If something works in debug_sshd but not in production
+msshd**, that's a debug_sshd limitation, not a bug in production.
+**If something works in production but breaks in debug_sshd**, treat
+it as a debug_sshd issue first.
+
+The adhoc lab's "debug" tier (`./setup_adhoc.sh debug`) is what spins
+up this server. The default `./setup_adhoc.sh` (no argument) uses the
+production msshd + hermetic OpenSSH path.
 
 ---
 

@@ -348,7 +348,9 @@ for line in sys.stdin:
 For the operator-grade view (the same data via the admin API):
 
 ```bash
-mssh-admin audit --since '5 minutes ago'
+# From the CA host. --decision filters; --limit caps the output.
+lxc exec mssh-adhoc-ca -- su - root-admin -c \
+    'mssh-admin audit --decision denied --limit 20'
 ```
 
 **What you're seeing in a real deployment:** the audit log is the
@@ -358,8 +360,78 @@ need the CA host (or its backup).
 
 ---
 
-## 8. What this tutorial did NOT cover
+## 8. Ask the CA in natural language (MCP, optional)
 
+If you want to drive `mssh-admin` queries from Claude Code / Claude
+Desktop instead of typing them by hand, the `mssh-mcp` server
+exposes the read-only admin API over the Model Context Protocol.
+
+```bash
+# in the same venv as mssh-admin:
+pip install 'mssh-admin[mcp]'
+```
+
+Then register it with your MCP client. For Claude Code's mcp config:
+
+```json
+{
+  "mssh-ca": {
+    "command": "mssh-mcp",
+    "args": []
+  }
+}
+```
+
+After that, in a Claude session you can ask "what's the current
+adoption state?" / "show me the last 10 denies for alice" and Claude
+will call `mssh-mcp` → CA → return results.
+
+Full setup details, security notes, and the list of exposed tools:
+[operations.md § Ask the CA in natural language (MCP)](operations.md#ask-the-ca-in-natural-language-mcp).
+
+---
+
+## 9. The `debug` lab tier (alternative inner sshd)
+
+Production msshd uses **native OpenSSH** as its hermetic inner sshd —
+the standard path through every `./setup_adhoc.sh` run you've been
+using.
+
+For debugging the CA / cert / policy path in isolation, mssh also
+ships a Python-based diagnostic SSH server (`mssh-debug-sshd`). The
+adhoc lab can spin up an alternative lab tier that uses it instead
+of OpenSSH:
+
+```bash
+# Tear down the current lab first.
+./cleanup_containers.sh
+# Then re-provision in 'debug' mode:
+./setup_adhoc.sh debug
+```
+
+You'll get the same shaped lab, but the inner SSH server is the
+Python diagnostic implementation. Useful when you want verbose
+structured logging of the cert validation and policy evaluation
+steps without rebuilding OpenSSH with debug logging.
+
+**Important caveat:** debug_sshd is intentionally a smaller SSH
+implementation than OpenSSH. If you see a feature work under debug
+mode but break under the default msshd lab, suspect a debug_sshd
+limitation — not a regression. The production path is what runs on
+real servers.
+
+See [design/architecture.md § debug_sshd](../design/architecture.md)
+for the full distinction.
+
+---
+
+## 10. What this tutorial did NOT cover
+
+  - **Migration from a pre-mssh deployment.** This tutorial used the
+    prebuilt Phase-2 lab. To walk the actual migration sequence
+    (Phase 0 vanilla sshd → Phase 1 fallback → Phase 2 enforce),
+    follow [TUTORIAL_MIGRATION.md](TUTORIAL_MIGRATION.md) instead —
+    same adhoc lab, different starting point.
   - **Multi-CA failover.** Both
     [operations.md § bounce the CA without dropping sessions](operations.md#bounce-the-ca-without-dropping-sessions)
     and the multi-endpoint `ca.endpoints` list in wrapper.yaml
@@ -377,12 +449,14 @@ need the CA host (or its backup).
   - **Browser-based access** — separate design exploration, see
     [design/browser.md](../design/browser.md). Not a part of mssh's
     SSH path.
-  - **debug_sshd swap-in** — diagnostics affordance, future-ideas §11.
-    Will live in this tutorial once implemented.
+  - **debug_sshd in-situ swap-in** — diagnostics affordance,
+    future-ideas §11. The lab's `debug` tier exists (§9 above), but
+    swapping debug_sshd into a running production deployment without
+    taking msshd down is not built yet.
 
 ---
 
-## 9. Tear down
+## 11. Tear down
 
 ```bash
 exit             # leave the adhoc> shell

@@ -317,20 +317,63 @@ onboarding a new server or user.
 
 The `mssh-mcp` server exposes the read-only admin API over the
 [Model Context Protocol](https://modelcontextprotocol.io) so an
-LLM-driven client (Claude Desktop, etc.) can answer questions like
-"why was alice denied last Tuesday" or "list every server in the
-production group" by calling the same admin endpoints `mssh-admin`
-uses.
+LLM-driven client (Claude Code, Claude Desktop, etc.) can answer
+questions like *"why was alice denied last Tuesday"* or *"list every
+server in the production group"* by calling the same admin endpoints
+`mssh-admin` uses.
 
-Install (optional extra):
+#### Install
+
+`mssh-mcp` ships in the `mssh-admin` wheel as an optional extra (the
+`mcp` Python SDK is a heavy dep most operators don't want):
 
 ```bash
-pip install -e '.[mcp]'      # or `pip install mssh[mcp]` after release
+# from a v0.1.0+ install
+pip install 'mssh-admin[mcp]'    # picks up the mcp SDK + mssh-mcp binary
+
+# or from the adhoc lab / source tree
+make dev-install                  # then:
+pip install 'mssh-admin[mcp]'    # in the same venv
 ```
 
-Configure: `mssh-mcp` reads `~/.mssh-admin/config` (same fields as
-`mssh-admin`). Then register the server with your MCP client. For
-Claude Desktop, add to `claude_desktop_config.json`:
+Verify the binary is on `$PATH`:
+
+```bash
+mssh-mcp --help
+```
+
+#### Configure
+
+`mssh-mcp` reads `~/.mssh-admin/config` (same fields as `mssh-admin`).
+Make sure that file has your CA URL + admin cert/key paths so
+`mssh-admin status` already works from your workstation; `mssh-mcp`
+will use the same credentials.
+
+#### Wire up to Claude Code (CLI)
+
+Claude Code reads `~/.config/claude-code/mcp_servers.json` (or similar
+location — check `claude --help` for your version's path). Add:
+
+```json
+{
+  "mssh-ca": {
+    "command": "mssh-mcp",
+    "args": []
+  }
+}
+```
+
+Then in a Claude Code session, the tools below appear and you can
+ask things like:
+
+  - *"What's the current adoption-phase status of the CA?"*
+  - *"Why was the last denied authorize from alice?"*
+  - *"Show me the policies attached to root-admin."*
+
+#### Wire up to Claude Desktop
+
+Edit `claude_desktop_config.json` (location depends on OS — see
+Claude Desktop docs):
 
 ```json
 {
@@ -343,7 +386,9 @@ Claude Desktop, add to `claude_desktop_config.json`:
 }
 ```
 
-Tools exposed (all read-only):
+Restart Claude Desktop and the tools appear in the tool-use menu.
+
+#### Tools exposed (all read-only in v1)
 
   - `status` — full deployment state walk (same as `mssh-admin status`).
   - `server_list` — enrolled servers, with optional group / name
@@ -356,6 +401,17 @@ Tools exposed (all read-only):
 Write tools (`server_add`, `user_add`, `policy_add`, key rotation)
 are deliberately not in v1 — the trust delegation for write access
 needs its own design (see [design/future-ideas.md §12](../design/future-ideas.md)).
+
+#### Security note
+
+`mssh-mcp` runs locally on your workstation and uses your *admin*
+mTLS creds to talk to the CA. The LLM never sees the certs
+themselves — it only sees the JSON the CA returns. Same trust
+boundary as running `mssh-admin` manually.
+
+If you don't want an LLM client to be able to read your audit log
+or user/policy table, **don't install `mssh-admin[mcp]`**. The
+extras dependency is opt-in for exactly this reason.
 
 ---
 
@@ -394,9 +450,25 @@ pin.
 
 ### "I want to switch a server to debug mode"
 
-(Future feature; see [future-ideas.md § debug_sshd swap-in](../design/future-ideas.md).)
-Today: stop msshd and run `debug_sshd` directly to inspect what
-the CA returns for each request.
+Production msshd uses **native OpenSSH** as its hermetic inner sshd
+— that's the only thing that runs in the data path on a real server.
+
+`debug_sshd` is a separate, **Python-based** SSH server we ship for
+*diagnostic* purposes only. It calls the same CA / cert-parsing code
+that the production path uses, so you can isolate "is the CA decision
+right?" from "is OpenSSH config right?" without touching prod.
+
+Today: the adhoc lab has a `debug` tier that brings up debug_sshd
+instead of the OpenSSH hermetic inner — `./setup_adhoc.sh debug` from
+`python/`. For an existing deployment, you currently have to stop
+msshd and run `mssh-debug-sshd` directly. See
+[future-ideas.md §11](../design/future-ideas.md) for the planned
+in-situ swap-in that doesn't require taking msshd down.
+
+**Important:** debug_sshd is intentionally a smaller SSH implementation
+than OpenSSH. If something works under debug_sshd but breaks under
+production msshd, suspect a debug_sshd limitation, not a production
+bug.
 
 ### "I think my CA signing key is compromised"
 
