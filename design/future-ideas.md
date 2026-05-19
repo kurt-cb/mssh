@@ -1075,8 +1075,10 @@ wall-clock time, and an estimated per-server / per-user effort.
 
 ## 21. Protocol v1.1 — typed framing for the post-ack stream
 
-**Status:** Decided to do; design doc pending. Surfaced during the
-2026-05-19 adhoc-testing round.
+**Status:** Design landed at
+[design/notes-protocol-v1.1.md](notes-protocol-v1.1.md). Implementation
+pending — once approved, the protocol bump + 5-bug-close PR.
+Surfaced during the 2026-05-19 adhoc-testing round.
 
 ### Idea
 
