@@ -316,7 +316,7 @@ mssh -p 2200 unauthorized@srv-acct-01 -- whoami
 Watch the CA audit log to confirm the deny landed:
 
 ```bash
-mssh-admin audit --since '5 minutes ago' --result denied
+mssh-admin audit --decision denied --limit 50  # NB: --since is future work
 ```
 
 ### 4.4 If something goes wrong
@@ -425,7 +425,7 @@ If msshd is bound but proxying fails:
 Check the CA audit:
 
 ```bash
-mssh-admin audit --since '5 minutes ago' --user <username> --result denied
+mssh-admin audit --decision denied --user <username> --limit 50
 ```
 
 Common denied reasons:
@@ -479,8 +479,8 @@ To return that server to mssh, restart msshd: `systemctl start msshd`.
     but operationally complex; see
     [operations.md § bounce the CA without dropping sessions](operations.md#bounce-the-ca-without-dropping-sessions).
   - **Distro-native packaging.** Today's install is `install_mssh.sh`
-    or `pip install -e .`. Real `.deb` / `.rpm` / `.apk` packages
-    are on the roadmap — see
+    (or `make dev-install` for a checkout). Real `.deb` / `.rpm` /
+    `.apk` packages are on the roadmap — see
     [future-ideas.md §16](../design/future-ideas.md).
 
 ---
@@ -511,7 +511,7 @@ mssh-admin user cert mint --user <u> --out-dir ./creds/<u>
 
 # Phase 4 — flip each server:
 ssh root@<name> "sed -i 's/^mode: fallback/mode: enforce/' /etc/mssh/wrapper.yaml; systemctl restart msshd"
-mssh-admin audit --since '5 min ago' --result denied   # confirm clean
+mssh-admin audit --decision denied --limit 50   # confirm clean
 
 # Phase 5 — decommission:
 ssh root@<name> "systemctl stop ssh; sed -i 's/external_port: 2200/external_port: 22/' /etc/mssh/wrapper.yaml; systemctl restart msshd"
