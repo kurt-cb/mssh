@@ -49,7 +49,8 @@ cd python
 ```
 
 What you get when the `adhoc>` prompt drops:
-  - 5 LXC containers (CA, acct, sales, hr, eng)
+  - 5 LXC containers (CA, acct, sales, hr, eng — `eng` is Alpine
+    for cross-distro coverage, the rest are Ubuntu)
   - Vanilla sshd on port 22 of each server, populated with
     `authorized_keys` for alice/bob/carol/dave/…
   - msshd installed on each server with `mode: fallback` —
@@ -57,7 +58,20 @@ What you get when the `adhoc>` prompt drops:
   - `mssh-ca` running on the CA container, with one bootstrap admin
     enrolled — **but no servers or users enrolled yet**
   - `./adhoc-keys/` on the host: per-user SSH keys (Phase-0 path)
-  - `~/.mssh-admin/config` pointing at the CA's bootstrap admin creds
+
+To talk to the CA from your operator workstation, point
+`mssh-admin` at the bootstrap admin creds the lab generated:
+
+```bash
+source ./adhoc-env.sh           # exports $ca_IP and other env
+mkdir -p ~/.mssh-admin
+cat > ~/.mssh-admin/config <<EOF
+ca_url: https://${ca_IP}:8443
+admin_cert: $(pwd)/adhoc-ca-creds/bootstrap-admin-cert.pem
+admin_key:  $(pwd)/adhoc-ca-creds/bootstrap-admin-key.pem
+ca_cert:    $(pwd)/adhoc-ca-creds/tls-ca-cert.pem
+EOF
+```
 
 At this point both ssh paths work; mssh does not:
 
@@ -252,8 +266,33 @@ logging:
   audit_destination: file:/var/log/mssh/wrapper-audit.jsonl
 ```
 
-Then `systemctl restart msshd` (or, on Alpine,
-`fuser -k -9 2200/tcp; nohup msshd --config /etc/mssh/wrapper.yaml &`).
+For each server, write the yaml and restart msshd. On the Ubuntu
+hosts (acct/sales/hr):
+
+```bash
+lxc exec ${acct_CONTAINER} -- systemctl restart msshd
+```
+
+The `eng` container is Alpine — no systemd. Use the lab's
+nohup-spawn pattern instead:
+
+```bash
+lxc exec ${eng_CONTAINER} -- sh -c '
+    fuser -k -9 2200/tcp 2>/dev/null; sleep 1
+    mkdir -p /var/log/mssh
+    SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh nohup msshd \
+        --config /etc/mssh/wrapper.yaml > /var/log/mssh/msshd.log 2>&1 &
+    echo $! > /run/msshd.pid
+'
+```
+
+In production an Alpine deployment would use OpenRC; the lab keeps
+things minimal. See [design/future-ideas.md §16](../design/future-ideas.md)
+for the packaging path.
+
+> **Templating note:** the wrapper.yaml above has `https://CA_IP:8443`
+> as a placeholder. Replace `CA_IP` with `${ca_IP}` (the lab env
+> variable; `source ./adhoc-env.sh` exports it) before pushing.
 
 ---
 

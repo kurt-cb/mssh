@@ -133,15 +133,14 @@ Policy lives at the CA. alice's enrollment has access to the
 
 ```bash
 mssh_as alice sales whoami
-# → command exits non-zero with a generic stderr:
-#       mssh: server closed before sending ack
-#   (see design/openbugs/bug-01-cryptic-deny-message.md — the deny
-#    reason exists in the CA audit log but isn't yet propagated to
-#    the mssh client. Closed by future-ideas §21.)
+# → command exits non-zero with an actionable stderr:
+#       mssh: wrapper rejected request: no_matching_policy: user
+#       'alice' has no policy granting access to server 'srv-sales'
 ```
 
-The mssh client message is intentionally generic for v0.1.0; the
-real "why" is on the CA. Ask it:
+The deny carries reason + detail straight from the CA (protocol
+v1.1 typed deny ack — closed [archive/closedbugs/bug-01-cryptic-deny-message.md](../archive/closedbugs/bug-01-cryptic-deny-message.md)).
+The CA's audit log has the same information plus extra context:
 
 ```bash
 lxc exec ${ca_CONTAINER} -- cat /var/log/mssh/audit.jsonl \
@@ -243,21 +242,21 @@ EOF
 
 lxc exec ${acct_CONTAINER} -- systemctl restart msshd
 
-# Verify the rendered banner on the server:
+# Verify the rendered banner — both on the server and as the
+# end user will actually see it via mssh:
 lxc exec ${acct_CONTAINER} -- cat /var/lib/mssh/inner-sshd/banner
 # → ─── srv-acct (accounting) — owned by finance-ops ───
 #   For access issues: contact #ops on Slack.
+
+mssh_as alice acct whoami
+# → ─── srv-acct (accounting) — owned by finance-ops ───
+#   For access issues: contact #ops on Slack.
+#   alice
 ```
 
-**Caveat:** today the rendered banner is consumed by the *inner sshd*
-(which msshd's asyncssh client reads pre-auth) — the mssh CLIENT does
-not surface it to end users. See
-[design/openbugs/bug-11-banner-invisible-to-mssh.md](../design/openbugs/bug-11-banner-invisible-to-mssh.md);
-closed by future-ideas §21 (typed framing in the outer protocol gives
-mssh a banner channel).
-
-Operators verifying their template renders correctly use the
-`lxc exec ... cat /var/lib/mssh/inner-sshd/banner` form above.
+The mssh client surfaces the per-server banner above the session
+output (closed [archive/closedbugs/bug-11-banner-invisible-to-mssh.md](../archive/closedbugs/bug-11-banner-invisible-to-mssh.md)
+via the v1.1 BANNER frame).
 
 **What you're seeing in a real deployment:** simple per-server
 identity in front of every connection. Different teams' servers
