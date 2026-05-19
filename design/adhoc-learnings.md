@@ -254,3 +254,50 @@ ADMIN 'audit --decision denied --limit 5'
 Should ship as a `/usr/local/bin/mssh-admin` shim, same shape as the
 existing `/usr/local/bin/mssh`.
 
+
+### Banner customization is invisible to mssh users
+
+`banner.template_path` and `values` substitution works at the inner
+sshd layer. The custom banner file is written. But the mssh client
+never reads it — the outer protocol carries no banner channel and
+the inner-sshd's pre-auth banner is consumed by msshd (which is the
+SSH client), never relayed to the mssh user.
+
+**For operators:** customize whatever you like; users will not see
+it via `mssh`. This is mostly a documentation gap — the banner
+feature reads like end-user-facing but isn't.
+
+### CLI ↔ doc drift inventory (2026-05-19)
+
+A user following docs/operations.md hits these mismatches:
+
+| Doc says | Actually is |
+|----------|-------------|
+| `mssh-admin user del alice` | `mssh-admin user remove --user alice` |
+| `mssh-admin user show alice` | does not exist |
+| `mssh-admin audit --result denied` | `mssh-admin audit --decision denied` |
+| `mssh-admin audit --since "1 hour ago"` | only `--limit` and `--type/--decision/--user/--server` |
+| `mssh-admin` (binary) | not deployed in lab; use `python3 -m mssh.admin.main` |
+
+### Trail of fixes that landed in round 2
+
+- **Bug #8** — CA-side per-connection sshd_config template missing
+  `ssh-ed25519-cert-v01@openssh.com` in PubkeyAcceptedAlgorithms.
+  Fix at [templates.py:79-83](../python/src/mssh/ca/templates.py#L79-L83).
+- **Bug #10** — CRL revocations didn't propagate on deny-only traffic.
+  Fix spans three files:
+  - [ca/authorize.py:_deny](../python/src/mssh/ca/authorize.py) — include `current_crl_seq`
+  - [msshd/ca.py:AuthorizationDeny](../python/src/mssh/msshd/ca.py) — extract it
+  - [msshd/enforce_listener.py:249-264](../python/src/mssh/msshd/enforce_listener.py) — call `maybe_sync` on denies
+
+After both fixes, the per-connection flip works, and revocations
+propagate within the next CA call regardless of result.
+
+### Discovered scenarios that pass cleanly (don't re-test next round)
+
+C6 per-connection flip (now), C4 bypass-cert during CA outage,
+C10 corrupt-config rejection, all admin reads (status / next / list /
+audit). The new fixes in this round bring round-1's known-failing
+A2 (deny path) one step closer — denial still has Bug #1's cryptic
+client message, but the CA-side propagation is now correct.
+
