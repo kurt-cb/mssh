@@ -52,6 +52,13 @@ ready. Generated artifacts live in `./adhoc-keys/` and
 cat ./ADHOC_TEST_ENV.md      # auto-generated overview of the lab
 ```
 
+**If you open a second terminal** (e.g. for the operator-workstation
+commands in §3 below), `source ./adhoc-env.sh` there too. It exports
+the per-server IPs (`$acct_IP`, `$ca_IP`, …) and **container names**
+(`$acct_CONTAINER`, `$ca_CONTAINER`, …). The tutorial commands below
+use those variables rather than hardcoded names, because every lab
+gets a random prefix.
+
 ---
 
 ## 1. The three transports — see them side by side
@@ -126,17 +133,22 @@ Policy lives at the CA. alice's enrollment has access to the
 
 ```bash
 mssh_as alice sales whoami
-# → command exits non-zero with a denied message in stderr
+# → command exits non-zero with a generic stderr:
+#       mssh: server closed before sending ack
+#   (see design/openbugs/bug-01-cryptic-deny-message.md — the deny
+#    reason exists in the CA audit log but isn't yet propagated to
+#    the mssh client. Closed by future-ideas §21.)
 ```
 
-Now ask the CA why:
+The mssh client message is intentionally generic for v0.1.0; the
+real "why" is on the CA. Ask it:
 
 ```bash
-lxc exec mssh-adhoc-ca -- cat /var/log/mssh/audit.jsonl \
+lxc exec ${ca_CONTAINER} -- cat /var/log/mssh/audit.jsonl \
   | tail -1 | python3 -m json.tool
 ```
 
-You'll see a record with `decision: deny` and `denied_reason`
+You'll see a record with `decision: denied` and a `reason`
 pointing at a policy mismatch. **Every authorization call is in the
 audit log, allow or deny.**
 
@@ -144,7 +156,7 @@ For the operator's view of the same audit log:
 
 ```bash
 # From your operator workstation (the host, in this case):
-mssh-admin --ca-url https://$(lxc list mssh-adhoc-ca --format csv -c 4 | awk '{print $1}'):8443 \
+mssh-admin --ca-url https://${ca_IP}:8443 \
            --admin-cert ./adhoc-ca-creds/bootstrap-admin-cert.pem \
            --admin-key  ./adhoc-ca-creds/bootstrap-admin-key.pem \
            --ca-cert    ./adhoc-ca-creds/tls-ca-cert.pem \
@@ -165,7 +177,7 @@ The same workstation creds in §2 let you ask the CA what it knows:
 # Save the verbose flags into a config so you don't retype them:
 mkdir -p ~/.mssh-admin
 cat > ~/.mssh-admin/config <<EOF
-ca_url: https://$(lxc list mssh-adhoc-ca --format csv -c 4 | awk '{print $1}'):8443
+ca_url: https://${ca_IP}:8443
 admin_cert: $(pwd)/adhoc-ca-creds/bootstrap-admin-cert.pem
 admin_key:  $(pwd)/adhoc-ca-creds/bootstrap-admin-key.pem
 ca_cert:    $(pwd)/adhoc-ca-creds/tls-ca-cert.pem
@@ -213,13 +225,13 @@ override it per-server with `wrapper.yaml`:
 
 ```bash
 # Drop a template file onto the acct server:
-cat <<'EOF' | lxc file push - mssh-adhoc-acct/etc/mssh/banner.txt
+cat <<'EOF' | lxc file push - ${acct_CONTAINER}/etc/mssh/banner.txt
 ─── {server} ({group}) — owned by {owner} ───
 For access issues: contact #ops on Slack.
 EOF
 
 # Tell wrapper.yaml to use it:
-lxc exec mssh-adhoc-acct -- sh -c "cat >> /etc/mssh/wrapper.yaml" <<'EOF'
+lxc exec ${acct_CONTAINER} -- sh -c "cat >> /etc/mssh/wrapper.yaml" <<'EOF'
 
 banner:
   template_path: /etc/mssh/banner.txt
@@ -229,13 +241,23 @@ banner:
     owner: finance-ops
 EOF
 
-lxc exec mssh-adhoc-acct -- systemctl restart msshd
+lxc exec ${acct_CONTAINER} -- systemctl restart msshd
 
-# Connect and see it:
-mssh_as alice acct true 2>&1 | head -5
+# Verify the rendered banner on the server:
+lxc exec ${acct_CONTAINER} -- cat /var/lib/mssh/inner-sshd/banner
+# → ─── srv-acct (accounting) — owned by finance-ops ───
+#   For access issues: contact #ops on Slack.
 ```
 
-You'll see your banner just before alice's session establishes.
+**Caveat:** today the rendered banner is consumed by the *inner sshd*
+(which msshd's asyncssh client reads pre-auth) — the mssh CLIENT does
+not surface it to end users. See
+[design/openbugs/bug-11-banner-invisible-to-mssh.md](../design/openbugs/bug-11-banner-invisible-to-mssh.md);
+closed by future-ideas §21 (typed framing in the outer protocol gives
+mssh a banner channel).
+
+Operators verifying their template renders correctly use the
+`lxc exec ... cat /var/lib/mssh/inner-sshd/banner` form above.
 
 **What you're seeing in a real deployment:** simple per-server
 identity in front of every connection. Different teams' servers
@@ -247,7 +269,7 @@ not supported today — see
 Revert the change before moving on:
 
 ```bash
-lxc exec mssh-adhoc-acct -- sh -c \
+lxc exec ${acct_CONTAINER} -- sh -c \
   "sed -i '/^banner:/,/^$/d' /etc/mssh/wrapper.yaml \
    && systemctl restart msshd"
 ```
@@ -299,22 +321,26 @@ design is that this is a one-line revert.
 ```bash
 # Flip back to Phase 1 (fallback) just for the sales server. This is
 # what the per-server rollback in MIGRATION.md § 4.4 looks like.
-lxc exec mssh-adhoc-sales -- sh -c \
+lxc exec ${sales_CONTAINER} -- sh -c \
   "sed -i 's/^mode: enforce/mode: fallback/' /etc/mssh/wrapper.yaml \
    && systemctl restart msshd"
 
 # Now the other servers are still in enforce mode, but sales is
-# fallback. mssh users on sales drop back to authorized_keys-based
-# auth. Confirm:
+# fallback. Confirm:
 ssh_as_2200 bob sales whoami    # works (Phase 1 path)
-mssh_as bob sales whoami        # also works (mssh just passes
-                                # through fallback's transparent proxy)
+mssh_as bob sales whoami        # FAILS: TLS handshake error.
+#                                 mssh requires msshd terminating
+#                                 mTLS on the other end. In fallback,
+#                                 msshd is a raw TCP proxy — there's
+#                                 no TLS there. Users on a rolled-
+#                                 back server use raw ssh -p 2200
+#                                 (or port 22) instead.
 ```
 
 When you've fixed whatever was wrong, flip the single host back:
 
 ```bash
-lxc exec mssh-adhoc-sales -- sh -c \
+lxc exec ${sales_CONTAINER} -- sh -c \
   "sed -i 's/^mode: fallback/mode: enforce/' /etc/mssh/wrapper.yaml \
    && systemctl restart msshd"
 ```
@@ -331,26 +357,31 @@ change-management often spend weeks with some servers in each mode.
 
 ## 7. Inspect the CA's audit trail
 
-Every authorize call lands in the CA's audit log. For a real
-deployment-level look:
+Every authorize call lands in the CA's audit log. The raw JSON-Lines
+view is in the file itself:
 
 ```bash
-lxc exec mssh-adhoc-ca -- tail -20 /var/log/mssh/audit.jsonl \
-  | python3 -c 'import sys,json
-for line in sys.stdin:
-    e = json.loads(line)
-    if e.get("event") == "authorize":
-        print(f"{e.get(\"timestamp\")} {e.get(\"decision\",\"?\"):>6}"
-              f" {e.get(\"user\",\"?\"):>10} → {e.get(\"server\",\"?\")}"
-              f" ({e.get(\"denied_reason\") or \"ok\"})")'
+lxc exec ${ca_CONTAINER} -- tail -5 /var/log/mssh/audit.jsonl
 ```
 
-For the operator-grade view (the same data via the admin API):
+For a tabular summary via `jq` (preferred — the audit shape uses
+nested `identity.username` / `server.canonical_name`):
 
 ```bash
-# From the CA host. --decision filters; --limit caps the output.
-lxc exec mssh-adhoc-ca -- su - root-admin -c \
-    'mssh-admin audit --decision denied --limit 20'
+lxc exec ${ca_CONTAINER} -- cat /var/log/mssh/audit.jsonl | \
+    jq -r 'select(.type == "authorization") |
+           "\(.timestamp) \(.decision | ascii_upcase | .[0:6]) " +
+           "\(.identity.username // "?")\t-> \(.server.canonical_name // "?") " +
+           "(\(.reason // "ok"))"' | tail -10
+```
+
+For the operator-grade view (the same data via the admin API),
+using the host's `mssh-admin` against the lab CA (same setup as §3):
+
+```bash
+# From your operator workstation:
+mssh-admin audit --decision denied --limit 20
+# (uses ~/.mssh-admin/config from §3 above for the CA URL + creds)
 ```
 
 **What you're seeing in a real deployment:** the audit log is the
@@ -367,8 +398,14 @@ Desktop instead of typing them by hand, the `mssh-mcp` server
 exposes the read-only admin API over the Model Context Protocol.
 
 ```bash
-# in the same venv as mssh-admin:
-pip install 'mssh-admin[mcp]'
+# v0.1.0 alpha (no PyPI publish yet): install the mcp dep into the
+# same venv where mssh-admin lives. From the mssh repo root:
+.venv/bin/pip install 'mcp>=1.0'
+# mssh-mcp is already in /home/<you>/path/to/mssh/.venv/bin/ after
+# `make dev-install` — the [mcp] extra just gates that runtime dep.
+
+# Once we ship to PyPI, the one-liner will become:
+#     pip install 'mssh-admin[mcp]'
 ```
 
 Then register it with your MCP client. For Claude Code's mcp config:

@@ -1281,11 +1281,17 @@ def _write_env_sh(path: Path, *, ips: dict, artifacts_dir: Path) -> None:
     # checked-out source tree.
     src_dir = Path(__file__).resolve().parent.parent.parent / 'src'
     # Server name → IP. Use short names (acct, sales, hr, eng, ca).
+    # Also export the full container name so tutorials can use
+    # ${ca_CONTAINER} / ${acct_CONTAINER} etc. without hardcoding the
+    # `mssh-adhoc-<role>` pattern (which is wrong anyway — every lab
+    # gets a random prefix).
     server_env = []
     for s in SERVERS:
         short = s.canonical.replace('srv-', '')
         server_env.append(f'export {short}_IP={ips[s.container]}')
+        server_env.append(f'export {short}_CONTAINER={s.container}')
     server_env.append(f'export ca_IP={ips[CA_NAME]}')
+    server_env.append(f'export ca_CONTAINER={CA_NAME}')
 
     # User → key paths.
     user_env = []

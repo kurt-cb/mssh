@@ -328,12 +328,16 @@ server in the production group"* by calling the same admin endpoints
 `mcp` Python SDK is a heavy dep most operators don't want):
 
 ```bash
-# from a v0.1.0+ install
-pip install 'mssh-admin[mcp]'    # picks up the mcp SDK + mssh-mcp binary
+# v0.1.0 alpha — nothing is on PyPI yet, so install from the
+# repo's pre-built wheels:
+make pkg                                 # builds dist/*.whl
+.venv/bin/pip install dist/mssh_common-*.whl \
+                     dist/mssh_admin-*.whl \
+                     dist/mssh_ca-*.whl
+.venv/bin/pip install 'mcp>=1.0'        # the [mcp] extra's runtime dep
 
-# or from the adhoc lab / source tree
-make dev-install                  # then:
-pip install 'mssh-admin[mcp]'    # in the same venv
+# Once we publish to PyPI, this collapses to:
+#     pip install 'mssh-admin[mcp]'
 ```
 
 Verify the binary is on `$PATH`:

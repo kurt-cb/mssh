@@ -50,6 +50,12 @@ What you get:
 When the lab settles to a `adhoc>` prompt with **"SUCCESS — msshd
 adhoc lab is up at Phase 0"**, you're at the starting line.
 
+The shell that drops you in has `./adhoc-env.sh` sourced, which
+exports per-server `$acct_IP`, `$ca_IP`, … plus container names
+`$acct_CONTAINER`, `$ca_CONTAINER`, … (every lab gets a random
+prefix, so the names below use those variables instead of
+hardcoding).
+
 ```bash
 # Verify: alice can ssh to her server on port 22 with her key.
 ssh_as alice acct whoami
@@ -122,7 +128,7 @@ Even in fallback, the CA has metadata about every server you
 enrolled. From the CA host:
 
 ```bash
-lxc exec mssh-adhoc-ca -- su - root-admin -c 'mssh-admin status'
+lxc exec ${ca_CONTAINER} -- su - root-admin -c 'mssh-admin status'
 ```
 
 You'll see `✓` for "CA reachable", `✓` for "N servers enrolled",
@@ -195,15 +201,17 @@ Roll just that one host back to fallback while leaving the rest in
 enforce:
 
 ```bash
-lxc exec mssh-adhoc-sales -- sh -c \
+lxc exec ${sales_CONTAINER} -- sh -c \
   "sed -i 's/^mode: enforce/mode: fallback/' /etc/mssh/wrapper.yaml \
    && systemctl restart msshd"
 ```
 
-Now bob can still `ssh -p 2200` into sales (Phase 1 path), but
-`mssh bob@sales` no longer mediates through the CA on that host —
-msshd just proxies the connection to system sshd which uses
-authorized_keys.
+Now bob's `ssh -p 2200 bob@sales` (raw SSH) works again — msshd
+is back to being a transparent proxy. **But `mssh bob@sales` no
+longer works on that server** — mssh requires msshd to terminate
+mTLS, and in fallback mode there's no TLS terminator. Users on a
+rolled-back server use raw ssh (port 22 or port 2200) until the
+host returns to enforce.
 
 To flip everything back uniformly:
 
