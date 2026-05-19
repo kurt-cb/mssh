@@ -27,117 +27,110 @@ make dev-install        # installs mssh* wheels editable into .venv
 
 ---
 
-## 0. Start the lab at Phase 0 (no mssh yet)
+## 0. Start with a fully-provisioned lab (default Phase 2)
 
-The same `setup_adhoc.sh` you use elsewhere accepts a phase argument
-that tells it where to stop. Phase 0 = "vanilla sshd, nothing else."
+For the WALKTHROUGH to work, we want the lab's flip helpers
+(`flip_to_fallback`, `flip_to_enforce`) on the CA. Those scripts are
+installed by the test framework at Phase-2 setup, along with all the
+per-user PKI and per-server mTLS material the migration requires.
 
 ```bash
 cd python
-./setup_adhoc.sh msshd 0
+./setup_adhoc.sh          # default Phase 2 — installs everything
 ```
 
-What you get:
-
+What you get when the `adhoc>` prompt drops:
   - 5 LXC containers (CA, acct, sales, hr, eng)
-  - Unix accounts for every user (`alice`, `bob`, …) on every server
-  - SSH keys generated **inside each user's primary container** (the
-    realistic onboarding path)
-  - **Vanilla sshd on port 22** on every server
-  - **No msshd anywhere yet.** No CA configured beyond the user-cert
-    bootstrap. No port 2200 listener.
+  - msshd in enforce mode on each server (the destination state)
+  - Helper scripts on the CA: `flip-to-fallback.sh`,
+    `flip-to-enforce.sh`, `flip-to-per-connection.sh`
+  - Per-user PKI material in `./adhoc-keys/` so the host can
+    `mssh user@server` as any user
 
-When the lab settles to a `adhoc>` prompt with **"SUCCESS — msshd
-adhoc lab is up at Phase 0"**, you're at the starting line.
+The shell has `./adhoc-env.sh` sourced, exposing per-server
+`$acct_IP`, `$ca_IP`, …, container names `$acct_CONTAINER`,
+`$ca_CONTAINER`, …, and helper functions `mssh_as`, `ssh_as`,
+`ssh_as_2200`, `flip_to_fallback`, `flip_to_enforce`.
 
-The shell that drops you in has `./adhoc-env.sh` sourced, which
-exports per-server `$acct_IP`, `$ca_IP`, … plus container names
-`$acct_CONTAINER`, `$ca_CONTAINER`, … (every lab gets a random
-prefix, so the names below use those variables instead of
-hardcoding).
+> **Why not start at Phase 1?** `./setup_adhoc.sh msshd 1` STOPS at
+> Phase 1 — useful for testing the "install msshd in fallback" path
+> in isolation but doesn't enroll users or install the flip helpers.
+> To walk the full migration STORY interactively, the Phase-2 lab
+> + flip helpers is what you want; the helpers can take the lab BACK
+> to Phase 1 state at any moment via `flip_to_fallback`.
+
+### Verify the start state
+
+We're at Phase 2 (enforce). Three transports exist:
 
 ```bash
-# Verify: alice can ssh to her server on port 22 with her key.
-ssh_as alice acct whoami
-# → alice
-
-# Verify: there's NO mssh wrapper listening on port 2200 yet.
-ssh -p 2200 -i adhoc-keys/alice alice@$acct_IP whoami 2>&1
-# → Connection refused (expected — msshd isn't installed yet)
+ssh_as alice acct whoami         # → alice  (Phase 0 path, always works)
+ssh_as_2200 alice acct whoami    # FAILS in enforce — msshd terminates mTLS on 2200
+mssh_as alice acct whoami        # → alice  (Phase 2 path, CA mediated)
 ```
-
-This is what a typical operator world looks like before they pick
-up mssh: every server has sshd, every user has an `authorized_keys`
-entry, no central oracle.
 
 ---
 
-## 1. Move to Phase 1 — drop msshd in fallback
+## 1. Go backward to Phase 1 (msshd in fallback)
 
-`mssh-admin server add` enrolls each server at the CA — but in
-**fallback** mode msshd doesn't *use* the CA cert for authorization
-yet. It just listens on port 2200 and forwards every connection
-through to the existing sshd on port 22. The point of this phase is
-to **verify msshd is in the path** without changing any auth.
-
-The lab's helper does this for every server in one shot:
+To see what Phase 1 looks like from the operator's perspective, run
+`flip_to_fallback` — it rewrites each server's `wrapper.yaml` to
+`mode: fallback` and restarts msshd.
 
 ```bash
-# Move to Phase 1 (msshd in fallback on every server).
 flip_to_fallback
+# → 4 servers OK (fallback)
 ```
 
-Behind the scenes this:
-  1. Enrolls every server at the CA (`mssh-admin server add`)
-  2. Provisions each server with its mTLS cert + key
-  3. Writes a `wrapper.yaml` with `mode: fallback`
-  4. Starts msshd on port 2200
-
-Now both transports work:
+Now both transports work because msshd is a TCP proxy:
 
 ```bash
-# Original sshd on 22, unchanged.
-ssh_as alice acct whoami         # → alice
-
-# msshd on 2200, transparent proxy to sshd:22.
-ssh_as_2200 alice acct whoami    # → alice (proxied through msshd)
+ssh_as alice acct whoami         # → alice  (Phase 0 path)
+ssh_as_2200 alice acct whoami    # → alice  (msshd:2200 transparently
+                                 #          proxies to sshd:22)
+mssh_as alice acct whoami        # FAILS: TLS handshake error
+#                                  (msshd in fallback doesn't
+#                                  terminate TLS — mssh requires it)
 ```
 
-**What's worth noticing:**
+**What an operator sees here in production:** users' existing
+`ssh` continues to work. The new `ssh -p 2200` ALSO works. The
+operator hasn't changed any auth yet — `authorized_keys` is still
+the source of truth. The lab's flip just made msshd a TCP proxy
+that's invisible to existing flows.
 
-  - The user's SSH key was good enough for both paths. The
-    `authorized_keys` on the server still authorizes them.
-  - msshd in fallback mode is a TCP proxy. It does not call the CA
-    on the auth path. If you stopped the CA right now, both ssh
-    paths would still work.
-  - This is the "no-risk wiring check" phase. You've proven the
-    gateway is listening, accepting TLS, and forwarding traffic.
+This is the "no-risk wiring check" phase. In real ops, you stay
+here for days/weeks while verifying:
 
-In production, an operator stays in this phase until they're
-confident:
-  - msshd starts reliably under systemd
+  - msshd starts reliably under systemd on every host
   - The port-2200 firewall path is open
   - Users' clients can reach port 2200 (DNS, NAT, etc.)
   - msshd doesn't crash under load
 
 ---
 
-## 2. Inspect the CA at this point
+## 2. Inspect the CA's state during Phase 1
 
 Even in fallback, the CA has metadata about every server you
-enrolled. From the CA host:
+enrolled. From the operator workstation (host):
 
 ```bash
-lxc exec ${ca_CONTAINER} -- su - root-admin -c 'mssh-admin status'
+mssh-admin --ca-url https://${ca_IP}:8443 \
+           --admin-cert ./python/adhoc-ca-creds/bootstrap-admin-cert.pem \
+           --admin-key  ./python/adhoc-ca-creds/bootstrap-admin-key.pem \
+           --ca-cert    ./python/adhoc-ca-creds/tls-ca-cert.pem \
+           status
 ```
 
 You'll see `✓` for "CA reachable", `✓` for "N servers enrolled",
-`✗` for "every enrolled user has a key" (none yet — we haven't
-enrolled users at the CA in fallback, only servers).
+and `✓` for "users enrolled with keys + policies" — because the
+Phase-2 setup already did all of that. msshd is just not USING the
+CA to authorize sessions right now (it's in fallback).
 
-This is the operator's "I have a CA but it's not making decisions
-yet" state. Audit logs are quiet; the audit-log lookup returns
-nothing because no authorize calls have happened.
+> In the real migration this is where you do `mssh-admin server add`
+> + `mssh-admin user add` for each server and user — the lab front-
+> loaded that work in Phase 2 setup. See
+> [MIGRATION.md](MIGRATION.md) for the full enrollment sequence.
 
 ---
 
