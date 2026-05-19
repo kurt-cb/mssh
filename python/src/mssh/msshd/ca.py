@@ -50,6 +50,11 @@ class AuthorizationDeny:
     reason: str
     detail: str = ''
     http_status: int = 0
+    # CA's current CRL sequence at the time it denied. Carried so msshd's
+    # CRL sync can advance even when only denials happen — otherwise
+    # revocations stall indefinitely on small fleets where the cache
+    # mostly hits.
+    current_crl_seq: int = 0
 
 
 @dataclass
@@ -188,10 +193,15 @@ def _parse_result(result: AuthorizeResult) -> AuthorizationResult:
             current_crl_seq=current_crl_seq)
 
     if status == 'denied':
+        try:
+            deny_crl_seq = int(body.get('current_crl_seq') or 0)
+        except (TypeError, ValueError):
+            deny_crl_seq = 0
         return AuthorizationDeny(
             reason=str(body.get('reason', 'unspecified')),
             detail=str(body.get('detail', '')),
             http_status=result.http_status,
+            current_crl_seq=deny_crl_seq,
         )
 
     return AuthorizationError(

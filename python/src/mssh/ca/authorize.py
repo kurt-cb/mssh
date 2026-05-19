@@ -56,7 +56,8 @@ def _parse_iso8601(ts: str) -> _dt.datetime:
 
 
 def _deny(audit: AuditLog, reason: str, detail: str, *,
-          status: int = 403, extra_audit: dict | None = None) -> tuple[int, dict]:
+          status: int = 403, extra_audit: dict | None = None,
+          current_crl_seq: int | None = None) -> tuple[int, dict]:
     audit_entry = {
         'timestamp': _now().strftime('%Y-%m-%dT%H:%M:%SZ'),
         'type': 'authorization',
@@ -67,7 +68,13 @@ def _deny(audit: AuditLog, reason: str, detail: str, *,
     if extra_audit:
         audit_entry.update(extra_audit)
     audit.write(audit_entry)
-    return status, {'status': 'denied', 'reason': reason, 'detail': detail}
+    body: dict = {'status': 'denied', 'reason': reason, 'detail': detail}
+    # Carry current_crl_seq even on denials so msshd's CRL sync still
+    # advances when only denials are happening (otherwise revocations
+    # stall indefinitely on small fleets where caches mostly hit).
+    if current_crl_seq is not None:
+        body['current_crl_seq'] = current_crl_seq
+    return status, body
 
 
 def _protocol_supports_inner_config(client_proto: str) -> bool:
@@ -102,13 +109,17 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
 
     ``server_subject`` is the CN from the caller's mTLS cert. Returns (http_status, json).
     """
+    # Pre-compute the current CRL seq so every deny path can carry it.
+    # This lets msshd's CRL sync advance on denials, not just grants.
+    crl_seq = ctx.crl.current_seq() if ctx.crl is not None else None
+
     # 1. Server identification.
     server = ctx.enrollment.find_server_by_mtls_subject(server_subject)
     if server is None:
         return _deny(
             ctx.audit, 'unknown_server',
             f'mtls subject {server_subject!r} not enrolled',
-            status=401)
+            status=401, current_crl_seq=crl_seq)
 
     # 2. Parse the request body.
     try:
@@ -156,7 +167,8 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
         return _deny(
             ctx.audit, 'clock_drift',
             f'timestamp drift {drift:.1f}s exceeds limit '
-            f'{ctx.timestamp_drift_seconds}s')
+            f'{ctx.timestamp_drift_seconds}s',
+            current_crl_seq=crl_seq)
 
     # 3. Parse the identity.
     try:
@@ -167,14 +179,14 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
     if isinstance(parsed, CertIdentity):
         # Validate trust chain.
         if parsed.signature_key_fingerprint not in ctx.identity_trust_root_fingerprints:
-            return _deny(ctx.audit, 'invalid_identity_cert',
+            return _deny(ctx.audit, 'invalid_identity_cert', current_crl_seq=crl_seq, detail=
                          'signing CA not in identity trust roots')
         now_s = int(_now().timestamp())
         if parsed.valid_after and now_s < parsed.valid_after:
-            return _deny(ctx.audit, 'invalid_identity_cert',
+            return _deny(ctx.audit, 'invalid_identity_cert', current_crl_seq=crl_seq, detail=
                          'identity cert not yet valid')
         if parsed.valid_before and now_s > parsed.valid_before:
-            return _deny(ctx.audit, 'invalid_identity_cert',
+            return _deny(ctx.audit, 'invalid_identity_cert', current_crl_seq=crl_seq, detail=
                          'identity cert expired')
         fingerprint = parsed.fingerprint
         subject_pubkey_blob = parsed.public_key_blob
@@ -192,7 +204,8 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
         return _deny(
             ctx.audit, 'unknown_identity',
             f'fingerprint {fingerprint} not enrolled',
-            extra_audit={'identity': {'fingerprint': fingerprint}})
+            extra_audit={'identity': {'fingerprint': fingerprint}},
+            current_crl_seq=crl_seq)
 
     # 5. Policy evaluation.
     result = evaluate(user, server, source_ip, ts, requested_channels,
@@ -204,7 +217,8 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
                 'identity': {'fingerprint': fingerprint, 'username': user.username},
                 'server': {'canonical_name': server.name},
                 'connection': {'source_ip': source_ip, 'source_port': source_port},
-            })
+            },
+            current_crl_seq=crl_seq)
 
     # 6. Mint cert.
     not_before = _now()

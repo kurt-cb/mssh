@@ -254,6 +254,14 @@ class EnforceListener:
                 log.info('[%s] CA denied: %s (%s) — invalidating cache',
                          conn_id, result.reason, result.detail)
                 self.authz_cache.invalidate(principal)
+                # Denial responses also carry current_crl_seq — propagate
+                # it so revocations don't stall on small fleets where
+                # only deny traffic happens to hit the CA.
+                if result.current_crl_seq:
+                    self._last_known_ca_crl_seq = max(
+                        self._last_known_ca_crl_seq, result.current_crl_seq)
+                    if self.crl_sync is not None:
+                        self.crl_sync.maybe_sync(result.current_crl_seq)
                 await _close(writer)
                 return
             if isinstance(result, AuthorizationError):
