@@ -63,6 +63,24 @@ def _write_ack(writer: asyncio.StreamWriter, *,
                   + b'\n')
 
 
+class _BannerCapturingClient(asyncssh.SSHClient):
+    """Captures the inner sshd's pre-auth banner so msshd can forward
+    it to the mssh client as a BANNER frame in v1.1.
+
+    asyncssh delivers the banner to ``SSHClient.auth_banner_received``;
+    we stash it on a list the outer relay drains after session
+    creation. In v1.0 (no framing) the banner is just dropped — the
+    mssh client has no channel to display it on anyway (Bug #11).
+    """
+
+    def __init__(self) -> None:
+        self.banner_chunks: list[str] = []
+
+    def auth_banner_received(self, msg: str, lang: str) -> None:  # noqa: ARG002
+        if msg:
+            self.banner_chunks.append(msg)
+
+
 class _OuterRelay(asyncssh.SSHClientSession):
     """Relays inner session stdout/stderr to the outer writer.
 
@@ -207,6 +225,7 @@ async def proxy_to_inner_ssh(
         return
     known_hosts_tuple = ([trusted_host_key], [], [])
 
+    banner_client = _BannerCapturingClient()
     try:
         conn = await asyncio.wait_for(
             asyncssh.connect(
@@ -215,6 +234,7 @@ async def proxy_to_inner_ssh(
                 client_keys=[(user_private_key, user_cert)],
                 known_hosts=known_hosts_tuple,
                 keepalive_interval=0,
+                client_factory=lambda: banner_client,
             ),
             timeout=10.0,
         )
@@ -231,6 +251,17 @@ async def proxy_to_inner_ssh(
     except (ConnectionResetError, BrokenPipeError, OSError):
         conn.close()
         return
+
+    # ---- 3.5: forward any pre-auth banner to the mssh client ----
+    # In v1.0 (no framing) the mssh client has no channel for this,
+    # so we drop it. v1.1 sends it before any STDOUT.
+    if framed and banner_client.banner_chunks:
+        banner_text = ''.join(banner_client.banner_chunks)
+        try:
+            outer_writer.write(frame.encode_frame(
+                frame.BANNER, banner_text.encode('utf-8')))
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            pass
 
     # ---- 4. dispatch ----
     async with conn:

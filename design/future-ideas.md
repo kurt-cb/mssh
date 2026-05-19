@@ -1075,10 +1075,19 @@ wall-clock time, and an estimated per-server / per-user effort.
 
 ## 21. Protocol v1.1 — typed framing for the post-ack stream
 
-**Status:** Design landed at
-[design/notes-protocol-v1.1.md](notes-protocol-v1.1.md). Implementation
-pending — once approved, the protocol bump + 5-bug-close PR.
-Surfaced during the 2026-05-19 adhoc-testing round.
+**Status:** **LANDED.** Implementation across phases A-D in commits
+c12b1fa, ee1526a, c50dc9c, and the banner-forwarding follow-up
+(below). All 5 target bugs verified closed end-to-end against the
+adhoc lab. Design doc at
+[notes-protocol-v1.1.md](notes-protocol-v1.1.md) captures the wire
+format + state machines.
+
+Bugs closed (now in `archive/closedbugs/`):
+  - #1 cryptic deny → actionable
+  - #2 exit code propagation
+  - #3 stdin EOF doesn't hang
+  - #4 stdout/stderr split
+  - #11 banner reaches the mssh client
 
 ### Idea
 

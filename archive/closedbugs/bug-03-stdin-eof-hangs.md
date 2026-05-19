@@ -1,6 +1,6 @@
 # Bug #3 — stdin is not forwarded to the remote
 
-**Status:** OPEN.
+**Status:** CLOSED via protocol v1.1 typed framing (future-ideas §21). Implementation: commits c12b1fa, ee1526a, c50dc9c. Verified end-to-end against lab claude-e69a69d7.
 
 _Originally tracked in `adhoc-bugs.md` (rounds 1+2, 2026-05-18 / 2026-05-19)._
 

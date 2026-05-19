@@ -47,6 +47,9 @@ echo
 start_ts=$(date +%s)
 for c in "${CONTAINERS[@]}"; do
     printf '  %-40s ' "$c"
+    # Clear any stale wheels from prior redeploys so pip's resolver
+    # doesn't see conflicting versions of the same package.
+    lxc exec "$c" -- rm -rf /tmp/mssh-wheels
     lxc exec "$c" -- mkdir -p /tmp/mssh-wheels
     for w in "${WHEELS[@]}"; do
         lxc file push --quiet "$w" "$c/tmp/mssh-wheels/$(basename "$w")"
@@ -62,9 +65,11 @@ for c in "${CONTAINERS[@]}"; do
     lxc exec "$c" -- sh -c "pip install $PIP_FLAGS /tmp/mssh-wheels/*.whl"
 
     # Restart services that exist (msshd on servers; mssh-ca on the CA host).
+    # `systemctl is-enabled` skips static / non-enabled units, which the
+    # lab uses, so check for the unit file directly instead.
     for svc in msshd mssh-ca; do
-        if lxc exec "$c" -- systemctl is-enabled "$svc" >/dev/null 2>&1; then
-            lxc exec "$c" -- systemctl restart "$svc"
+        if lxc exec "$c" -- test -f "/etc/systemd/system/$svc.service" 2>/dev/null; then
+            lxc exec "$c" -- systemctl restart "$svc" 2>/dev/null || true
         fi
     done
     echo "ok"
