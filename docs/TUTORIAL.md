@@ -148,7 +148,7 @@ mssh-admin --ca-url https://$(lxc list mssh-adhoc-ca --format csv -c 4 | awk '{p
            --admin-cert ./adhoc-ca-creds/bootstrap-admin-cert.pem \
            --admin-key  ./adhoc-ca-creds/bootstrap-admin-key.pem \
            --ca-cert    ./adhoc-ca-creds/tls-ca-cert.pem \
-           audit --result denied
+           audit --decision denied
 ```
 
 **What you're seeing in a real deployment:** the kind of inquiry an

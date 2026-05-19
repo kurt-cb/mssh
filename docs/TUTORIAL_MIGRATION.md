@@ -160,12 +160,9 @@ After this, the transports diverge:
 # Phase 0 path (port 22, the operator's existing sshd):
 ssh_as alice acct whoami         # → alice  (always works — break-glass)
 
-# Phase 1 path (port 2200, msshd in fallback proxying to sshd:22):
-ssh_as_2200 alice acct whoami    # → still works (msshd in enforce
-                                 # mode still allows fallback-style
-                                 # ssh through if the user has the
-                                 # underlying authorized_keys entry —
-                                 # see operations.md for nuance)
+# Phase 1 path (port 2200 in fallback mode) NO LONGER WORKS — msshd
+# now terminates mTLS on 2200 and rejects raw ssh:
+ssh_as_2200 alice acct whoami    # → "Connection closed by ... port 2200"
 
 # Phase 2 path (port 2200, msshd in enforce mode, CA call per session):
 mssh_as alice acct whoami        # → alice  (CA mediated)
@@ -173,6 +170,11 @@ mssh_as alice acct whoami        # → alice  (CA mediated)
 # Phase 2, denied: alice has no policy for srv-sales.
 mssh_as alice sales whoami       # → exits non-zero, "denied" in stderr
 ```
+
+The fallback transport stops accepting raw SSH on port 2200 as soon
+as you flip to enforce — port 2200 now speaks mTLS+JSON, and only the
+`mssh` client knows how to. Port 22 (Phase 0) stays open as the
+break-glass path.
 
 **What you're seeing in a real deployment:**
   - Users start using `mssh user@host` (not `ssh`).
