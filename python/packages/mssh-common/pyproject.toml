@@ -1,0 +1,38 @@
+# mssh-common — shared library code used by every mssh wheel.
+#
+# Ships: mssh.identity (parse SSH pubkey/cert blobs), mssh.shim
+# (the "call the CA" library), mssh.akc_shim (OpenSSH AKC entry),
+# mssh._protocol (PROTOCOL_VERSION constant), mssh._version
+# (regenerated at build time by setuptools_scm).
+#
+# Everything else (mssh, msshd, mssh-ca, mssh-admin) depends on
+# this. There is NO mssh/__init__.py anywhere — the mssh.* namespace
+# is a PEP 420 implicit namespace, so each wheel contributes its
+# own subpackages without colliding.
+
+[build-system]
+requires = ["setuptools>=68", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mssh-common"
+dynamic = ["version"]
+description = "Runtime, CA-mediated SSH authorization — shared library."
+authors = [{name = "Kurt Godwin"}]
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+dependencies = [
+    "cryptography>=41.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["mssh*"]
+namespaces = true
+
+[tool.setuptools_scm]
+# pyproject.toml lives at python/packages/mssh-common/, so the
+# repo root is three levels up.
+root = "../../.."
+version_file = "src/mssh/_version.py"
+fallback_version = "0.0.0+local"

@@ -75,7 +75,7 @@ CA_PORT     = 8443
 # ---------------------------------------------------------------------------
 
 def _gen_ed25519(host_dir: Path, name: str, comment: str) -> dict:
-    from mssh.ca.identity_parser import sha256_fingerprint
+    from mssh.identity import sha256_fingerprint
     priv = host_dir / name
     if priv.exists():
         priv.unlink()

@@ -187,7 +187,7 @@ def _generate_user_keys(usernames: list[str], outdir: Path) -> dict[str, _UserKe
         pub_line = (outdir / f'id_{u}.pub').read_text().strip()
         parts = pub_line.split()
         blob = base64.b64decode(parts[1])
-        from mssh.ca.identity_parser import sha256_fingerprint
+        from mssh.identity import sha256_fingerprint
         out[u] = _UserKey(
             username=u, priv_path=str(priv),
             pub_blob=blob, pub_openssh=pub_line,

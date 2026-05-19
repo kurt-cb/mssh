@@ -1,0 +1,47 @@
+# mssh-admin — operator CLI + optional MCP server.
+#
+# Ships: mssh.admin.* (the CLI) and mssh.mcp.* (the Model Context
+# Protocol server, behind the [mcp] extra so the heavyweight mcp SDK
+# is opt-in).
+#
+# Depends on mssh-ca because `mssh-admin init` calls
+# mssh.ca.cert_minter.bootstrap_ca to generate a fresh CA — that's
+# the operator-side init path. Operator workstations typically install
+# both anyway.
+
+[build-system]
+requires = ["setuptools>=68", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mssh-admin"
+dynamic = ["version"]
+description = "mssh — operator management CLI."
+authors = [{name = "Kurt Godwin"}]
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+dependencies = [
+    "mssh-common",
+    "mssh-ca",
+    "click>=8.0",
+    "requests>=2.31",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0"]
+
+[project.scripts]
+mssh-admin = "mssh.admin.main:cli"
+# Exposes the CA's read-only admin API over MCP. Requires `pip install
+# mssh-admin[mcp]`.
+mssh-mcp   = "mssh.mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["mssh*"]
+namespaces = true
+
+[tool.setuptools_scm]
+root = "../../.."
+fallback_version = "0.0.0+local"

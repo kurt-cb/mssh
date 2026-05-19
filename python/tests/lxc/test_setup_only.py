@@ -191,7 +191,7 @@ def _keygen_in_container(*, container: str, username: str, tool: str,
     with both ``ssh`` and ``dbclient``. The public-key line is extracted
     with ``dropbearkey -y``.
     """
-    from mssh.ca.identity_parser import sha256_fingerprint
+    from mssh.identity import sha256_fingerprint
 
     _ensure_unix_account(container, username)
     home_ssh = f'/home/{username}/.ssh'

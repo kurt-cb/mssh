@@ -75,7 +75,8 @@ async def _run(cfg: WrapperConfig) -> int:
 async def _run_enforce(cfg: WrapperConfig) -> int:
     # Lazy imports — enforce mode pulls in asyncssh + cryptography
     # heavy paths only when needed.
-    from .. import PROTOCOL_VERSION, __version__ as MSSHD_VERSION
+    from mssh._protocol import PROTOCOL_VERSION
+    from mssh._version import __version__ as MSSHD_VERSION
     from .authz_cache import AuthzCache
     from .ca import WrapperCAClient
     from .config import INNER_MODE_PER_CONNECTION

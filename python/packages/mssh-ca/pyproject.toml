@@ -1,0 +1,33 @@
+# mssh-ca — the CA server (Flask + mTLS).
+#
+# Ships: mssh.ca.* (server, authorize, cert_minter, policy, audit, crl,
+# templates, render, ...). Operators run this on the CA host(s).
+
+[build-system]
+requires = ["setuptools>=68", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mssh-ca"
+dynamic = ["version"]
+description = "mssh — central CA service."
+authors = [{name = "Kurt Godwin"}]
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+dependencies = [
+    "mssh-common",
+    "flask>=3.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+mssh-ca = "mssh.ca.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["mssh*"]
+namespaces = true
+
+[tool.setuptools_scm]
+root = "../../.."
+fallback_version = "0.0.0+local"

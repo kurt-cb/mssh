@@ -25,7 +25,7 @@ from . import cert_minter
 from .audit import AuditLog
 from .config import CAConfig
 from .enrollment import Enrollment
-from .identity_parser import sha256_fingerprint
+from ..identity import sha256_fingerprint
 
 
 log = logging.getLogger('mssh-ca')

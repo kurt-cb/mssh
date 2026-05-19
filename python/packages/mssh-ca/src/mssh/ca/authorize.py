@@ -12,13 +12,13 @@ from typing import Any
 
 from cryptography.hazmat.primitives import serialization
 
-from .. import PROTOCOL_VERSION
+from mssh._protocol import PROTOCOL_VERSION
 from . import render as _render
 from . import templates as _templates
 from .audit import AuditLog
 from .cert_minter import mint_authorization_cert
 from .enrollment import Enrollment
-from .identity_parser import (CertIdentity, IdentityParseError, PubkeyIdentity,
+from ..identity import (CertIdentity, IdentityParseError, PubkeyIdentity,
                               parse_identity)
 from .policy import evaluate
 

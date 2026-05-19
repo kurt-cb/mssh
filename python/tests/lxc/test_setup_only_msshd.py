@@ -169,7 +169,7 @@ def _keygen_in_container(container: str, username: str,
     """Generate the user's Ed25519 keypair INSIDE their primary container,
     then pull both halves to ``artifacts_dir``.
     """
-    from mssh.ca.identity_parser import sha256_fingerprint
+    from mssh.identity import sha256_fingerprint
 
     _ensure_unix_account(container, username)
     priv = f'/home/{username}/.ssh/id_ed25519'

@@ -8,7 +8,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 
-from mssh.ca.identity_parser import (parse_pubkey_blob, sha256_fingerprint)
+from mssh.identity import (parse_pubkey_blob, sha256_fingerprint)
 from mssh.msshd.enforce_listener import _ssh_pubkey_blob_from_cert
 
 

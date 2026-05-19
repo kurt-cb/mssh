@@ -15,7 +15,7 @@ from . import cert_minter
 from . import templates as _templates
 from .audit import AuditLog
 from .enrollment import Admin, Enrollment, EnrollmentError, KeyBinding
-from .identity_parser import (CertIdentity, IdentityParseError, PubkeyIdentity,
+from ..identity import (CertIdentity, IdentityParseError, PubkeyIdentity,
                               parse_identity)
 from .render import TemplateError, validate_template
 

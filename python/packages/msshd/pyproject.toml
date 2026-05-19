@@ -1,0 +1,38 @@
+# msshd — server-side gateway daemon.
+#
+# Ships: mssh.msshd (the daemon + msshd-admin subcommand), mssh.debug_sshd
+# (debug-only AsyncSSH server — not a production tier, but bundled with
+# msshd so the same artifact carries both).
+
+[build-system]
+requires = ["setuptools>=68", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "msshd"
+dynamic = ["version"]
+description = "mssh — server-side gateway daemon (msshd)."
+authors = [{name = "Kurt Godwin"}]
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+dependencies = [
+    "mssh-common",
+    "asyncssh>=2.14",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+msshd        = "mssh.msshd.msshd:main"
+msshd-admin  = "mssh.msshd.admin:main"
+# Debug-only AsyncSSH server — useful for isolating CA / policy issues
+# from the gateway machinery. Not a production tier.
+mssh-debug-sshd = "mssh.debug_sshd.ssh_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["mssh*"]
+namespaces = true
+
+[tool.setuptools_scm]
+root = "../../.."
+fallback_version = "0.0.0+local"

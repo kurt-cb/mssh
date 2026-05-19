@@ -64,7 +64,7 @@ class TestKey:
     def generate(cls, comment: str = 'test') -> 'TestKey':
         key = ed25519.Ed25519PrivateKey.generate()
         blob = ed25519_pubkey_blob(key.public_key())
-        from mssh.ca.identity_parser import sha256_fingerprint
+        from mssh.identity import sha256_fingerprint
         return cls(
             private=key,
             public_blob=blob,

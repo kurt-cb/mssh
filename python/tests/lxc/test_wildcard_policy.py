@@ -22,7 +22,7 @@ pytestmark = pytest.mark.lxc
 
 
 def _gen_user_key(tmp_path, name: str) -> dict:
-    from mssh.ca.identity_parser import sha256_fingerprint
+    from mssh.identity import sha256_fingerprint
     priv = tmp_path / f'id_{name}'
     subprocess.run(['ssh-keygen', '-t', 'ed25519', '-f', str(priv),
                     '-N', '', '-C', f'{name}@wildcard-test'],
