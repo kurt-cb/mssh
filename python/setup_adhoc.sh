@@ -45,8 +45,10 @@ case "$TIER" in
         ;;
 esac
 PHASE="${2:-2}"
-RND=$(openssl rand -base64 10)
-PREFIX=$USER-${RND:0:4}
+# Hex (not base64) so the prefix never includes '+' / '/' / '=', which
+# lxc rejects in container names.
+RND=$(openssl rand -hex 4)
+PREFIX=$USER-${RND}
 
 echo "Provisioning $TIER lab via $TEST_FILE (prefix=$PREFIX)"
 pytest "$TEST_FILE" -s --log-file=pytest.log --log-cli-level=$LEVEL -v \
