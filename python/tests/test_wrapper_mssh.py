@@ -136,6 +136,7 @@ def test_build_header_shape():
         'cols': None,
         'env': None,
         'principal_hint': 'alice',
+        'supports_framing': True,
     }
 
 
@@ -169,15 +170,30 @@ def test_build_header_too_large():
 
 
 def test_parse_ack_ok():
-    ok, reason = parse_ack(b'{"v":1,"ok":true}\n')
+    ok, reason, framing = parse_ack(b'{"v":1,"ok":true}\n')
     assert ok is True
     assert reason == ''
+    assert framing is False  # v1.0 server doesn't set framing flag
 
 
 def test_parse_ack_denied_with_reason():
-    ok, reason = parse_ack(b'{"v":1,"ok":false,"reason":"unknown_identity"}\n')
+    ok, reason, framing = parse_ack(
+        b'{"v":1,"ok":false,"reason":"unknown_identity"}\n')
     assert ok is False
     assert reason == 'unknown_identity'
+    assert framing is False
+
+
+def test_parse_ack_ok_with_framing():
+    ok, reason, framing = parse_ack(b'{"v":1,"ok":true,"framing":true}\n')
+    assert ok is True
+    assert framing is True
+
+
+def test_parse_ack_ok_framing_false_explicit():
+    ok, reason, framing = parse_ack(b'{"v":1,"ok":true,"framing":false}\n')
+    assert ok is True
+    assert framing is False
 
 
 def test_parse_ack_unsupported_version():

@@ -35,6 +35,7 @@ import logging
 import os
 import select
 import shutil
+import signal
 import socket
 import ssl
 import sys
@@ -43,6 +44,8 @@ import tty
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+from mssh import frame
 
 
 log = logging.getLogger('mssh')
@@ -184,6 +187,11 @@ def build_header(target: Target, *,
         # The wrapper doesn't trust this — it derives the principal
         # from the mTLS cert — but it's useful in audit logs.
         'principal_hint': target.user,
+        # v1.1 negotiation: client offers framed post-ack. Server's
+        # ack echoes back `framing: true` only if it'll honor it; a
+        # v1.0 msshd ignores the flag and the client falls back to
+        # raw byte pump. See design/notes-protocol-v1.1.md.
+        'supports_framing': True,
     }
     if bypass_cert_b64 is not None:
         body['bypass_cert'] = bypass_cert_b64
@@ -194,8 +202,13 @@ def build_header(target: Target, *,
     return encoded
 
 
-def parse_ack(line: bytes) -> tuple[bool, str]:
-    """Parse a server ack line into (ok, reason). Reason is empty if ok."""
+def parse_ack(line: bytes) -> tuple[bool, str, bool]:
+    """Parse a server ack line into (ok, reason, framing).
+
+    ``framing`` is True iff the server's ack explicitly opted into
+    v1.1 framed mode. A v1.0 msshd never sets this flag; client
+    falls back to the raw byte pump in that case.
+    """
     try:
         body = json.loads(line.decode('utf-8'))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
@@ -204,9 +217,10 @@ def parse_ack(line: bytes) -> tuple[bool, str]:
         raise ValueError(f'malformed ack: not an object: {body!r}')
     if int(body.get('v', 0)) != PROTOCOL_VERSION:
         raise ValueError(f'unsupported ack version: {body.get("v")}')
+    framing = bool(body.get('framing', False))
     if body.get('ok'):
-        return True, ''
-    return False, str(body.get('reason', '(no reason given)'))
+        return True, '', framing
+    return False, str(body.get('reason', '(no reason given)')), framing
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +308,7 @@ def run_session(target: Target, ident: Identity, *,
             print(f'mssh: {e}', file=sys.stderr)
             return 6
         try:
-            ok, reason = parse_ack(ack_line)
+            ok, reason, framing = parse_ack(ack_line)
         except ValueError as e:
             print(f'mssh: {e}', file=sys.stderr)
             return 6
@@ -305,7 +319,11 @@ def run_session(target: Target, ident: Identity, *,
 
         # Set the underlying TCP socket to non-blocking for the pump.
         # We do select() across the local stdin fd and the TLS socket
-        # for portability across Python versions.
+        # for portability across Python versions. Dispatch to the
+        # framed pump iff the server's ack negotiated `framing: true`
+        # — otherwise the legacy raw byte pump (v1.0 compatibility).
+        if framing:
+            return _pump_framed(sock, interactive=interactive)
         return _pump(sock, interactive=interactive)
     finally:
         try:
@@ -373,6 +391,181 @@ def _pump(sock: ssl.SSLSocket, *, interactive: bool) -> int:
                 pass
 
     return 0 if server_closed else 8
+
+
+def _pump_framed(sock: ssl.SSLSocket, *, interactive: bool) -> int:
+    """v1.1 framed pump.
+
+    Reads typed frames from the server, dispatches by type:
+
+      - STDOUT  → write payload to stdout
+      - STDERR  → write payload to stderr
+      - BANNER  → write payload to stderr (pre-session)
+      - DENY    → print "mssh: access denied — <reason>: <detail>",
+                  set return code = 6, keep draining
+      - EXIT    → record exit code, expect CLOSE next
+      - SIGNAL  → record signal, expect CLOSE next
+      - CLOSE   → exit loop, return recorded exit code (or 1 if none)
+
+    Sends frames to the server in response to local events:
+
+      - stdin readable + bytes      → STDIN frame
+      - stdin EOF                   → STDIN_EOF frame, stop watching stdin
+      - SIGWINCH (interactive)      → WINSIZE frame
+    """
+    stdin_fd = sys.stdin.fileno() if sys.stdin.isatty() or interactive else 0
+    stdout_fd = sys.stdout.fileno()
+    stderr_fd = sys.stderr.fileno()
+
+    # Raw TTY mode for interactive sessions.
+    saved_tty: Optional[list] = None
+    if interactive and sys.stdin.isatty():
+        try:
+            saved_tty = termios.tcgetattr(stdin_fd)
+            tty.setraw(stdin_fd)
+        except (termios.error, OSError):
+            saved_tty = None
+
+    # SIGWINCH handler: when the terminal resizes, send a WINSIZE frame.
+    # Only installed if we're attached to a TTY.
+    pending_winsize: list[tuple[int, int]] = []
+    prev_winch_handler = None
+    if interactive and sys.stdin.isatty():
+        def _on_winch(_sig, _frame):
+            try:
+                size = os.get_terminal_size(stdout_fd)
+                pending_winsize.append((size.lines, size.columns))
+            except OSError:
+                pass
+        try:
+            prev_winch_handler = signal.signal(signal.SIGWINCH, _on_winch)
+        except (ValueError, OSError):
+            prev_winch_handler = None
+
+    exit_code: Optional[int] = None
+    deny_seen = False
+    stdin_open = True
+
+    try:
+        while True:
+            # Drain any pending window resizes.
+            while pending_winsize:
+                rows, cols = pending_winsize.pop(0)
+                try:
+                    sock.sendall(frame.encode_frame(
+                        frame.WINSIZE, frame.encode_winsize(rows, cols)))
+                except (ssl.SSLError, OSError):
+                    return exit_code if exit_code is not None else 8
+
+            watch = [sock.fileno()]
+            if stdin_open:
+                watch.append(stdin_fd)
+            r, _, _ = select.select(watch, [], [], 0.5)
+
+            if stdin_open and stdin_fd in r:
+                try:
+                    chunk = os.read(stdin_fd, frame.MAX_PAYLOAD)
+                except OSError:
+                    chunk = b''
+                if not chunk:
+                    # Local stdin EOF — signal the remote and stop watching.
+                    try:
+                        sock.sendall(frame.encode_frame(frame.STDIN_EOF))
+                    except (ssl.SSLError, OSError):
+                        return exit_code if exit_code is not None else 8
+                    stdin_open = False
+                else:
+                    try:
+                        sock.sendall(frame.encode_frame(frame.STDIN, chunk))
+                    except (ssl.SSLError, OSError):
+                        return exit_code if exit_code is not None else 8
+
+            if sock.fileno() in r:
+                try:
+                    ftype, payload = frame.read_frame_sync(sock)
+                except frame.ProtocolError as e:
+                    print(f'mssh: protocol error: {e}', file=sys.stderr)
+                    return exit_code if exit_code is not None else 8
+                except (ssl.SSLZeroReturnError, ssl.SSLError, OSError):
+                    return exit_code if exit_code is not None else 8
+
+                if ftype == frame.STDOUT:
+                    try:
+                        os.write(stdout_fd, payload)
+                    except OSError:
+                        return 8
+                elif ftype == frame.STDERR:
+                    try:
+                        os.write(stderr_fd, payload)
+                    except OSError:
+                        return 8
+                elif ftype == frame.BANNER:
+                    try:
+                        os.write(stderr_fd, payload)
+                    except OSError:
+                        pass  # banner is informational; ignore write errors
+                elif ftype == frame.DENY:
+                    deny_seen = True
+                    msg = _format_deny_payload(payload)
+                    print(f'mssh: access denied — {msg}', file=sys.stderr)
+                    exit_code = 6
+                elif ftype == frame.EXIT:
+                    try:
+                        exit_code = frame.decode_exit(payload)
+                    except frame.ProtocolError as e:
+                        print(f'mssh: bad EXIT frame: {e}', file=sys.stderr)
+                        exit_code = 8
+                elif ftype == frame.SIGNAL:
+                    signame = payload.decode('utf-8', errors='replace')
+                    try:
+                        # POSIX convention: 128 + signal number.
+                        signum = int(signal.Signals[signame])
+                        exit_code = 128 + signum
+                    except (KeyError, ValueError, AttributeError):
+                        exit_code = 129
+                    print(f'mssh: remote killed by signal {signame}',
+                          file=sys.stderr)
+                elif ftype == frame.CLOSE:
+                    break
+                else:
+                    print(f'mssh: unknown frame type 0x{ftype:02x}',
+                          file=sys.stderr)
+                    return 8
+    finally:
+        if prev_winch_handler is not None:
+            try:
+                signal.signal(signal.SIGWINCH, prev_winch_handler)
+            except (ValueError, OSError):
+                pass
+        if saved_tty is not None:
+            try:
+                termios.tcsetattr(stdin_fd, termios.TCSADRAIN, saved_tty)
+            except (termios.error, OSError):
+                pass
+
+    if exit_code is not None:
+        return exit_code
+    # Server closed without EXIT/DENY/SIGNAL → treat as a clean session
+    # with success unless we saw a deny.
+    return 6 if deny_seen else 0
+
+
+def _format_deny_payload(payload: bytes) -> str:
+    """Decode a DENY frame payload (UTF-8 JSON) into a human string.
+
+    Falls back to raw text on parse error so the user still gets
+    something useful.
+    """
+    import json as _json
+    try:
+        body = _json.loads(payload.decode('utf-8'))
+        reason = body.get('reason', 'unspecified')
+        detail = body.get('detail', '')
+        if detail:
+            return f'{reason}: {detail}'
+        return str(reason)
+    except (UnicodeDecodeError, _json.JSONDecodeError):
+        return payload.decode('utf-8', errors='replace') or '(no detail)'
 
 
 # ---------------------------------------------------------------------------
@@ -536,7 +729,7 @@ def run_bypass_injection(target: Target, ident: Identity,
         sock.sendall(header)
         ack_line = _read_line(sock, MAX_HEADER_BYTES)
         try:
-            ok, reason = parse_ack(ack_line)
+            ok, reason, _framing = parse_ack(ack_line)
         except ValueError as e:
             print(f'mssh: malformed ack: {e}', file=sys.stderr)
             return 3
