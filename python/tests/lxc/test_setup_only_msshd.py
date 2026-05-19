@@ -1498,10 +1498,17 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
 
     # ---- 1. Install deps + push source --------------------------------
     app_root = Path(__file__).resolve().parent.parent.parent.parent
-    ubuntu_pkgs = ['python3', 'python3-cryptography', 'python3-flask',
+    # python3-pip is required: install_wheels() uses pip to install the
+    # mssh* wheels into the system Python. Other -python3- packages give
+    # us cryptography, asyncssh, etc. from apt — pip then resolves only
+    # what isn't already satisfied (faster + works without PyPI from
+    # the container, when the cache is warm).
+    ubuntu_pkgs = ['python3', 'python3-pip',
+                   'python3-cryptography', 'python3-flask',
                    'python3-yaml', 'python3-click', 'python3-requests',
                    'python3-asyncssh', 'openssh-server', 'openssh-client']
-    alpine_pkgs = ['python3', 'py3-cryptography', 'py3-flask', 'py3-yaml',
+    alpine_pkgs = ['python3', 'py3-pip',
+                   'py3-cryptography', 'py3-flask', 'py3-yaml',
                    'py3-click', 'py3-requests', 'py3-asyncssh',
                    'openssh', 'openssh-server',
                    'dropbear', 'dropbear-convert', 'dropbear-dbclient']
