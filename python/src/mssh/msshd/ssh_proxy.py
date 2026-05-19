@@ -243,8 +243,12 @@ async def _run_session(conn: asyncssh.SSHClientConnection,
         if rows and cols:
             create_kwargs['term_size'] = (int(cols), int(rows))
 
+    # encoding=None keeps the SSH channel in byte-mode so non-UTF-8
+    # bytes in the remote command's stdout don't trip asyncssh's
+    # default utf-8 codec (which silently aborts the channel) and so
+    # chan.write(bytes_from_stdin) doesn't raise the str-expected error.
     chan, _session = await conn.create_session(
-        lambda: _OuterRelay(outer_writer), **create_kwargs)
+        lambda: _OuterRelay(outer_writer), encoding=None, **create_kwargs)
 
     async def pump_outer_to_inner():
         try:
