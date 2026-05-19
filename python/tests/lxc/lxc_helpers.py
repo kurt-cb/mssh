@@ -276,6 +276,17 @@ def install_wheels(container: str, app_root: Path) -> None:
         finally:
             os.unlink(extra_tar)
 
+    # msshd searches /etc/mssh/sshd_config.template as its first
+    # candidate. With wheels installed system-wide, __file__-relative
+    # search doesn't find /app/config/, so we mirror the template into
+    # /etc/mssh/ explicitly. Same place a future apt/.deb package would
+    # land it.
+    template_src = app_root / 'config' / 'sshd_config.template'
+    if template_src.exists():
+        lxc_exec(container, 'mkdir', '-p', '/etc/mssh')
+        push_file(container, str(template_src),
+                  '/etc/mssh/sshd_config.template', mode='644')
+
 
 # Backwards-compatible alias — kept so any caller still using the old
 # name keeps working. New code should use install_wheels.
