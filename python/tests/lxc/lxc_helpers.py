@@ -196,45 +196,91 @@ def wait_for_port(container: str, port: int, max_wait: int = 60) -> None:
     raise RuntimeError(f'{container}: port {port} not ready')
 
 
-def push_source(container: str, app_root: Path) -> None:
-    """Bundle the mssh source tree and push to /app inside the container.
+def install_wheels(container: str, app_root: Path) -> None:
+    """Build wheels via `make pkg` (if not already built), push to the
+    container, and ``pip install`` them.
 
-    ``app_root`` is the repo root; the tar bundles the Python source
-    (python/src/ → /app/src/) plus the language-neutral configs
-    (config/, scripts/, systemd/) used by the wrapper at runtime.
-    Tests inside the container reference ``/app/src/mssh/...``.
+    Replaces the old push_source() approach where we mounted the
+    repo source tree at /app/src and ran via PYTHONPATH. That bypassed
+    the install path users actually hit (apt / pip install) and made
+    install-time issues invisible. See design/notes-installer-and-versioning.md.
+
+    Installs ALL 5 mssh wheels on every container — the lab doesn't
+    optimize for "minimum install per role" today. Production deployments
+    would split: client-only on workstations, msshd on servers, mssh-ca
+    + mssh-admin on the CA host.
+
+    Language-neutral configs (config/, scripts/, systemd/) are still
+    pushed under /app/ since they're not part of any wheel.
     """
-    with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as f:
-        tar = f.name
-    try:
+    dist_dir = app_root / 'dist'
+    wheels = sorted(dist_dir.glob('*.whl')) if dist_dir.exists() else []
+    if not wheels:
+        # Build them now. Idempotent — Make rebuilds only what changed.
+        subprocess.run(['make', '-C', str(app_root), 'pkg',
+                        f'PYTHON={sys.executable}'],
+                       check=True)
+        wheels = sorted(dist_dir.glob('*.whl'))
+    if not wheels:
+        raise RuntimeError(f'no wheels in {dist_dir} after `make pkg`')
+
+    # Push the wheels to /tmp/mssh-wheels/ on the container.
+    lxc_exec(container, 'mkdir', '-p', '/tmp/mssh-wheels')
+    for w in wheels:
+        push_file(container, str(w), f'/tmp/mssh-wheels/{w.name}')
+
+    # Install via pip. Use file paths (not names) so we never hit the
+    # PyPI namespace collision with the unrelated 'mssh' package there.
+    # --force-reinstall lets `make redeploy` overwrite a prior install.
+    #
+    # PEP 668 (EXTERNALLY-MANAGED marker) gates system-wide pip on
+    # newer distros (Ubuntu 24.04+, Alpine 3.19+). Older pip (Ubuntu
+    # 22.04) doesn't know --break-system-packages so we conditionally
+    # pass it only when the marker is present.
+    has_marker = lxc_exec(
+        container, 'sh', '-c',
+        'find /usr/lib -name EXTERNALLY-MANAGED 2>/dev/null | head -1',
+        check=False).stdout.strip()
+    pip_flags = ['--quiet', '--force-reinstall', '--no-deps']
+    if has_marker:
+        pip_flags.append('--break-system-packages')
+    install_cmd = ['pip', 'install', *pip_flags]
+    install_cmd += [f'/tmp/mssh-wheels/{w.name}' for w in wheels]
+    lxc_exec(container, *install_cmd, timeout=120)
+    # External deps separately (pip will skip already-satisfied ones).
+    dep_flags = ['--quiet']
+    if has_marker:
+        dep_flags.append('--break-system-packages')
+    lxc_exec(container, 'pip', 'install', *dep_flags,
+             'asyncssh>=2.14', 'cryptography>=41.0', 'flask>=3.0',
+             'pyyaml>=6.0', 'click>=8.0', 'requests>=2.31',
+             timeout=300)
+
+    # Push language-neutral configs/scripts that live at the repo root.
+    # These aren't part of any wheel — sshd_config.template etc.
+    for top in ('config', 'scripts', 'systemd'):
+        top_path = app_root / top
+        if not top_path.exists():
+            continue
+        with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as f2:
+            extra_tar = f2.name
         subprocess.run(
-            ['tar', '-C', str(app_root / 'python'), '-czf', tar,
-             '--exclude=.git', '--exclude=__pycache__', '--exclude=.venv',
-             '--exclude=tests/lxc',
-             'src', 'requirements.txt'],
+            ['tar', '-C', str(app_root), '-czf', extra_tar, top],
             check=True, capture_output=True,
         )
-        lxc_exec(container, 'mkdir', '-p', '/app')
-        push_file(container, tar, '/tmp/mssh.tar.gz')
-        lxc_exec(container, 'tar', '-xzf', '/tmp/mssh.tar.gz', '-C', '/app')
-        # Push language-neutral configs/scripts that live at the repo root.
-        for top in ('config', 'scripts', 'systemd'):
-            top_path = app_root / top
-            if top_path.exists():
-                with tempfile.NamedTemporaryFile(suffix='.tar.gz', delete=False) as f2:
-                    extra_tar = f2.name
-                subprocess.run(
-                    ['tar', '-C', str(app_root), '-czf', extra_tar, top],
-                    check=True, capture_output=True,
-                )
-                try:
-                    push_file(container, extra_tar, f'/tmp/{top}.tar.gz')
-                    lxc_exec(container, 'tar', '-xzf',
-                             f'/tmp/{top}.tar.gz', '-C', '/app')
-                finally:
-                    os.unlink(extra_tar)
-    finally:
-        os.unlink(tar)
+        try:
+            lxc_exec(container, 'mkdir', '-p', '/app')
+            push_file(container, extra_tar, f'/tmp/{top}.tar.gz')
+            lxc_exec(container, 'tar', '-xzf',
+                     f'/tmp/{top}.tar.gz', '-C', '/app')
+        finally:
+            os.unlink(extra_tar)
+
+
+# Backwards-compatible alias — kept so any caller still using the old
+# name keeps working. New code should use install_wheels.
+def push_source(container: str, app_root: Path) -> None:
+    install_wheels(container, app_root)
 
 
 def lxc_available() -> bool:
