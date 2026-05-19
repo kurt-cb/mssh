@@ -756,17 +756,20 @@ shipping a real release becomes a priority.
 
 ## 17. Per-session banner with variable substitution
 
-**Status:** **Partial — v2 deferred, blocked on §21.**
+**Status:** **Partial — v2 unblocked, ready to pick up.**
 - **v1 — landed:** operator-templated, startup substitution. Operators
   customize via `banner.template_path` in `wrapper.yaml`; rendered at
   msshd boot.
-- **v2 — deferred:** per-user / per-session substitution AND
-  delivery of the banner to the *mssh client* (closed-bug #11). The
-  per-session render side can plug into the per-connection inner
-  sshd (§1, already landed). But the delivery side requires the
-  framed v1.1 protocol of §21 — without it, the banner is invisible
-  to mssh users (which makes the per-session work moot until §21
-  lands first).
+- **v2 — pickable:** per-user / per-session substitution AND
+  delivery of the banner to the *mssh client* (bug-11).
+  - **Delivery side:** **landed.** [§21](#21-protocol-v11--typed-framing-for-the-post-ack-stream)
+    v1.1 framing landed in v0.1.1 with a BANNER frame; mssh client
+    surfaces the rendered banner above session output. Closed
+    [archive/closedbugs/bug-11-banner-invisible-to-mssh.md](../archive/closedbugs/bug-11-banner-invisible-to-mssh.md).
+  - **Per-session substitution:** open. Plugs into the per-connection
+    inner sshd (already landed). msshd has the full CA-decision
+    context at session-establish; rendering `{user}`, `{group}`,
+    `$MSSH_AUTH_DATA` per-session is now bounded work.
 
 See "What's not done" below for the original v2 sketch.
 
@@ -961,6 +964,15 @@ environment variable.
 value: validates the full migration story, produces an artifact
 that doubles as both a verification gate AND a teaching aid for
 operators (and for Claude) on how to perform the upgrade.
+
+**Depends on:** [pyinfra-adhoc transition](../python/tests/pyinfra-adhoc/adhoc-pyinfra-transition.md)
+landing Phase A (matrix-driven spinup) + a Phase-1/2 msshd port. With
+those, the "5–10 SSH hosts (mix of distros)" requirement collapses to
+a `matrix.py` edit + pyinfra invocation, the cross-distro story
+becomes real (Debian/Fedora alongside Ubuntu/Alpine), and the legacy-
+fleet bring-up shrinks from ~400 LOC to ~100. The generative pieces
+below (randomized state, walker, emitter, validator) stay native
+Python + subprocess regardless.
 
 ### Idea
 
@@ -1276,6 +1288,14 @@ reads.
 
 **Status:** Test gap. Found during the 2026-05-19 docs/CLI alignment
 review.
+
+**Depends on:** [pyinfra-adhoc transition](../python/tests/pyinfra-adhoc/adhoc-pyinfra-transition.md)
+Phase A. After that lands, this is a `matrix.py` two-row append
+(srv-acct-1 + srv-acct-2 on potentially-different distros) plus
+policy assertions in pytest — no framework code changes. Without
+the transition, today's hardcoded `SERVERS` at
+[test_setup_only_msshd.py:104-108](../python/tests/lxc/test_setup_only_msshd.py#L104-L108)
+has to grow brittle parallel structure.
 
 ### Background
 

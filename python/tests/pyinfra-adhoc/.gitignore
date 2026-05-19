@@ -1,0 +1,11 @@
+# Ansible/pyinfra keypair — generated at lab bootstrap time, never committed.
+ansible_id_ed25519
+ansible_id_ed25519.pub
+
+# pyinfra runtime artifacts
+.pyinfra/
+*.pyc
+__pycache__/
+
+# Lab-written live host map (see inventory.py).
+hosts_live.py
