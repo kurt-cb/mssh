@@ -445,9 +445,10 @@ def _systemd_msshd_unit() -> str:
         '[Service]\nWorkingDirectory=/app\n'
         'Environment="SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh"\n'
         # msshd is the pip-installed entry point from the msshd wheel.
-        # Lives at /usr/local/bin/msshd in the lab. No PYTHONPATH —
-        # the wheel is on sys.path.
-        'ExecStart=/usr/local/bin/msshd '
+        # Use the bare name (relying on PATH) because pip's install dir
+        # differs across distros (/usr/local/bin on Ubuntu vs /usr/bin
+        # on Alpine).
+        'ExecStart=msshd '
         '--config /etc/mssh/wrapper.yaml\n'
         'Restart=on-failure\nStandardError=journal\n'
         '[Install]\nWantedBy=multi-user.target\n'
@@ -477,7 +478,7 @@ def _install_msshd(c: str, *, mode: str,
         lxc_exec(c, 'sh', '-c',
                  'cd /app && '
                  'SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh '
-                 'nohup /usr/local/bin/msshd '
+                 'nohup msshd '
                  '--config /etc/mssh/wrapper.yaml '
                  '> /var/log/mssh/msshd.log 2>&1 & '
                  'echo $! > /run/msshd.pid')
@@ -536,15 +537,15 @@ def _push_msshd_cert_material(server: _Server, *,
 _MSSH_WRAPPER_SCRIPT = '''#!/bin/sh
 # /usr/local/bin/mssh-with-env — convenience wrapper that supplies
 # default cert paths from $HOME/.mssh/ and delegates to the real
-# pip-installed mssh binary (which lives at /usr/local/bin/mssh).
+# pip-installed mssh binary (on PATH).
 #
-# Operators can `alias mssh=/usr/local/bin/mssh-with-env` if they
-# don't want to set MSSH_CERT/KEY/CA per command.
+# Operators can `alias mssh=mssh-with-env` if they don't want to
+# set MSSH_CERT/KEY/CA per command.
 exec env \\
     MSSH_CERT="${MSSH_CERT:-$HOME/.mssh/cert.pem}" \\
     MSSH_KEY="${MSSH_KEY:-$HOME/.mssh/key.pem}" \\
     MSSH_CA="${MSSH_CA:-$HOME/.mssh/ca.pem}" \\
-    /usr/local/bin/mssh "$@"
+    mssh "$@"
 '''
 
 
@@ -617,7 +618,7 @@ def _verify_mssh(*, from_container: str, user: str,
         f'MSSH_CERT=/home/{user}/.mssh/cert.pem '
         f'MSSH_KEY=/home/{user}/.mssh/key.pem '
         f'MSSH_CA=/home/{user}/.mssh/ca.pem '
-        f'/usr/local/bin/mssh '
+        f'mssh '
         f'{user}@{target_ip}:{target_port} -- whoami'
     )
     r = lxc_exec(from_container, 'sh', '-c', cmd, check=False, timeout=30)
@@ -651,7 +652,7 @@ def _msshd_restart_cmd(server: _Server) -> str:
             f'fuser -k -9 {MSSHD_PORT}/tcp 2>/dev/null; sleep 1; '
             f'cd /app && '
             f'SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh '
-            f'nohup /usr/local/bin/msshd '
+            f'nohup msshd '
             f'--config /etc/mssh/wrapper.yaml '
             f'> /var/log/mssh/msshd.log 2>&1 & '
             f'echo $! > /run/msshd.pid'
@@ -1560,7 +1561,8 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
     push_text(CA_NAME,
               '[Unit]\nDescription=mssh CA\nAfter=network.target\n'
               '[Service]\nWorkingDirectory=/app\n'
-              'ExecStart=/usr/local/bin/mssh-ca --config '
+              # Bare binary name; on PATH after pip install.
+              'ExecStart=mssh-ca --config '
               '/etc/mssh/ca-config.yaml\nRestart=on-failure\n'
               '[Install]\nWantedBy=multi-user.target\n',
               '/etc/systemd/system/mssh-ca.service')
