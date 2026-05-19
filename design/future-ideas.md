@@ -894,7 +894,7 @@ with the structured `denied_reason` for each.
     probe policy.
 
 ### Cons / open questions
-
+}
   - Timing-side-channel: a user could probe "is policy X attached
     to my account" by triggering connections and watching the
     deny reasons. Mitigate by collapsing similar reasons in the
@@ -1307,6 +1307,82 @@ changes exerciseable end-to-end.
 - ~40 lines test framework + ~40 lines CLI + ~20 lines API endpoint
   for `PUT /v1/admin/server/{name}/groups` (already in api.md but not
   implemented).
+
+---
+
+## 25. `mssh-admin pki` — first-class user-facing PKI ceremony
+
+**Status:** CLI gap exposed by the 2026-05-19 migration tutorial
+walk-through.
+
+### Background
+
+mssh's design intentionally separates **two CA hierarchies**
+(architecture.md / security.md):
+  - **CA signing key** — authz certs + server mTLS + admin mTLS.
+    Managed by `mssh-admin` (init, server add, user add, …).
+  - **User-facing CA** — signs the wrapper TLS cert msshd serves
+    on `:2200` AND the per-user mTLS client certs.
+
+The CLI surface for the first hierarchy is complete. The second is
+**not modelled in the CLI at all**. The migration walkthrough has to
+either (a) hand-wave "use your org PKI", (b) document an openssl
+ceremony inline, or (c) point at a side-script.
+
+We chose (c): [scripts/mint-user-pki.py](../scripts/mint-user-pki.py)
+mints user-CA + wrapper TLS + per-user mTLS in one shot, matching
+what the test framework's `_gen_user_ca_and_mtls_certs` produces.
+TUTORIAL_MIGRATION.md uses it. Functional, but a separate script is
+a documentation gap: operators have to remember to look outside the
+CLI for half of the PKI ceremony.
+
+### Idea
+
+Add a `mssh-admin pki` subcommand surface:
+
+```bash
+mssh-admin pki bootstrap     --out-dir ./user-pki      # mints user-CA + key
+mssh-admin pki server mint   --server srv-acct --san IP[,IP]  # wrapper TLS pair
+mssh-admin pki user mint     --user alice              # mTLS pair + .pub
+```
+
+Where it differs from server / user enrollment commands:
+  - These DO NOT contact the CA service. They're local-only crypto.
+  - They MAY emit a hint suggesting the caller next runs the
+    matching CA-side enrollment (`mssh-admin user add --key ...`).
+
+### Compose with
+
+- §13 (legacy-config migration): a `mssh-admin import` flow can
+  use the same `pki user mint` primitive to mint mTLS for users
+  it imports from `authorized_keys`.
+- §17 (banner): no interaction.
+- §24 (multi-server group lab): no interaction.
+
+### Why not "just use existing PKI"
+
+Operators with mature PKI tooling should still use it — the CLI
+should accept `--cert-source external` or similar, and the PKI
+helper is a convenience for ops without that. The current state
+forces convenience-path operators to a Python script with no
+discoverability from `mssh-admin --help`; the proposed state lets
+them stay in one CLI.
+
+### LOC estimate
+
+- ~120 lines (subcommands + arg parsing + reuse of the existing
+  cryptography logic in scripts/mint-user-pki.py).
+
+### Resolution / open questions
+
+- Should `pki bootstrap` write the user-CA private key under
+  `~/.mssh-admin/user-ca.key` by default? Currently the helper
+  script writes to `--out-dir`. Consistency with `mssh-admin init`
+  (which puts the CA signing key in `--ca-dir`) suggests yes.
+- Should `pki user mint --user alice` ALSO run `user add` against
+  the CA? Tempting (one command, no forgotten step) but couples the
+  local-crypto operation to a network call. Probably leave them
+  separate and let `next` recommend the chain.
 
 ---
 
