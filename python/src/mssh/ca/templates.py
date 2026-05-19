@@ -76,7 +76,11 @@ KexAlgorithms             curve25519-sha256,curve25519-sha256@libssh.org
 Ciphers                   chacha20-poly1305@openssh.com,aes256-gcm@openssh.com
 MACs                      hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
 HostKeyAlgorithms         ssh-ed25519
-PubkeyAcceptedAlgorithms  ssh-ed25519
+# Must include ssh-ed25519-cert-v01@openssh.com — the algorithm name
+# for the ephemeral OpenSSH user cert msshd mints per session. Omitting
+# it makes the inner sshd reject the cert with "Permission denied" and
+# the per-connection flip silently revert.
+PubkeyAcceptedAlgorithms  ssh-ed25519,ssh-ed25519-cert-v01@openssh.com
 
 # Forwarding shut off unless the per-session policy reopens it via the
 # corresponding FROMCA_ marker above.

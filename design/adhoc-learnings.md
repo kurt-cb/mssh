@@ -173,3 +173,84 @@ These don't need an answer yet; they shape future-ideas roadmap.
    Worth thinking about during the protocol redesign — maybe
    "fallback" and "enforce" are the same code path with a CA-skip
    flag.
+
+---
+
+## Appended 2026-05-19 round 2 (lab claude-t1Fx)
+
+### Deployment gotcha: `__pycache__/` survives `lxc file push`
+
+If you push a `.py` to a container and `systemctl restart` the service,
+**Python may load the stale `.pyc`** instead of your updated `.py`.
+Confirmed during the Bug #8 fix on the CA container: the fix to
+`templates.py` did not take effect until `find /app/src -name
+__pycache__ -exec rm -rf {} +` ran before the restart.
+
+Reason hypothesis: `lxc file push` may not preserve the .py's mtime
+with the precision Python's import machinery uses to invalidate
+.pyc files. Or LXC's filesystem layer reports a different mtime to
+container-side calls vs host-side stats.
+
+**Workaround for code-push iterations on a running lab:**
+```bash
+for c in <containers...>; do
+    lxc file push <host-path>.py "$c"/<container-path>.py
+    lxc exec "$c" -- find /app/src -name __pycache__ -exec rm -rf {} +
+    lxc exec "$c" -- systemctl restart <service>
+done
+```
+
+This is also a recommendation for the eventual `install_mssh.sh`
+packaging path: set `PYTHONDONTWRITEBYTECODE=1` in the systemd unit
+to make the dev workflow safer.
+
+### Two distinct sshd_config templates exist
+
+`config/sshd_config.template` — used by the **long-lived** inner sshd
+([msshd/inner.py:217-224](../python/src/mssh/msshd/inner.py#L217-L224)).
+Rendered ONCE at msshd boot.
+
+`mssh.ca.templates.BUILTIN_OPENSSH_TEMPLATE` — used by the
+**per-connection** inner sshd path
+([msshd/inner.py:402-420](../python/src/mssh/msshd/inner.py#L402-L420)).
+Rendered by the CA on every authorize call.
+
+Until 2026-05-19 these had diverged silently: the long-lived template
+allowed `ssh-ed25519-cert-v01@openssh.com`; the CA's built-in didn't.
+The per-connection path was broken from the moment it landed but
+silently fell back to long-lived because the flip script reverts on
+verify failure.
+
+**Implication:** Whenever you touch one of these templates, audit
+the other to see if the same change is needed. Any directive that
+affects auth (Pubkey*, Trusted*, AuthenticationMethods,
+PermitRootLogin) must be checked in both files.
+
+Even better: have a single canonical template with a documented diff
+between the two contexts. This is design work, not a quick fix —
+flag for a future round.
+
+### mssh-admin is NOT installed in the lab
+
+Operators following docs/operations.md will hit `mssh-admin: command
+not found` on the CA container. The lab only installs
+`/usr/local/bin/mssh` (a shim around `python3 -m mssh.client`). The
+test framework's own admin actions go through `mssh.admin.client.CAClient`
+directly (Python API), not the CLI.
+
+**For testing admin functions in this round:**
+```bash
+ADMIN() {
+    lxc exec claude-t1Fx-adhoc-ca -- bash -c "PYTHONPATH=/app/src python3 -m mssh.admin.main \
+        --ca-url https://10.26.244.215:8443 \
+        --admin-cert /etc/mssh/ca/bootstrap-admin-cert.pem \
+        --admin-key /etc/mssh/ca/bootstrap-admin-key.pem \
+        --ca-cert /etc/mssh/ca/tls-ca-cert.pem $*"
+}
+ADMIN status
+ADMIN 'audit --decision denied --limit 5'
+```
+
+Should ship as a `/usr/local/bin/mssh-admin` shim, same shape as the
+existing `/usr/local/bin/mssh`.
+
