@@ -250,7 +250,7 @@ class EnforceListener:
                 # CA is the oracle when reachable: an explicit deny
                 # invalidates ALL cached entries for this principal
                 # (including any bypass injection — see
-                # design/notes-bypass-cache.md).
+                # archive/design/notes-bypass-cache.md).
                 log.info('[%s] CA denied: %s (%s) — invalidating cache',
                          conn_id, result.reason, result.detail)
                 self.authz_cache.invalidate(principal)
@@ -397,7 +397,7 @@ class EnforceListener:
         diagnostic string (cert serial + not_after); on failure it
         names what went wrong. The caller writes the ack and closes.
 
-        Per design/notes-bypass-cache.md, the bypass cert must:
+        Per archive/design/notes-bypass-cache.md, the bypass cert must:
 
           1. Be a CA-signed X.509 authz cert (same shape as a normal
              grant), validatable against the auth trust root via the

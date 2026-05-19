@@ -624,7 +624,7 @@ def bypass_cert_group():
     `mssh --inject-bypass-cert <cert>`, msshd validates the cert and
     injects it directly into its authz cache without a live CA call.
     Lets the operator reach msshd hosts whose CA is currently
-    unreachable. See design/notes-bypass-cache.md.
+    unreachable. See archive/design/notes-bypass-cache.md.
     """
 
 
@@ -725,7 +725,7 @@ def cert_revoke_cmd(ctx, serials, reason):
     Appends a CRL entry; the fleet picks it up on next authorize
     call. Affects both normal CA-grant entries AND bypass-injected
     entries in each msshd's authz cache. See
-    design/notes-bypass-cache.md "CRL Amendment".
+    archive/design/notes-bypass-cache.md "CRL Amendment".
 
     Example:
         mssh-admin cert revoke deadbeef abcd1234 --reason 'key rotation'

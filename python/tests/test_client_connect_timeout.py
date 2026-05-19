@@ -65,7 +65,7 @@ def _stub_creds_dir() -> Path:
 
 @pytest.mark.xfail(
     reason='Bug #6 — mssh has no client-side connect timeout. '
-           'See adhoc-bugs.md.',
+           'See design/openbugs/bug-06-no-connect-timeout.md.',
     strict=True,
 )
 def test_connect_timeout_bounded():

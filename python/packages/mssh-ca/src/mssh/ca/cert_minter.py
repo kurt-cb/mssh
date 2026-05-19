@@ -50,7 +50,7 @@ OID_MAX_SESSION     = x509.ObjectIdentifier(f'{_OID_BASE}.6')
 OID_2FA_EVIDENCE    = x509.ObjectIdentifier(f'{_OID_BASE}.7')
 # Marker for operator-injectable bypass certs. When set (critical),
 # msshd accepts the cert as a cache-injectable authz cert without
-# a live CA call. See design/notes-bypass-cache.md.
+# a live CA call. See archive/design/notes-bypass-cache.md.
 OID_CA_BYPASS       = x509.ObjectIdentifier(f'{_OID_BASE}.8')
 
 

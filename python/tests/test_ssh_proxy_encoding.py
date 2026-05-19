@@ -66,7 +66,7 @@ def test_ssh_proxy_passes_encoding_none_to_create_session():
         'create_session() in ssh_proxy.py is missing the `encoding` '
         'kwarg. Without `encoding=None`, asyncssh runs the channel in '
         'utf-8 string mode and silently drops any non-UTF-8 byte. '
-        'This is Bug #5. See adhoc-bugs.md.')
+        'This is Bug #5. See archive/closedbugs/bug-05-binary-stdout-truncates.md.')
 
     # Must be the literal None.
     val = encoding_arg.value

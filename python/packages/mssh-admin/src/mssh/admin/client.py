@@ -188,7 +188,7 @@ class CAClient:
                     reason: str = '') -> dict[str, Any]:
         """Append a CRL entry revoking the listed cert serials.
         Every msshd in the fleet picks this up on its next authorize
-        call. See design/notes-bypass-cache.md "CRL Amendment"."""
+        call. See archive/design/notes-bypass-cache.md "CRL Amendment"."""
         body: dict[str, Any] = {'serials': list(serials)}
         if reason:
             body['reason'] = reason

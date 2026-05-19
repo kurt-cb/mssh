@@ -170,7 +170,7 @@ def build_header(target: Target, *,
     operator-presentable CA-bypass cert. When present, msshd treats
     the connection as a bypass-injection request (validates the cert,
     stores it in the authz cache, acks, closes — no SSH session).
-    See design/notes-bypass-cache.md.
+    See archive/design/notes-bypass-cache.md.
     """
     body = {
         'v': PROTOCOL_VERSION,
@@ -405,7 +405,7 @@ def main(argv: list[str] | None = None) -> int:
                         metavar='CERT_PATH',
                         help='Present this CA-bypass cert to msshd '
                              '(injects into its authz cache, then exits). '
-                             'See design/notes-bypass-cache.md.')
+                             'See archive/design/notes-bypass-cache.md.')
     parser.add_argument('command', nargs=argparse.REMAINDER,
                         help='optional remote command (after --)')
 

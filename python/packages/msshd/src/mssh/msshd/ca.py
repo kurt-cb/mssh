@@ -41,7 +41,7 @@ class AuthorizationGrant:
     # CA's current CRL sequence at response time. 0 = CA has no CRL
     # (legacy CA or empty log). msshd uses this to decide whether to
     # fetch missing CRL entries via GET /v1/crl?after=N. See
-    # design/notes-bypass-cache.md "CRL Amendment".
+    # archive/design/notes-bypass-cache.md "CRL Amendment".
     current_crl_seq: int = 0
 
 

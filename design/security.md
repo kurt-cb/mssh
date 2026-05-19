@@ -298,7 +298,7 @@ which point the threat model is already broken.
 ## Authz cache + bypass-cert + CRL (2026-05-18)
 
 Three security-relevant primitives added after the initial design.
-See [design/notes-bypass-cache.md](notes-bypass-cache.md) for the
+See [archive/design/notes-bypass-cache.md](notes-bypass-cache.md) for the
 full rationale + Kurt's inline review comments + resolutions.
 
 ### Authz cache on msshd
@@ -383,7 +383,7 @@ as a cold-restart cache. No new attack surface introduced.
 
 ### Cross-references
 
-- Operational design rationale: [design/notes-bypass-cache.md](notes-bypass-cache.md)
+- Operational design rationale: [archive/design/notes-bypass-cache.md](notes-bypass-cache.md)
 - PKI hierarchy migration plan (multiple intermediates with
   per-issuer CRL): [design/notes-pki-hierarchy.md](notes-pki-hierarchy.md)
 - API surface for these features: [design/api.md](api.md)

@@ -82,7 +82,7 @@ def _run_cli_help(*command_path: str) -> subprocess.CompletedProcess:
     reason='Bug #7 — docs/operations.md references at least 7 mssh-admin '
            'commands that the CLI rejects (user del/show, admin del, '
            'server groups/show, import, user key). Test will pass once '
-           'either the docs or the CLI are aligned. See adhoc-bugs.md.',
+           'either the docs or the CLI are aligned. See design/openbugs/bug-07-docs-cli-drift.md.',
     strict=True,
 )
 def test_every_documented_command_exists():

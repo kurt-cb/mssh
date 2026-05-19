@@ -1,3 +1,18 @@
+# Closed bugs — legacy PoC session retrospective
+
+**Status:** All entries below are CLOSED. This file is a historical
+record of bugs that surfaced during the original PoC (pre-v0.1.0) and
+how each was resolved.
+
+Moved here from `python/tests/issues.md` per the rule "the design
+directory reflects current state, archive holds completed work."
+Cross-reference unchanged; the original file location pointed to this
+content.
+
+For currently open bugs, see [design/openbugs/](../../design/openbugs/).
+
+---
+
 # Session retrospective — issues encountered and how they were fixed
 
 This document captures every non-trivial bug or design wrinkle we hit while

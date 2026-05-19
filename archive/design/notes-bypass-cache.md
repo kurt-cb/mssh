@@ -1,3 +1,11 @@
+<!-- archived from design/notes-bypass-cache.md — captures work that has LANDED. -->
+
+**Status:** LANDED. This note describes a design decision whose
+implementation is now in the codebase. Kept verbatim for the
+rationale + historical context.
+
+---
+
 # Implementation notes: authz cache + bypass cert
 
 Working notes against `understanding.txt`. Captures where I'd extend

@@ -57,7 +57,7 @@ class CAConfig:
     # this, msshd refuses cache hits and falls through to live CA
     # calls until sync catches up. 0 = disable strict gating (always
     # serve from cache regardless of staleness). See
-    # design/notes-bypass-cache.md "CRL Amendment".
+    # archive/design/notes-bypass-cache.md "CRL Amendment".
     crl_fetch_limit: int = 100
     crl_strict_threshold: int = 50
 
@@ -98,7 +98,7 @@ class PerformanceConfig:
     max_concurrent_sessions: int = 200
     # Authz cache eviction policy. Per-principal cap is the primary
     # control; global cap is the safety net. Both can be set to 0 to
-    # disable that level. See design/notes-bypass-cache.md "Eviction
+    # disable that level. See archive/design/notes-bypass-cache.md "Eviction
     # Amendment".
     #
     # On put(): if a principal would exceed `authz_cache_max_per_principal`

@@ -1,10 +1,11 @@
 # Static-test plan
 
-How to catch the bugs `adhoc-bugs.md` documented (and the next
-generation of them) **without** burning a 10-minute LXC lab cycle per
-attempt. The headline insight from the session that produced
-adhoc-bugs.md: five of the six bugs we found are reproducible in a
-plain Python process within seconds.
+How to catch the bugs documented in `design/openbugs/` (and the
+closed ones in `archive/closedbugs/`) — plus the next generation of
+them — **without** burning a 10-minute LXC lab cycle per attempt.
+The headline insight from the rounds that produced those bug
+files: five of the six bugs we found are reproducible in a plain
+Python process within seconds.
 
 ## The tier we don't have today
 
@@ -53,7 +54,7 @@ Each test gets a fresh lab; tests are independent.
 
 ## Concrete tests to write first
 
-The bugs in `adhoc-bugs.md` map 1:1 to tests:
+The bugs in `design/openbugs/ + archive/closedbugs/` map 1:1 to tests:
 
 ### `test_tier2_binary_stdout.py` — regression for Bug #5
 
@@ -187,7 +188,7 @@ defense.
 ## Estimated cost / payoff
 
 - **Fixture + 8 tests:** ~600 lines, ~1 engineering day.
-- **Payoff:** every one of the bugs in adhoc-bugs.md becomes a
+- **Payoff:** every one of the bugs in design/openbugs/ + archive/closedbugs/ becomes a
   ~3-second regression check. The fixture is the foundation for
   the eventually-planned future-ideas §20 (E2E migration test), which
   also benefits from being able to spawn parts of the system without

@@ -98,7 +98,7 @@ disk. Minting requires superuser on the CA:
 --valid-days 90 --out alice-bypass.crt`. Operator stores the result
 offline.
 
-See [design/notes-bypass-cache.md](design/notes-bypass-cache.md) for
+See [archive/design/notes-bypass-cache.md](archive/design/notes-bypass-cache.md) for
 the design rationale (decisions on cache key, TTL, invalidation
 policy, source tags) and the resolutions Kurt agreed to.
 
@@ -156,7 +156,7 @@ deployment minting many long-lived bypass certs that don't get
 naturally evicted by their own `not_after` could in principle still
 grow without bound. Tracked separately.
 
-See [design/notes-bypass-cache.md](design/notes-bypass-cache.md)
+See [archive/design/notes-bypass-cache.md](archive/design/notes-bypass-cache.md)
 "Amendment 2026-05-18 (b)" for the design rationale + edge cases
 (CA seq reset, multi-msshd coordination).
 
@@ -187,7 +187,7 @@ forces the next connection from that principal to re-call the CA.
 If CA is down at that moment, that principal is briefly denied — same
 state as a cold-restart cache.
 
-See [design/notes-bypass-cache.md](design/notes-bypass-cache.md)
+See [archive/design/notes-bypass-cache.md](archive/design/notes-bypass-cache.md)
 "Amendment 2026-05-18 (c)" for full rationale.
 
 ## Docs

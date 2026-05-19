@@ -76,7 +76,7 @@ class AdminContext:
     signing_cert: Any = None
     # CRL log. Sequence-based revocation channel; msshd fleet picks
     # up entries on its next authorize call. See ca/crl.py +
-    # design/notes-bypass-cache.md "CRL Amendment".
+    # archive/design/notes-bypass-cache.md "CRL Amendment".
     crl: Any = None             # CRLStore
 
 
@@ -618,7 +618,7 @@ def bypass_cert_mint(ctx: AdminContext, admin: Admin,
     critical extension marker. The operator stores it offline; when
     presented via the mssh client's ``--inject-bypass-cert`` flag,
     msshd validates it and injects directly into the authz cache
-    without a live CA call. See design/notes-bypass-cache.md for the
+    without a live CA call. See archive/design/notes-bypass-cache.md for the
     full design rationale.
 
     Body shape:

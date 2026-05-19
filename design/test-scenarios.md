@@ -12,7 +12,7 @@ Each scenario has:
 - **Status** — `untested`, `lab-verified`, `unit-covered`, or `broken`
 - **Suggested tier** — where the regression test belongs
 
-Status as of 2026-05-19 reflects round-1 findings (adhoc-bugs.md).
+Status as of 2026-05-19 reflects round-1 findings (design/openbugs/ + archive/closedbugs/).
 
 ---
 
@@ -499,7 +499,7 @@ write paths. These typically require admin-grade mTLS creds.
 |---|---|
 | **Description** | The CA's CRL log is wiped (operator error); msshd's `last_crl_seq` > CA's `current_crl_seq` |
 | **Expected** | msshd detects inversion; logs warning; doesn't crash; either resets or refuses to advance |
-| **Source** | CLAUDE.md amendment 2026-05-18 (b); design/notes-bypass-cache.md |
+| **Source** | CLAUDE.md amendment 2026-05-18 (b); archive/design/notes-bypass-cache.md |
 | **Status** | untested |
 | **Suggested tier** | Tier 1 (unit on the sync logic) |
 
@@ -557,4 +557,4 @@ Each batch validates one design assumption.
 7. **CRL flow:** B9 then C15.
 8. **Banner customization:** operations.md § customize banner — render, restart, verify in connect.
 
-Append findings to adhoc-bugs.md; append learnings to adhoc-learnings.md.
+Append findings to design/openbugs/ + archive/closedbugs/; append learnings to adhoc-learnings.md.

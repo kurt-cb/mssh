@@ -1,3 +1,11 @@
+<!-- archived from design/notes-installer-and-versioning.md — captures work that has LANDED. -->
+
+**Status:** LANDED. This note describes a design decision whose
+implementation is now in the codebase. Kept verbatim for the
+rationale + historical context.
+
+---
+
 # Notes — installer, packaging, versioning
 
 A design observation that surfaced during the round-1/round-2 adhoc

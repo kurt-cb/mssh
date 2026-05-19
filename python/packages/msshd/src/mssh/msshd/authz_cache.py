@@ -15,7 +15,7 @@ Two sources of cache entries, tagged on the entry itself:
                    path in ``enforce_listener`` stores entries with
                    this tag.
 
-Source-tag policy (per design/notes-bypass-cache.md):
+Source-tag policy (per archive/design/notes-bypass-cache.md):
 
   - Lookups don't care about source. Any non-expired entry is a hit.
   - CA deny invalidates ALL entries for the principal regardless of
@@ -87,7 +87,7 @@ class AuthzCache:
 
         ``max_per_principal`` and ``max_total`` are eviction caps
         (FIFO by injected_at). 0 disables that level entirely. See
-        design/notes-bypass-cache.md "Eviction Amendment".
+        archive/design/notes-bypass-cache.md "Eviction Amendment".
 
         - max_per_principal: cap on entries with the same principal
           key. Today the cache is principal-keyed (one entry per
