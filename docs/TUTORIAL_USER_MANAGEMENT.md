@@ -1,4 +1,4 @@
-# mssh — guided tutorial
+# mssh — operator tutorial (user, server, policy management)
 
 Hands-on walkthrough that takes you from "what is mssh" to "I can
 explain every piece on a whiteboard" in about 60 minutes. Uses the

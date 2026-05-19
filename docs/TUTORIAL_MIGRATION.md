@@ -1,6 +1,6 @@
 # mssh — migration tutorial (Phase 0 → Phase 2)
 
-Sibling to [TUTORIAL.md](TUTORIAL.md). Where that one starts with a
+Sibling to [TUTORIAL_USER_MANAGEMENT.md](TUTORIAL_USER_MANAGEMENT.md). Where that one starts with a
 prebuilt Phase-2 lab, this one walks the **actual migration sequence**
 operators face when adopting mssh in front of existing SSH
 infrastructure:
@@ -17,7 +17,7 @@ running the same sequence on real hosts.
 
 ## Prerequisites
 
-Same as [TUTORIAL.md § Prerequisites](TUTORIAL.md#prerequisites) —
+Same as [TUTORIAL_USER_MANAGEMENT.md § Prerequisites](TUTORIAL_USER_MANAGEMENT.md#prerequisites) —
 LXD/Incus, source checkout, dev install:
 
 ```bash
@@ -266,4 +266,4 @@ lxc image delete mssh-ubuntu-fixed mssh-alpine-fixed
   - **Operate a deployed mssh:** [operations.md](operations.md).
   - **Try the prebuilt Phase-2 lab tutorial** for the day-in-the-life
     operator view, including audit trail and banner customization:
-    [TUTORIAL.md](TUTORIAL.md).
+    [TUTORIAL_USER_MANAGEMENT.md](TUTORIAL_USER_MANAGEMENT.md).

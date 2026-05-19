@@ -51,7 +51,7 @@ for what the three modes mean and why we structure migrations
 around them.
 
 For step-by-step walkthroughs against the lab:
-  - [docs/TUTORIAL.md](docs/TUTORIAL.md) — day-in-the-life operator
+  - [docs/TUTORIAL_USER_MANAGEMENT.md](docs/TUTORIAL_USER_MANAGEMENT.md) — day-in-the-life operator
     view, starting from a prebuilt Phase-2 lab.
   - [docs/TUTORIAL_MIGRATION.md](docs/TUTORIAL_MIGRATION.md) —
     walks Phase 0 → 1 → 2 against the lab, matching the production

@@ -50,7 +50,7 @@ flip_to_fallback / flip_to_enforce   # operator workflow, no lxc exec
 
   - **[docs/overview.md](docs/overview.md)** — what mssh is, what
     problem it solves, when it fits.
-  - **[docs/TUTORIAL.md](docs/TUTORIAL.md)** — guided 60-minute
+  - **[docs/TUTORIAL_USER_MANAGEMENT.md](docs/TUTORIAL_USER_MANAGEMENT.md)** — guided 60-minute
     hands-on walkthrough using the adhoc LXC lab.
   - **[docs/MIGRATION.md](docs/MIGRATION.md)** — production
     migration runbook (vanilla SSH fleet → mssh enforce, phase by

@@ -1100,7 +1100,7 @@ See the operator docs at `/app/docs/`:
     (Phase 1 set up CA → Phase 2 msshd fallback → Phase 4 enforce).
     This is the source of truth for "what command do I run next?"
     when `mssh-admin next` isn't enough.
-  - **docs/TUTORIAL.md** — 60-minute guided walkthrough using this
+  - **docs/TUTORIAL_USER_MANAGEMENT.md** — 60-minute guided walkthrough using this
     same adhoc lab as the sandbox.
   - **docs/operations.md** — day-to-day operator reference.
 
