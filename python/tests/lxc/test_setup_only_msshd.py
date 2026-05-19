@@ -1806,7 +1806,9 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
             # but only the superuser lives on CA_NAME. For others we
             # invoke mssh directly via env vars + host PKI material.
             # mssh binary from the host venv (installed by `make dev-install`).
-            mssh_bin = sys.executable.replace('/python', '/mssh')
+            # Path is sibling of the interpreter — works regardless of
+            # whether the interpreter is python, python3, python3.12, etc.
+            mssh_bin = str(Path(sys.executable).parent / 'mssh')
             cmd = (
                 f'MSSH_CERT={pki_dir}/{u.username}.crt '
                 f'MSSH_KEY={pki_dir}/{u.username}.key '
