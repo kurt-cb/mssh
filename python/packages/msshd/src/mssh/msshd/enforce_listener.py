@@ -262,11 +262,26 @@ class EnforceListener:
                         self._last_known_ca_crl_seq, result.current_crl_seq)
                     if self.crl_sync is not None:
                         self.crl_sync.maybe_sync(result.current_crl_seq)
+                # v1.1: write an actionable ack so the mssh client sees
+                # the deny reason instead of "server closed before
+                # sending ack". Closes Bug #1.
+                deny_msg = (f'{result.reason}: {result.detail}'
+                            if result.detail else result.reason)
+                try:
+                    _write_ack(writer, ok=False, reason=deny_msg)
+                except Exception:
+                    pass
                 await _close(writer)
                 return
             if isinstance(result, AuthorizationError):
                 log.error('[%s] CA error + no cache hit: %s',
                           conn_id, result.message)
+                # Same fix: surface the error to the client.
+                try:
+                    _write_ack(writer, ok=False,
+                               reason=f'ca_error: {result.message}')
+                except Exception:
+                    pass
                 await _close(writer)
                 return
 

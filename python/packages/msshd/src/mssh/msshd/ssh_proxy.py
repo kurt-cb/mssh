@@ -22,6 +22,8 @@ from typing import Optional
 
 import asyncssh
 
+from mssh import frame
+
 
 log = logging.getLogger('msshd.ssh_proxy')
 
@@ -47,33 +49,67 @@ async def _read_header_line(reader: asyncio.StreamReader) -> dict:
 
 
 def _write_ack(writer: asyncio.StreamWriter, *,
-               ok: bool, reason: str = '') -> None:
+               ok: bool, reason: str = '',
+               framing: bool = False) -> None:
+    """Write the ack line. ``framing=True`` opts the client into v1.1
+    typed framing for the post-ack stream — only set this if the
+    client's header asked for it via ``supports_framing``."""
     body = {'v': PROTOCOL_VERSION, 'ok': ok}
     if not ok:
         body['reason'] = reason
+    if framing:
+        body['framing'] = True
     writer.write(json.dumps(body, separators=(',', ':')).encode('utf-8')
                   + b'\n')
 
 
 class _OuterRelay(asyncssh.SSHClientSession):
-    """Relays inner session stdout/stderr to the outer writer."""
+    """Relays inner session stdout/stderr to the outer writer.
 
-    def __init__(self, outer_writer: asyncio.StreamWriter):
+    Two modes:
+      - **Legacy / v1.0**: writes raw bytes to the outer (everything,
+        stdout + stderr, gets merged).
+      - **Framed / v1.1** (``framed=True``): emits typed frames —
+        STDOUT for datatype 0/None, STDERR for
+        ``EXTENDED_DATA_STDERR``.
+
+    The choice is made at construction time per the post-ack
+    negotiation. See archive/closedbugs/bug-04-stdout-stderr-merged.md
+    and design/notes-protocol-v1.1.md.
+    """
+
+    def __init__(self, outer_writer: asyncio.StreamWriter, *,
+                 framed: bool = False):
         self._outer = outer_writer
+        self._framed = framed
 
     def data_received(self, data, datatype):
         try:
             if isinstance(data, str):
                 data = data.encode('utf-8')
-            self._outer.write(data)
+            if self._framed:
+                # datatype: 0/None = stdout, 1 = EXTENDED_DATA_STDERR.
+                ftype = frame.STDERR if datatype == asyncssh.EXTENDED_DATA_STDERR \
+                        else frame.STDOUT
+                # Fragment payloads > MAX_PAYLOAD per spec.
+                view = memoryview(data)
+                for off in range(0, len(view), frame.MAX_PAYLOAD):
+                    chunk = bytes(view[off:off + frame.MAX_PAYLOAD])
+                    self._outer.write(frame.encode_frame(ftype, chunk))
+            else:
+                self._outer.write(data)
         except (ConnectionResetError, BrokenPipeError):
             pass
 
     def eof_received(self):
-        try:
-            self._outer.write_eof()
-        except (ConnectionResetError, BrokenPipeError, OSError):
-            pass
+        # v1.1 doesn't half-close the outer on inner EOF — the EXIT
+        # frame + CLOSE come later via _run_session after wait_closed.
+        # v1.0 (legacy) still half-closes for back-compat.
+        if not self._framed:
+            try:
+                self._outer.write_eof()
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                pass
         return False
 
 
@@ -134,6 +170,10 @@ async def proxy_to_inner_ssh(
     rows = header.get('rows')
     cols = header.get('cols')
     env = header.get('env') or {}
+    # v1.1: opt into typed framing only if the client advertised
+    # support. Older clients omit `supports_framing` and we stay in
+    # legacy raw-bytes mode for them.
+    framed = bool(header.get('supports_framing'))
 
     # Apply cert-mandated overrides.
     command: Optional[str]
@@ -185,7 +225,7 @@ async def proxy_to_inner_ssh(
         return
 
     # ---- 3. ack the client ----
-    _write_ack(outer_writer, ok=True)
+    _write_ack(outer_writer, ok=True, framing=framed)
     try:
         await outer_writer.drain()
     except (ConnectionResetError, BrokenPipeError, OSError):
@@ -200,6 +240,7 @@ async def proxy_to_inner_ssh(
                              command=command,
                              interactive=interactive,
                              term=term, rows=rows, cols=cols, env=env,
+                             framed=framed,
                              conn_id=conn_id),
                 timeout=max_session_seconds
                        if max_session_seconds and max_session_seconds > 0
@@ -221,6 +262,7 @@ async def _run_session(conn: asyncssh.SSHClientConnection,
                        rows: Optional[int],
                        cols: Optional[int],
                        env: dict[str, str],
+                       framed: bool,
                        conn_id: str) -> None:
     # asyncssh's create_session signature:
     #   create_session(session_factory, command=None, *, request_pty='auto',
@@ -248,9 +290,11 @@ async def _run_session(conn: asyncssh.SSHClientConnection,
     # default utf-8 codec (which silently aborts the channel) and so
     # chan.write(bytes_from_stdin) doesn't raise the str-expected error.
     chan, _session = await conn.create_session(
-        lambda: _OuterRelay(outer_writer), encoding=None, **create_kwargs)
+        lambda: _OuterRelay(outer_writer, framed=framed),
+        encoding=None, **create_kwargs)
 
-    async def pump_outer_to_inner():
+    async def pump_outer_to_inner_raw():
+        """Legacy v1.0: outer bytes → chan; outer EOF → chan.write_eof."""
         try:
             while True:
                 data = await outer_reader.read(65536)
@@ -267,7 +311,51 @@ async def _run_session(conn: asyncssh.SSHClientConnection,
             except Exception:
                 pass
 
-    pump = asyncio.create_task(pump_outer_to_inner())
+    async def pump_outer_to_inner_framed():
+        """v1.1: parse typed frames from the outer client.
+
+        STDIN     → chan.write
+        STDIN_EOF → chan.write_eof
+        WINSIZE   → chan.change_terminal_size
+        CLOSE     → break (client signaled graceful close)
+        Unknown   → log + break
+        """
+        try:
+            while True:
+                try:
+                    ftype, payload = await frame.read_frame_async(outer_reader)
+                except frame.ProtocolError as e:
+                    log.warning('[%s] outer framing error: %s', conn_id, e)
+                    break
+                if ftype == frame.STDIN:
+                    if payload:
+                        chan.write(payload)
+                elif ftype == frame.STDIN_EOF:
+                    chan.write_eof()
+                elif ftype == frame.WINSIZE:
+                    try:
+                        rows_, cols_ = frame.decode_winsize(payload)
+                        chan.change_terminal_size(cols_, rows_)
+                    except (frame.ProtocolError, Exception) as e:
+                        log.debug('[%s] WINSIZE handler: %s', conn_id, e)
+                elif ftype == frame.CLOSE:
+                    break
+                else:
+                    log.warning('[%s] outer sent unexpected frame type '
+                                '0x%02x; closing', conn_id, ftype)
+                    break
+        except (ConnectionResetError, BrokenPipeError,
+                 asyncio.IncompleteReadError):
+            pass
+        finally:
+            try:
+                chan.close()
+            except Exception:
+                pass
+
+    pump = asyncio.create_task(
+        pump_outer_to_inner_framed() if framed else pump_outer_to_inner_raw()
+    )
     try:
         await chan.wait_closed()
     finally:
@@ -275,6 +363,31 @@ async def _run_session(conn: asyncssh.SSHClientConnection,
         try:
             await pump
         except (asyncio.CancelledError, Exception):
+            pass
+
+    # v1.1: emit EXIT (or SIGNAL) + CLOSE frames before closing the
+    # outer writer. This is what carries the remote command's exit
+    # code back to the mssh client.
+    if framed:
+        try:
+            exit_status = chan.get_exit_status()
+            exit_signal = chan.get_exit_signal()
+        except Exception:
+            exit_status = None
+            exit_signal = None
+        try:
+            if exit_signal is not None:
+                # asyncssh returns (signal_name, ...) as a tuple.
+                signame = exit_signal[0] if isinstance(exit_signal, tuple) \
+                          else str(exit_signal)
+                outer_writer.write(frame.encode_frame(
+                    frame.SIGNAL, signame.encode('utf-8')))
+            elif exit_status is not None:
+                code = max(0, min(255, int(exit_status)))
+                outer_writer.write(frame.encode_frame(
+                    frame.EXIT, frame.encode_exit(code)))
+            outer_writer.write(frame.encode_frame(frame.CLOSE))
+        except (ConnectionResetError, BrokenPipeError, OSError):
             pass
 
     # Drain any remaining buffered output.
