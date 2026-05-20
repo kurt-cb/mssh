@@ -117,22 +117,26 @@ session cookie handling.
 
 ## 5. The CA could mint credentials for other applications (step-ca parallel)
 
-**Status:** **Partial.** Core X.509 minting primitives
-([cert_minter.issue_client_cert + issue_server_cert](../python/packages/mssh-ca/src/mssh/ca/cert_minter.py#L485))
-work today and can produce TLS server / HTTPS user / OpenVPN-shaped
-leaf certs — operators just have to call them from Python or via
-`mssh-admin admin add` (which abuses the admin role to mint a
-generic client cert). The gap is operator-facing CLI surface
-(`mssh-admin cert mint`, `openvpn issue`, etc.), bundle exporters
-(.p12, .ovpn), per-cert validity / SAN policy, and the
-non-X.509 credential families (WireGuard's Curve25519 keypairs and
-PGP's OpenPGP signing) that each need their own issuance backend.
+**Status:** **X.509 family LANDED in v0.1.4.** `mssh-admin cert mint
+--type {tls-server, https-user, code-sign}` and `mssh-admin openvpn
+issue` are first-class commands; both wire through new admin
+endpoints (`/v1/admin/cert/mint`, `/v1/admin/openvpn/issue`) and the
+extended `cert_minter` helpers (`issue_server_cert`,
+`issue_codesign_cert`). PKCS#12 packaging for HTTPS-user is built
+into the CLI; `.ovpn` bundle assembly is built into `openvpn issue`.
+
+Still outstanding under §5:
+  - **CRL Distribution Point** embedded in issued leaves (OpenVPN
+    consumers want this; today CRL is out-of-band via `GET /v1/crl`).
+  - **ACME endpoint** (RFC 8555 listener + state machine).
+  - **WireGuard Curve25519 keypair issuance + wg-quick config emission.**
+  - **PGP (OpenPGP) signing hierarchy.** Composes with
+    [§27](#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory).
 
 **See also:** [ca-integration.md](ca-integration.md) — operator
-playbook for what's implemented today vs. the §5 target shape, with
-the manual-stitching recipes that work today and the proposed CLI
-shapes plus migration recipes from existing CAs / OpenVPN /
-WireGuard / PGP deployments.
+playbook for both the implemented commands and the proposed CLI
+shapes for the remaining pieces, plus migration recipes from
+existing CAs / OpenVPN / WireGuard / PGP deployments.
 
 ### Idea
 

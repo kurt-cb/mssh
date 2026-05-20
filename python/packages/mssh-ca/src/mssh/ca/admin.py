@@ -52,6 +52,13 @@ _PERMISSIONS = {
     # on their next authorize call. Sensitive — superuser only.
     'cert.revoke':      {'superuser'},
     'crl.read':         {'superuser', 'server-admin', 'user-admin', 'auditor'},
+    # §5 cert minting for other applications. Generic TLS server certs,
+    # HTTPS user (browser mTLS) client certs, code-signing certs, and
+    # OpenVPN client bundles all share the TLS CA hierarchy. Restrict
+    # to superuser since these are operator-distributed credentials
+    # outside the SSH path.
+    'cert.mint':        {'superuser'},
+    'openvpn.issue':    {'superuser'},
 }
 
 
@@ -790,4 +797,224 @@ def crl_fetch(ctx: AdminContext, admin: Admin,
         'status': 'ok',
         'current_seq': ctx.crl.current_seq(),
         'entries': [e.to_dict() for e in entries],
+    }
+
+
+# ---------------------------------------------------------------------------
+# §5: cert minting for other applications
+# ---------------------------------------------------------------------------
+
+_CERT_TYPES = ('tls-server', 'https-user', 'code-sign')
+
+# Default per-type validity (days). Operators can override per-call via
+# body['validity_days']; the validity cap below is the hard upper bound.
+_CERT_DEFAULT_VALIDITY = {
+    'tls-server': 90,
+    'https-user': 90,
+    'code-sign':  365,
+    'openvpn':    90,
+}
+_CERT_MAX_VALIDITY = 825   # CAB-forum-style max for TLS server certs;
+                            # we apply it uniformly for simplicity.
+
+
+def _validate_san(s: str) -> str:
+    """Normalize and validate a single SAN string.
+
+    Accepts ``DNS:<name>``, ``IP:<addr>``, or a bare DNS name (no
+    prefix → treated as DNS). Raises ValueError on malformed input.
+    Returns the normalized form (always with a ``DNS:`` / ``IP:``
+    prefix) for downstream consumers.
+    """
+    s = s.strip()
+    if not s:
+        raise ValueError('empty SAN')
+    if s.startswith('IP:'):
+        import ipaddress
+        ipaddress.ip_address(s[3:])  # raises ValueError if bad
+        return s
+    if s.startswith('DNS:'):
+        host = s[4:]
+        if not host or any(c in host for c in ' \t\n\r"\''):
+            raise ValueError(f'invalid DNS SAN {host!r}')
+        return s
+    # bare hostname
+    host = s
+    if any(c in host for c in ' \t\n\r"\''):
+        raise ValueError(f'invalid DNS SAN {host!r}')
+    return f'DNS:{host}'
+
+
+def _validity_or_default(body: dict, kind: str) -> tuple[int, dict | None]:
+    """Resolve validity_days from body with default + cap. Returns
+    ``(days, err_payload)`` — err_payload is None on success."""
+    raw = body.get('validity_days')
+    if raw is None:
+        return _CERT_DEFAULT_VALIDITY[kind], None
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return 0, _err(400, 'bad_request',
+                       f'validity_days must be an integer, got {raw!r}')[1]
+    if days < 1:
+        return 0, _err(400, 'bad_request',
+                       f'validity_days must be >= 1, got {days}')[1]
+    if days > _CERT_MAX_VALIDITY:
+        return 0, _err(400, 'bad_request',
+                       f'validity_days={days} exceeds cap {_CERT_MAX_VALIDITY}')[1]
+    return days, None
+
+
+def cert_mint(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
+    """Mint an X.509 leaf cert against the TLS CA hierarchy.
+
+    Body schema::
+
+      {
+        "type":          "tls-server" | "https-user" | "code-sign",
+        "cn":            "common-name",
+        "sans":          ["DNS:foo.example.com", "IP:10.0.0.1"]   # tls-server only
+        "validity_days": 90                                       # optional
+      }
+
+    Returns ``{cert_pem, key_pem, ca_cert_pem, subject_cn}`` shaped
+    like server / admin add. The CLI handles output formatting (PEM
+    files for tls-server / code-sign; PKCS#12 wrap for https-user).
+    """
+    if (err := _check('cert.mint', admin)):
+        return err
+
+    cert_type = body.get('type')
+    if cert_type not in _CERT_TYPES:
+        return _err(400, 'bad_request',
+                    f'type must be one of {_CERT_TYPES}, got {cert_type!r}')
+
+    cn = body.get('cn')
+    if not isinstance(cn, str) or not cn.strip():
+        return _err(400, 'bad_request', 'missing/invalid cn')
+    cn = cn.strip()
+
+    days, err = _validity_or_default(body, cert_type)
+    if err:
+        return 400, err
+
+    sans_raw = body.get('sans') or []
+    if cert_type != 'tls-server' and sans_raw:
+        return _err(400, 'bad_request',
+                    f'sans are only valid for type=tls-server (got {cert_type})')
+    if not isinstance(sans_raw, list):
+        return _err(400, 'bad_request', 'sans must be a list')
+    try:
+        sans = [_validate_san(s) for s in sans_raw]
+    except ValueError as e:
+        return _err(400, 'bad_request', f'invalid SAN: {e}')
+
+    try:
+        if cert_type == 'tls-server':
+            bundle = cert_minter.issue_server_cert(
+                cn, ctx.tls_ca_key, ctx.tls_ca_cert,
+                validity_days=days, key_type=ctx.mtls_key_type,
+                sans=sans or None)
+        elif cert_type == 'https-user':
+            bundle = cert_minter.issue_client_cert(
+                cn, ctx.tls_ca_key, ctx.tls_ca_cert,
+                validity_days=days, key_type=ctx.mtls_key_type)
+        else:  # code-sign
+            bundle = cert_minter.issue_codesign_cert(
+                cn, ctx.tls_ca_key, ctx.tls_ca_cert,
+                validity_days=days, key_type=ctx.mtls_key_type)
+    except Exception as e:
+        return _err(500, 'internal', f'cert issuance failed: {e}')
+
+    _audit_admin(ctx, admin, f'cert.mint.{cert_type}',
+                 {'cn': cn, 'validity_days': days,
+                  'sans': sans}, 'ok')
+
+    return 201, {
+        'status': 'ok',
+        'cert': {
+            'type': cert_type,
+            'subject_cn': cn,
+            'validity_days': days,
+        },
+        'credentials': {
+            'cert_pem': bundle.cert_pem.decode('ascii'),
+            'key_pem': bundle.key_pem.decode('ascii'),
+            'ca_cert_pem': bundle.ca_cert_pem.decode('ascii'),
+        },
+    }
+
+
+def openvpn_issue(ctx: AdminContext, admin: Admin,
+                  body: dict) -> tuple[int, dict]:
+    """Issue an OpenVPN client cert + key + CA bundle.
+
+    Body schema::
+
+      {
+        "cn":              "alice",                       # client cert CN
+        "server_endpoint": "vpn.example.com 1194",        # for `remote ` directive
+        "proto":           "udp" | "tcp"                  # optional, default udp
+        "dev":             "tun" | "tap"                  # optional, default tun
+        "validity_days":   90                             # optional
+      }
+
+    Returns PEMs + the connection metadata; the CLI assembles the
+    final ``.ovpn`` config file (which inlines the cert/key/ca).
+    """
+    if (err := _check('openvpn.issue', admin)):
+        return err
+
+    cn = body.get('cn')
+    if not isinstance(cn, str) or not cn.strip():
+        return _err(400, 'bad_request', 'missing/invalid cn')
+    cn = cn.strip()
+
+    server_endpoint = body.get('server_endpoint')
+    if not isinstance(server_endpoint, str) or not server_endpoint.strip():
+        return _err(400, 'bad_request',
+                    'missing/invalid server_endpoint (e.g. "vpn.example.com 1194")')
+    server_endpoint = server_endpoint.strip()
+    # Basic shape check: should contain a space (host then port).
+    if len(server_endpoint.split()) != 2:
+        return _err(400, 'bad_request',
+                    f'server_endpoint must be "host port" form, got {server_endpoint!r}')
+
+    proto = (body.get('proto') or 'udp').strip().lower()
+    if proto not in ('udp', 'tcp'):
+        return _err(400, 'bad_request',
+                    f'proto must be udp or tcp, got {proto!r}')
+    dev = (body.get('dev') or 'tun').strip().lower()
+    if dev not in ('tun', 'tap'):
+        return _err(400, 'bad_request', f'dev must be tun or tap, got {dev!r}')
+
+    days, err = _validity_or_default(body, 'openvpn')
+    if err:
+        return 400, err
+
+    try:
+        bundle = cert_minter.issue_client_cert(
+            cn, ctx.tls_ca_key, ctx.tls_ca_cert,
+            validity_days=days, key_type=ctx.mtls_key_type)
+    except Exception as e:
+        return _err(500, 'internal', f'cert issuance failed: {e}')
+
+    _audit_admin(ctx, admin, 'openvpn.issue',
+                 {'cn': cn, 'server_endpoint': server_endpoint,
+                  'proto': proto, 'dev': dev,
+                  'validity_days': days}, 'ok')
+
+    return 201, {
+        'status': 'ok',
+        'openvpn': {
+            'subject_cn': cn,
+            'server_endpoint': server_endpoint,
+            'proto': proto, 'dev': dev,
+            'validity_days': days,
+        },
+        'credentials': {
+            'cert_pem': bundle.cert_pem.decode('ascii'),
+            'key_pem': bundle.key_pem.decode('ascii'),
+            'ca_cert_pem': bundle.ca_cert_pem.decode('ascii'),
+        },
     }

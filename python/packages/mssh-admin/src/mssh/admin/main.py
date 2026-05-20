@@ -779,7 +779,123 @@ def bypass_cert_mint_cmd(ctx, username, pubkey_path, valid_days,
 
 @cli.group('cert')
 def cert_group():
-    """Manage authz certs minted by this CA (revoke etc.)."""
+    """Manage authz certs minted by this CA (revoke, §5 mint, …)."""
+
+
+@cert_group.command('mint')
+@click.option('--type', 'cert_type',
+              type=click.Choice(['tls-server', 'https-user', 'code-sign']),
+              required=True,
+              help='Cert flavor. tls-server: serverAuth EKU + optional SANs. '
+                   'https-user: clientAuth EKU, browser-importable. '
+                   'code-sign: codeSigning EKU.')
+@click.option('--cn', required=True, help='Common Name on the leaf cert.')
+@click.option('--san', 'sans', multiple=True,
+              help='SubjectAltName (tls-server only). '
+                   'Forms: DNS:foo.example.com, IP:10.0.0.1, or bare host. '
+                   'Repeat for multiple.')
+@click.option('--validity-days', type=int, default=None,
+              help='Cert validity in days (default per type; capped at 825).')
+@click.option('--out', 'out_prefix', default=None, type=click.Path(),
+              help='Write outputs to OUT-cert.pem, OUT-key.pem, OUT-ca.pem. '
+                   'For --type https-user also writes OUT.p12 if --p12-password '
+                   'is set. Without --out, the cert + key are printed to stdout.')
+@click.option('--p12-password', default=None,
+              help='Password for PKCS#12 export (https-user only). '
+                   'If unset, no .p12 is generated.')
+@click.pass_context
+def cert_mint_cmd(ctx, cert_type, cn, sans, validity_days, out_prefix,
+                  p12_password):
+    """Mint a §5 cert via the CA.
+
+    Examples:
+
+      \b
+      # TLS server cert for an internal HTTPS endpoint:
+      mssh-admin cert mint --type tls-server \\
+                           --cn grafana.internal.example.com \\
+                           --san DNS:grafana.internal.example.com \\
+                           --san IP:10.10.0.42 \\
+                           --validity-days 30 \\
+                           --out grafana
+
+      \b
+      # Browser-importable HTTPS client cert:
+      mssh-admin cert mint --type https-user --cn alice \\
+                           --p12-password CHANGEME --out alice
+
+      \b
+      # Code-signing cert:
+      mssh-admin cert mint --type code-sign --cn 'Build agent 03' \\
+                           --validity-days 180 --out build03
+    """
+    if sans and cert_type != 'tls-server':
+        click.echo(f'error: --san is only valid for --type tls-server '
+                   f'(got --type {cert_type})', err=True)
+        ctx.exit(2)
+    if p12_password and cert_type != 'https-user':
+        click.echo('error: --p12-password is only valid for '
+                   '--type https-user', err=True)
+        ctx.exit(2)
+
+    c = _make_client(ctx)
+    resp = _handle_call(c.cert_mint, cert_type, cn,
+                        sans=list(sans) if sans else None,
+                        validity_days=validity_days)
+    creds = resp['credentials']
+    if out_prefix:
+        od = Path(out_prefix)
+        if od.suffix:                       # e.g. --out alice.pem.bad
+            od = od.with_suffix('')
+        od.parent.mkdir(parents=True, exist_ok=True)
+        cert_path = od.with_name(f'{od.name}-cert.pem')
+        key_path  = od.with_name(f'{od.name}-key.pem')
+        ca_path   = od.with_name(f'{od.name}-ca.pem')
+        cert_path.write_text(creds['cert_pem'])
+        key_path.write_text(creds['key_pem'])
+        ca_path.write_text(creds['ca_cert_pem'])
+        os.chmod(key_path, 0o600)
+        click.echo(f'wrote {cert_path}, {key_path}, {ca_path}', err=True)
+        if cert_type == 'https-user' and p12_password:
+            p12_path = od.with_name(f'{od.name}.p12')
+            _write_pkcs12(creds['cert_pem'], creds['key_pem'],
+                          friendly_name=cn,
+                          password=p12_password.encode('utf-8'),
+                          out_path=p12_path)
+            click.echo(f'wrote {p12_path} (PKCS#12, encrypted)', err=True)
+    else:
+        click.echo('--- cert ---', err=True)
+        click.echo(creds['cert_pem'])
+        click.echo('--- key ---', err=True)
+        click.echo(creds['key_pem'])
+    _output(ctx, resp['cert'])
+
+
+def _write_pkcs12(cert_pem: str, key_pem: str, *,
+                  friendly_name: str, password: bytes,
+                  out_path: Path) -> None:
+    """Convert PEM cert + key to a password-encrypted PKCS#12 blob.
+
+    Browsers (Chrome, Firefox, Safari) accept .p12 imports natively;
+    this saves the operator from running ``openssl pkcs12 -export``
+    by hand after every mint.
+    """
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.serialization import pkcs12
+    from cryptography import x509
+
+    cert = x509.load_pem_x509_certificate(cert_pem.encode('ascii'))
+    key  = serialization.load_pem_private_key(key_pem.encode('ascii'),
+                                              password=None)
+    p12 = pkcs12.serialize_key_and_certificates(
+        name=friendly_name.encode('utf-8'),
+        key=key,
+        cert=cert,
+        cas=None,
+        encryption_algorithm=serialization.BestAvailableEncryption(password),
+    )
+    out_path.write_bytes(p12)
+    os.chmod(out_path, 0o600)
 
 
 @cert_group.command('revoke')
@@ -821,6 +937,94 @@ def crl_list_cmd(ctx, after, limit):
     c = _make_client(ctx)
     out = _handle_call(c.crl_list, after, limit)
     _output(ctx, out)
+
+
+@cli.group('openvpn')
+def openvpn_group():
+    """Issue OpenVPN client bundles signed by this CA's TLS hierarchy.
+
+    Output is a single ``.ovpn`` file with the client cert + key + CA
+    inlined plus the connection metadata. Drop into the user's OpenVPN
+    client; revocation goes through ``mssh-admin cert revoke <serial>``
+    (OpenVPN server polls the CA's CRL).
+    """
+
+
+@openvpn_group.command('issue')
+@click.option('--cn', required=True,
+              help='Common Name on the client cert (typically the username).')
+@click.option('--server-endpoint', required=True,
+              help='"host port" form for the .ovpn remote directive, '
+                   'e.g. "vpn.example.com 1194".')
+@click.option('--proto', type=click.Choice(['udp', 'tcp']), default='udp',
+              show_default=True)
+@click.option('--dev', type=click.Choice(['tun', 'tap']), default='tun',
+              show_default=True)
+@click.option('--validity-days', type=int, default=None,
+              help='Cert validity in days (default 90; capped at 825).')
+@click.option('--out', 'out_path', default=None, type=click.Path(),
+              help='Write the .ovpn bundle to this path. '
+                   'Without --out, the .ovpn is printed to stdout.')
+@click.pass_context
+def openvpn_issue_cmd(ctx, cn, server_endpoint, proto, dev,
+                      validity_days, out_path):
+    """Issue an OpenVPN client bundle.
+
+    Example:
+
+      \b
+      mssh-admin openvpn issue --cn alice \\
+                                --server-endpoint "vpn.example.com 1194" \\
+                                --validity-days 30 \\
+                                --out alice-vpn.ovpn
+    """
+    c = _make_client(ctx)
+    resp = _handle_call(c.openvpn_issue, cn, server_endpoint,
+                        proto=proto, dev=dev,
+                        validity_days=validity_days)
+    creds = resp['credentials']
+    meta  = resp['openvpn']
+    ovpn  = _format_ovpn_bundle(
+        ca_pem=creds['ca_cert_pem'],
+        cert_pem=creds['cert_pem'],
+        key_pem=creds['key_pem'],
+        server_endpoint=meta['server_endpoint'],
+        proto=meta['proto'],
+        dev=meta['dev'],
+    )
+    if out_path:
+        op = Path(out_path)
+        op.parent.mkdir(parents=True, exist_ok=True)
+        op.write_text(ovpn)
+        os.chmod(op, 0o600)
+        click.echo(f'wrote {op}', err=True)
+    else:
+        click.echo(ovpn)
+    _output(ctx, meta)
+
+
+def _format_ovpn_bundle(*, ca_pem: str, cert_pem: str, key_pem: str,
+                        server_endpoint: str, proto: str, dev: str) -> str:
+    """Assemble a single-file .ovpn config with inline cert/key/ca."""
+    return (
+        f'# mssh-admin openvpn issue — single-file client config\n'
+        f'client\n'
+        f'dev {dev}\n'
+        f'proto {proto}\n'
+        f'remote {server_endpoint}\n'
+        f'resolv-retry infinite\n'
+        f'nobind\n'
+        f'persist-key\n'
+        f'persist-tun\n'
+        f'remote-cert-tls server\n'
+        f'cipher AES-256-GCM\n'
+        f'auth SHA256\n'
+        f'verb 3\n'
+        f'\n'
+        f'<ca>\n{ca_pem.strip()}\n</ca>\n'
+        f'<cert>\n{cert_pem.strip()}\n</cert>\n'
+        f'<key>\n{key_pem.strip()}\n</key>\n'
+    )
 
 
 if __name__ == '__main__':

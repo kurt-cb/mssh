@@ -237,6 +237,7 @@ def _issue_leaf(subject_cn: str, leaf_key,
                 signing: Intermediate,
                 *, validity_days: int = 365,
                 server_auth: bool = False, client_auth: bool = True,
+                code_signing: bool = False,
                 sans: list[str] | None = None) -> x509.Certificate:
     """Issue a leaf cert, signed by the given intermediate."""
     subject = x509.Name([
@@ -249,6 +250,8 @@ def _issue_leaf(subject_cn: str, leaf_key,
         eku.append(oid.ExtendedKeyUsageOID.SERVER_AUTH)
     if client_auth:
         eku.append(oid.ExtendedKeyUsageOID.CLIENT_AUTH)
+    if code_signing:
+        eku.append(oid.ExtendedKeyUsageOID.CODE_SIGNING)
     builder = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -535,24 +538,92 @@ def issue_client_cert(common_name: str,
     )
 
 
-def issue_server_cert(common_name: str, signing: Intermediate,
-                      *, validity_days: int = 365,
+def issue_server_cert(common_name: str,
+                      tls_ca_key=None, tls_ca_cert=None,
+                      *,
+                      signing: Intermediate | None = None,
+                      validity_days: int = 365,
                       key_type: str = 'ec',
                       sans: list[str] | None = None,
                       root_cert: x509.Certificate | None = None,
                       ) -> IssuedClientCert:
-    """Issue a leaf mTLS SERVER cert signed by the given intermediate.
-    Same bundle shape as ``issue_client_cert`` but EKU = serverAuth."""
+    """Issue a leaf mTLS / TLS SERVER cert (EKU = serverAuth).
+
+    Same two calling conventions as :func:`issue_client_cert`:
+
+      - **Legacy (positional):** ``issue_server_cert(name, tls_ca_key,
+        tls_ca_cert, sans=..., validity_days=...)``. Uses the given
+        key+cert pair as the signing intermediate; ``cert_pem`` is the
+        leaf alone.
+      - **New (keyword):** ``issue_server_cert(name, signing=intermediate,
+        sans=..., root_cert=root)``. ``cert_pem`` is leaf + intermediate;
+        ``ca_cert_pem`` is the root if supplied.
+    """
+    if signing is None:
+        if tls_ca_key is None or tls_ca_cert is None:
+            raise TypeError(
+                'issue_server_cert needs either signing=Intermediate '
+                'or both tls_ca_key + tls_ca_cert (legacy)')
+        signing = Intermediate(
+            short_name='legacy', key=tls_ca_key, cert=tls_ca_cert,
+            pubkey_fp16=compute_pubkey_fp16(tls_ca_key.public_key()),
+        )
+        chain_bundle = False
+    else:
+        chain_bundle = True
     key = generate_signing_key(key_type)
     cert = _issue_leaf(common_name, key, signing,
                        validity_days=validity_days,
                        server_auth=True, client_auth=False,
                        sans=sans)
     return IssuedClientCert(
-        cert_pem=_chain_pem(cert, signing.cert),
+        cert_pem=(_chain_pem(cert, signing.cert) if chain_bundle
+                  else serialize_certificate(cert)),
         key_pem=serialize_private_key(key),
         ca_cert_pem=(serialize_certificate(root_cert)
-                     if root_cert is not None else b''),
+                     if root_cert is not None
+                     else serialize_certificate(signing.cert)),
+        subject_cn=common_name,
+    )
+
+
+def issue_codesign_cert(common_name: str,
+                        tls_ca_key=None, tls_ca_cert=None,
+                        *,
+                        signing: Intermediate | None = None,
+                        validity_days: int = 365,
+                        key_type: str = 'ec',
+                        root_cert: x509.Certificate | None = None,
+                        ) -> IssuedClientCert:
+    """Issue a leaf code-signing cert (EKU = codeSigning).
+
+    No clientAuth / serverAuth — the leaf is for signing artifacts,
+    not TLS. Same dual-calling convention as the other ``issue_*`` helpers.
+    """
+    if signing is None:
+        if tls_ca_key is None or tls_ca_cert is None:
+            raise TypeError(
+                'issue_codesign_cert needs either signing=Intermediate '
+                'or both tls_ca_key + tls_ca_cert (legacy)')
+        signing = Intermediate(
+            short_name='legacy', key=tls_ca_key, cert=tls_ca_cert,
+            pubkey_fp16=compute_pubkey_fp16(tls_ca_key.public_key()),
+        )
+        chain_bundle = False
+    else:
+        chain_bundle = True
+    key = generate_signing_key(key_type)
+    cert = _issue_leaf(common_name, key, signing,
+                       validity_days=validity_days,
+                       server_auth=False, client_auth=False,
+                       code_signing=True)
+    return IssuedClientCert(
+        cert_pem=(_chain_pem(cert, signing.cert) if chain_bundle
+                  else serialize_certificate(cert)),
+        key_pem=serialize_private_key(key),
+        ca_cert_pem=(serialize_certificate(root_cert)
+                     if root_cert is not None
+                     else serialize_certificate(signing.cert)),
         subject_cn=common_name,
     )
 

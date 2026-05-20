@@ -396,6 +396,27 @@ def register_routes(app: Flask) -> None:
             app.config['ADMIN_CTX'], adm, body)
         return jsonify(payload), status
 
+    # ---- §5 cert minting (TLS server / HTTPS user / code-signing) ----
+    @app.post('/v1/admin/cert/mint')
+    def _cert_mint():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.cert_mint(
+            app.config['ADMIN_CTX'], adm, body)
+        return jsonify(payload), status
+
+    @app.post('/v1/admin/openvpn/issue')
+    def _openvpn_issue():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.openvpn_issue(
+            app.config['ADMIN_CTX'], adm, body)
+        return jsonify(payload), status
+
     # ---- CRL ----
     # cert.revoke appends to the CRL; msshds pick up on next authorize.
     @app.post('/v1/admin/cert/revoke')

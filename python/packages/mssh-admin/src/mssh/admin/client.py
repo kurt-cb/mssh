@@ -183,6 +183,41 @@ class CAClient:
             body['max_session_seconds'] = max_session_seconds
         return self._request('POST', '/v1/admin/bypass-cert/mint', json=body)
 
+    # ---- §5 cert minting (TLS server / HTTPS user / code-signing) ----
+    def cert_mint(self, cert_type: str, cn: str, *,
+                  sans: list[str] | None = None,
+                  validity_days: int | None = None) -> dict[str, Any]:
+        """Mint an X.509 leaf cert against the TLS CA hierarchy.
+
+        ``cert_type`` is one of ``tls-server`` | ``https-user`` |
+        ``code-sign``. ``sans`` are only valid for ``tls-server``;
+        each entry must be of the form ``DNS:<name>``, ``IP:<addr>``,
+        or a bare DNS name.
+        """
+        body: dict[str, Any] = {'type': cert_type, 'cn': cn}
+        if sans is not None:
+            body['sans'] = list(sans)
+        if validity_days is not None:
+            body['validity_days'] = int(validity_days)
+        return self._request('POST', '/v1/admin/cert/mint', json=body)
+
+    def openvpn_issue(self, cn: str, server_endpoint: str, *,
+                      proto: str = 'udp', dev: str = 'tun',
+                      validity_days: int | None = None) -> dict[str, Any]:
+        """Issue an OpenVPN client cert + key + CA bundle plus the
+        connection metadata the CLI needs to assemble the ``.ovpn``
+        file. ``server_endpoint`` is ``"host port"`` form (e.g.
+        ``"vpn.example.com 1194"``)."""
+        body: dict[str, Any] = {
+            'cn': cn,
+            'server_endpoint': server_endpoint,
+            'proto': proto,
+            'dev': dev,
+        }
+        if validity_days is not None:
+            body['validity_days'] = int(validity_days)
+        return self._request('POST', '/v1/admin/openvpn/issue', json=body)
+
     # ---- CRL ----
     def cert_revoke(self, serials: list[str], *,
                     reason: str = '') -> dict[str, Any]:
