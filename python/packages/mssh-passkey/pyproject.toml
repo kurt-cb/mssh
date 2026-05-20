@@ -1,0 +1,40 @@
+# mssh-passkey — public-facing WebAuthn ceremony broker.
+#
+# Independent of mssh and mssh-ca; consumed by them (and other
+# back-end clients) over mTLS. Owns no keys; holds only in-flight
+# ceremonies and relays opaque options/response blobs between
+# back-end clients and end-user browsers.
+#
+# Design: design/mssh-passkey-module.md
+# Consumer integration: design/ca-integration.md § mssh-passkey
+
+[build-system]
+requires = ["setuptools>=68", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mssh-passkey"
+dynamic = ["version"]
+description = "mssh — WebAuthn ceremony broker (relay-only)."
+authors = [{name = "Kurt Godwin"}]
+license = {text = "Apache-2.0"}
+requires-python = ">=3.9"
+dependencies = [
+    "flask>=3.0",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+]
+
+[project.scripts]
+mssh-passkey = "mssh_passkey.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["mssh_passkey*"]
+
+[tool.setuptools.package-data]
+"mssh_passkey" = ["templates/*.html", "static/*.css", "static/*.js"]
+
+[tool.setuptools_scm]
+root = "../../.."
+fallback_version = "0.0.0+local"

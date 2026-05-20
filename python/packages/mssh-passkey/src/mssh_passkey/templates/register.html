@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}register · mssh-passkey{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div class="card-body">
+    <h4 class="card-title">Register a new passkey</h4>
+
+    {% if display_name %}
+      <p class="text-muted small mb-1">Account</p>
+      <p class="fw-bold mb-3">{{ display_name }}</p>
+    {% endif %}
+
+    <p class="text-muted small mb-1">Description</p>
+    <p class="mb-3">{{ description }}</p>
+
+    <p class="text-muted small mb-3">
+      This link is one-time use. Expires at
+      <code>{{ expires_at }}</code>.
+    </p>
+
+    <button id="register-btn" class="btn btn-primary w-100">
+      Register this device
+    </button>
+
+    <div id="status" class="mt-3" role="status"></div>
+  </div>
+</div>
+
+<script id="ceremony-data" type="application/json">
+{
+  "ceremony_id": {{ ceremony_id|tojson }},
+  "options_json": {{ options_json|tojson }}
+}
+</script>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='register.js') }}"></script>
+{% endblock %}

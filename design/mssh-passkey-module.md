@@ -1011,6 +1011,72 @@ and
     (10 transactions/minute/user, configurable). Back-end
     clients can apply their own.
 
+### Hardening v2 — defending against a compromised broker (deferred)
+
+> **Status:** captured for v2; not in first-pass scope.
+
+A compromised broker has limited blast radius (it holds no keys
+and cannot fabricate ceremonies), but its callback-side interface
+to mssh-ca is still an attack surface. A pwned broker can attempt:
+
+  - **Injection attacks** against mssh-ca's callback handler.
+    `response_json` is opaque bytes from the broker's perspective
+    but parsed by mssh-ca; mssh-ca must treat it as untrusted
+    input. Concrete vectors: oversized payloads (memory DoS),
+    deeply-nested JSON (parser stack DoS), unexpected fields, or
+    cleverly-crafted base64url blobs aimed at the underlying
+    crypto parsers.
+  - **Bogus callbacks**: callback for an unknown ceremony_id;
+    callback for a ceremony that hasn't been issued; callback
+    with a ceremony_id that mssh-ca DID issue but with a tampered
+    outcome / response_json.
+  - **Slow-loris / connection-exhaustion** against mssh-ca's
+    inbound callback listener.
+  - **TLS downgrade or stripped mTLS** if Apache2 (or whatever
+    fronts mssh-ca) is misconfigured.
+
+mssh-ca's v2 hardening requirements:
+
+  1. **Strict, bounded parsing on `response_json`.** Enforce a hard
+    size cap (e.g. 64KB) before JSON decode. Reject any field not
+    on a whitelist. Reject nested objects beyond a fixed depth.
+    Use streaming parsers where available; avoid `json.loads`
+    blocking on a 100MB payload.
+  2. **Callback authenticity check.** Every incoming callback
+    must reference a ceremony_id mssh-ca actually issued AND must
+    arrive within an expected wall-clock window. Replays of stale
+    callbacks rejected.
+  3. **mTLS pinning to the broker's identity cert.** The TLS
+    handler verifying the inbound callback's client cert pins
+    against a specific cert fingerprint, not just "chain
+    validates." A compromised broker that retains its cert can
+    still call back, but a broker rotated to a fresh attacker-
+    held cert (impossible without the broker's key but...) is
+    refused.
+  4. **2FA fail-state.** If mssh-ca detects multiple suspicious
+    callback events in a short window (oversized payloads,
+    unknown ceremony_ids, tampered responses, etc.), it enters a
+    **2FA fail-state**: every subsequent operation requiring 2FA
+    is refused, regardless of whether a fresh callback would
+    actually succeed. The fail-state is operator-cleared via an
+    out-of-band admin command (`mssh-admin passkey-broker
+    reset --reason "..."`) that requires the operator to confirm
+    they've investigated. Mirrors the
+    "fail-closed-on-anomaly" pattern from the CRL-strict-mode
+    gate.
+  5. **Rate-limit + anomaly detection.** Per-ceremony callbacks
+    capped at 1 (idempotency on transaction_id). Per-source
+    callbacks capped at a sensible rate.
+  6. **Independent observability.** mssh-ca's audit log records
+    every callback (delivered + rejected) with full context.
+    Operators can spot a wave of suspicious activity even if
+    individual rejected requests didn't trip the fail-state.
+
+Carries no impact on the broker module — these are entirely
+defenses inside mssh-ca's callback receiver. The broker design
+is unchanged; what changes is what mssh-ca trusts about the
+broker's output.
+
 ---
 
 ## 10. Test strategy

@@ -1,0 +1,4 @@
+body { background: #f6f7fb; }
+.card { border: 0; box-shadow: 0 2px 6px rgba(0,0,0,0.08); }
+#status .text-success { color: #198754 !important; font-weight: 600; }
+#status .text-danger  { color: #dc3545 !important; font-weight: 600; }
