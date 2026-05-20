@@ -756,22 +756,20 @@ shipping a real release becomes a priority.
 
 ## 17. Per-session banner with variable substitution
 
-**Status:** **Partial — v2 unblocked, ready to pick up.**
+**Status:** **LANDED** for the operator-visible scope.
 - **v1 — landed:** operator-templated, startup substitution. Operators
   customize via `banner.template_path` in `wrapper.yaml`; rendered at
-  msshd boot.
-- **v2 — pickable:** per-user / per-session substitution AND
-  delivery of the banner to the *mssh client* (bug-11).
-  - **Delivery side:** **landed.** [§21](#21-protocol-v11--typed-framing-for-the-post-ack-stream)
-    v1.1 framing landed in v0.1.1 with a BANNER frame; mssh client
-    surfaces the rendered banner above session output. Closed
-    [archive/closedbugs/bug-11-banner-invisible-to-mssh.md](../archive/closedbugs/bug-11-banner-invisible-to-mssh.md).
-  - **Per-session substitution:** open. Plugs into the per-connection
-    inner sshd (already landed). msshd has the full CA-decision
-    context at session-establish; rendering `{user}`, `{group}`,
-    `$MSSH_AUTH_DATA` per-session is now bounded work.
+  msshd boot with `{server}`/`{group}`/operator-supplied tokens.
+- **Delivery to mssh client — landed** via [§21](#21-protocol-v11--typed-framing-for-the-post-ack-stream)
+  v1.1 framing (BANNER frame). Closed
+  [archive/closedbugs/bug-11-banner-invisible-to-mssh.md](../archive/closedbugs/bug-11-banner-invisible-to-mssh.md).
 
-See "What's not done" below for the original v2 sketch.
+A **stretch v2** — per-session substitution where `{user}` /
+`$MSSH_AUTH_DATA` change per-connection, optionally driven from a
+CA-stored template — is sketched in "What's not done" below but is
+neither blocking nor scheduled. Per-connection inner sshd (§1) is
+landed so the prerequisite exists; if anyone wants `{user}` in the
+banner, the work is small and self-contained.
 
 ### Idea
 

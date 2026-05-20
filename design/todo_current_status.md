@@ -2,7 +2,7 @@
 
 Snapshot of open work after v0.1.1 tag. Regenerate by re-scanning
 `design/future-ideas.md`, `design/openbugs/`, and in-code `TODO`
-markers. Last updated: 2026-05-19.
+markers. Last updated: 2026-05-20.
 
 For full context on any row, follow the link to its
 `design/future-ideas.md` section.
@@ -16,7 +16,6 @@ None. All historical bugs in [archive/closedbugs/](../archive/closedbugs/)
 
 | ID | Title | Status | Depends on | Notes |
 |---|---|---|---|---|
-| [§17](future-ideas.md#17-per-session-banner-with-variable-substitution) | Per-session banner v2 | Partial — pickable | (none; §21 unblocked it) | Delivery side landed via BANNER frame; per-session substitution is bounded work (~260 LOC) |
 | [§24](future-ideas.md#24-multi-server-group-lab-coverage) | Multi-server group lab coverage | Test gap | [pyinfra-adhoc Phase A](../python/tests/pyinfra-adhoc/adhoc-pyinfra-transition.md) | Becomes a 2-row matrix.py edit + policy assertions once Phase A lands |
 | [§25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony) | `mssh-admin pki` CLI | CLI gap | (none) | Today the helper is [scripts/mint-user-pki.py](../scripts/mint-user-pki.py); promote to subcommand. ~120 LOC |
 | [§11](future-ideas.md#11-in-situ-debug_sshd-swap-in-for-troubleshooting-sideband-ca-audit) | In-situ debug_sshd swap-in | Partial | (none) | Diagnostics affordance; remaining work documented in-section |
@@ -65,6 +64,7 @@ None. All historical bugs in [archive/closedbugs/](../archive/closedbugs/)
 ## Recently landed (since v0.1.0)
 
 - [§21](future-ideas.md#21-protocol-v11--typed-framing-for-the-post-ack-stream) typed framing protocol — closed bugs #1, #2, #3, #4, #11
+- [§17](future-ideas.md#17-per-session-banner-with-variable-substitution) banner v1 + BANNER-frame delivery to mssh client (stretch per-session `{user}` substitution noted in-section but not blocking)
 - [bug #6](../archive/closedbugs/bug-06-no-connect-timeout.md) — 5s connect timeout in mssh client
 - [bug #7](../archive/closedbugs/bug-07-docs-cli-drift.md) — docs/CLI alignment
 - [TUTORIAL_USER_MANAGEMENT.md](../docs/TUTORIAL_USER_MANAGEMENT.md) + [TUTORIAL_MIGRATION.md](../docs/TUTORIAL_MIGRATION.md) end-to-end verified
