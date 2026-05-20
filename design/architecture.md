@@ -253,6 +253,25 @@ user-facing hierarchy. Operators who want web-PKI for the
 user-facing side can use a separate issuer. The mssh CA does not
 care which.
 
+### Chain of trust (v2 target shape)
+
+The full v2 hierarchy (Root + named intermediates: `user-mint`,
+`host-mint`, `auth`, `bypass-mint`, plus an optional `external-*`
+tier per [future-ideas §25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony))
+and the **load-bearing validation rule** (every mssh validator
+pins to a specific intermediate, never to the Root) are documented
+with the chain diagram in
+[security.md § Chain of trust](security.md#chain-of-trust-v2-multi-intermediate-model).
+The migration plan from v1 single-signer is in
+[notes-pki-hierarchy.md](notes-pki-hierarchy.md).
+
+This matters once [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel)
+mints application-level leaves (TLS server, OpenVPN client,
+code-signing, HTTPS user) under the same Root: without
+intermediate-pinning, those leaves would chain-validate to Root
+and could be presented as mssh user/host certs. The
+intermediate-pinning rule prevents that.
+
 ---
 
 ## Wire protocols

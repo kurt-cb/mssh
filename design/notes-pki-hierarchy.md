@@ -256,6 +256,130 @@ These are intentionally out of scope:
 
 ---
 
+## Amendment 2026-05-20: validation rule + External Intermediate CA
+
+This amendment adds two pieces that the original 4-intermediate
+design left implicit. Both are load-bearing for §5 (cert minting
+for other applications) and §25 (`mssh-admin pki`).
+
+### The validation rule
+
+**mssh validates to the authoritative intermediate, not the Root.**
+The Root signs intermediates; once §5 expansion exists, the Root
+also indirectly signs application-level leaves (TLS server, OpenVPN
+clients, code-signing). A validator that accepts "chain validates
+to Root" therefore accepts those §5 leaves for mssh auth — exactly
+the attack vector to close.
+
+Concrete trust store contents per role:
+
+| Validator | Trust anchor (intermediate cert pinned) |
+|---|---|
+| msshd, validating incoming user mTLS handshake | **auth** |
+| msshd, validating authz cert in /v1/authorize response | **user-mint** |
+| mssh, validating msshd's TLS server cert | **host-mint** |
+| mssh-admin, validating mssh-ca's TLS server cert | **host-mint** |
+| Anyone, validating a bypass cert presented for injection | **bypass-mint** |
+
+The trust store file contents (one of the `/etc/mssh/*.pub` files,
+or `~/.mssh/ca.pem` on the client side) is the SPECIFIC
+intermediate cert. Chain validation walks leaf → intermediate
+(must equal pinned cert) → Root. If the chain doesn't terminate at
+the pinned intermediate, validation fails — even if the chain
+correctly walks to Root through some other intermediate.
+
+This is standard X.509 — `verify_certificate` in cryptography (and
+OpenSSL's `X509_STORE_CTX_init` with the pinned intermediate as
+the trust store) does the right thing. The discipline is in NEVER
+putting the Root cert alone in a trust store; always pin the
+intermediate.
+
+### The External Intermediate CA tier (new)
+
+§25 introduces a use case the original 4-intermediate model doesn't
+cover: the operator wants to delegate signing authority to an
+external entity who can then mint whatever leaves they want, without
+giving them direct access to the mssh Root.
+
+The shape:
+
+```
+root (mssh-root)
+ ├── user-mint        (path_length=0)
+ ├── bypass-mint      (path_length=0)
+ ├── host-mint        (path_length=0)
+ ├── auth             (path_length=0)
+ └── external-<name>  (path_length >= 1, optional sub-CAs allowed)
+     │
+     └── anything the external entity chooses to sign
+         (NOT honored by mssh for any auth decision)
+```
+
+Differences from the 4 internal intermediates:
+
+1. **path_length.** Internal intermediates are `path_length=0` (they
+   sign leaves only, never another CA). External-X carries
+   `path_length=N` where N is operator-chosen — typically 1 (allow
+   one sub-CA layer) or 0 (external leaves only).
+2. **Marking.** External CAs carry `Organization=<entity name>` and
+   `OrganizationalUnit=external`. The mssh-CA records the mint in
+   its audit log with the external-X serial; revocation goes through
+   the standard CRL channel.
+3. **Trust-store exclusion.** No mssh validator has external-X in
+   its trust store. A leaf chaining through external-X terminates
+   the chain validation without a trust anchor — refused.
+
+### The attack vector this guards against
+
+Without intermediate-pinning OR the external tier:
+
+  - **§5 leaves leak into auth.** Operator runs `mssh-admin cert mint
+    --type tls-server --cn alice.example.com` thinking it's just a
+    web cert. An attacker who controls alice's TLS server can
+    present that leaf as a user mTLS handshake to msshd. msshd
+    validates "chain → Root", accepts, alice impersonated.
+  - **External CA mints imposter.** Operator stands up an external-X
+    for a partner org. Partner mints a leaf with CN=admin-bob,
+    presents to msshd → CA admin endpoint. CA validates "chain →
+    Root", accepts as bootstrap-admin, full superuser privileges.
+
+With intermediate-pinning AND external tier:
+
+  - §5 leaves are signed by `host-mint` (TLS server) or `auth`
+    (HTTPS user / OpenVPN) — distinct from `user-mint` (authz) and
+    distinct from each other if needed.
+  - External CAs are signed by Root but NOT trusted by msshd or
+    mssh-admin for auth. msshd's trust store contains `auth`, not
+    Root; chain validation walks leaf → external-X → Root, but
+    external-X != auth, so the chain doesn't terminate at the trust
+    anchor and validation fails.
+  - The msshd validator never even consults Root.
+
+### Implication for §5 work that has already landed
+
+The v0.1.4 §5 commands (`cert mint --type ...`, `openvpn issue`,
+`wireguard ...`) sign through the LEGACY single-signer hierarchy
+(`tls-ca-key.pem`). v1 single-signer has only one root and signs
+everything — there's no per-purpose intermediate yet, so
+intermediate-pinning doesn't apply. The validation property
+described above lands when v2 (commits 2-7 of this doc) ships.
+
+Until then, operators issuing §5 leaves are mixing certs under one
+signing key. Acceptable for small/experimental deployments,
+explicitly not the production end-state.
+
+### Open implementation question (defer)
+
+Should `external-<name>` use `path_length >= 1` (sub-CA chain) or
+`path_length = 0` (external entity mints only leaves)? Probably
+operator choice via a flag on the mint command — `mssh-admin pki
+external mint --name partner-x --path-length 0`. The
+intermediate-pinning rule protects mssh regardless of which they
+choose; the path-length controls what shape the external entity's
+own infrastructure takes.
+
+---
+
 ## Why we're shipping this in phases
 
 The full v2 hierarchy is ~1500-2000 LOC across CA + msshd + admin +

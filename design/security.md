@@ -132,6 +132,102 @@ A third, internal hierarchy lives inside msshd:
 
 ---
 
+## Chain of trust (v2 multi-intermediate model)
+
+The v1 single-signer model (one self-signed CA per hierarchy, each
+signing leaves directly) is the operative implementation today.
+v2 — the model the project is migrating toward, partial foundation
+landed — uses **one self-signed Root CA per hierarchy + named
+intermediates underneath**. See
+[notes-pki-hierarchy.md](notes-pki-hierarchy.md) for the migration
+plan.
+
+```
+                ┌──────────────────────────────┐
+                │  Root CA  (self-signed,      │
+                │   long-lived ~20 yr,         │
+                │   ideally offline / HSM)     │
+                └─────────┬────────────────────┘
+                          │  (signs intermediates only)
+        ┌─────────────┬───┴─────────┬──────────────┬────────────────┐
+        │             │             │              │                │
+   ┌────▼─────┐ ┌─────▼─────┐ ┌─────▼─────┐ ┌─────▼──────┐ ┌────────▼────────┐
+   │user-mint │ │host-mint  │ │   auth    │ │bypass-mint │ │   external-*    │
+   │          │ │           │ │           │ │            │ │   (per §25,     │
+   │ signs    │ │ signs CA  │ │ signs     │ │ signs      │ │   non-mssh CA)  │
+   │ short-   │ │ TLS srv + │ │ admin /   │ │ pre-minted │ │   path_len ≥ 1  │
+   │ lived    │ │ msshd     │ │ user mTLS │ │ bypass-    │ │   ORG=external  │
+   │ authz    │ │ mTLS-to-  │ │ certs     │ │ cert       │ │                 │
+   │ certs    │ │ CA + §5   │ │           │ │ leaves     │ │   any leaves    │
+   │          │ │ TLS server│ │           │ │            │ │   it mints are  │
+   │ path_len │ │ leaves    │ │ path_len  │ │ path_len   │ │   NOT trust-    │
+   │ = 0      │ │ path_len  │ │ = 0       │ │ = 0        │ │   anchored by   │
+   │          │ │ = 0       │ │           │ │            │ │   mssh          │
+   └──────────┘ └───────────┘ └───────────┘ └────────────┘ └─────────────────┘
+        │           │              │             │                 │
+        ▼           ▼              ▼             ▼                 ▼
+   per-session  CA HTTPS,     admin mTLS,   operator-     OpenVPN, internal
+   authz X.509  msshd→CA,     user-facing   pre-minted    TLS, user-issued
+   leaves       generic TLS,  mTLS leaves   bypass certs  certs — anything
+                §5 leaves                                  the external party
+                                                          chooses to sign
+```
+
+### The validation rule (load-bearing)
+
+**msshd and mssh both validate to a specific intermediate, never to
+the Root.** Concretely:
+
+  - msshd's user-mTLS trust store contains the *auth intermediate
+    cert*, not the Root cert. A user mTLS leaf with subject CN=alice
+    is accepted only if its chain terminates at the auth
+    intermediate.
+  - msshd's authz-cert trust store contains the *user-mint
+    intermediate cert*. Authz certs in /v1/authorize responses must
+    chain to user-mint specifically.
+  - mssh's TLS verification of msshd's server cert validates against
+    *host-mint*.
+  - mssh-admin's verification of the CA's TLS cert validates against
+    *host-mint*.
+
+Why this rule exists: the Root signs *intermediates*, and the
+intermediates collectively sign *more than mssh trust material*.
+Once [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel)
+mints generic TLS server / OpenVPN / code-signing leaves, "chains
+to Root" is no longer specific enough for an mssh trust decision.
+The intermediate is the specificity boundary.
+
+### The External Intermediate CA path
+
+[future-ideas §25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony)
+proposes a fifth intermediate type: an *external* CA the mssh Root
+signs but mssh actively refuses to trust for any auth purpose. The
+operator can hand it to an external entity who then mints whatever
+leaves they want — confined to "things signed by external-X" — and
+nothing they mint is honored by mssh.
+
+The protection mechanism is purely the validation rule above:
+chains routed through external-X don't terminate at user-mint or
+auth, so msshd's chain validator refuses them. The Root having
+signed external-X is irrelevant to that check.
+
+A misuse of external-X (the external entity mints unexpected
+leaves) is handled out-of-band: revoke the external-X cert itself
+via the standard CRL flow. The mssh Root remains uncompromised.
+
+### Implication for current v1 deployments
+
+v1 single-signer mode does not have this property. There's only one
+"intermediate" (it's the Root itself) and it signs everything. The
+v2 migration in [notes-pki-hierarchy.md](notes-pki-hierarchy.md) is
+the path to the multi-intermediate model. Until v2 ships,
+operators using the §5 issuance verbs are mixing TLS-server /
+HTTPS-user / OpenVPN leaves with user-auth leaves under one
+signing key — acceptable for small / experimental deployments,
+not acceptable for hardened production.
+
+---
+
 ## Fail-closed defaults
 
 Every error path denies:

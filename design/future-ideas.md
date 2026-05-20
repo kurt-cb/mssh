@@ -1428,6 +1428,120 @@ TUTORIAL_MIGRATION.md uses it. Functional, but a separate script is
 a documentation gap: operators have to remember to look outside the
 CLI for half of the PKI ceremony.
 
+### Trust-anchor constraint (load-bearing for §25)
+
+**Validation in mssh must pin to the authoritative intermediate
+CA, not to the Root.** This is the central security property that
+makes §25 implementable without expanding the attack surface from
+§5. Spell it out before any code:
+
+  - The Root CA is an *authority*, not an mssh *trust anchor*.
+  - Each role gets its own intermediate, signed by the Root:
+    - **user-mint** — signs the per-session authz X.509 certs msshd consumes
+    - **host-mint** — signs server identities (CA's TLS cert, msshd's outbound mTLS)
+    - **auth** — signs admin / client mTLS certs (mssh-admin → CA, optionally mssh → msshd)
+    - **bypass-mint** — signs operator-presentable CA-bypass authz certs
+  - msshd validates an incoming user mTLS leaf by: chain terminates at
+    `auth` (or whichever intermediate the operator pinned for
+    user-facing mTLS), **not** "chain validates to Root". The
+    distinction is enforced at TLS-config time — msshd's trust store
+    contains the named intermediate cert, not the Root cert.
+  - Same shape for mssh validating msshd's TLS server cert: chain
+    terminates at `host-mint`, not Root.
+
+**Why this matters:** the Root signs more than mssh trust material.
+[§5](#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel)
+already mints generic TLS server certs / OpenVPN client certs /
+code-signing certs through the same TLS hierarchy. Without
+intermediate-pinning, an attacker who got *any* §5 leaf minted with
+the right CN + pubkey would chain-validate to Root and impersonate
+a user. With intermediate-pinning, that leaf is signed by some
+other intermediate (or by the legacy single-signer) and msshd's
+chain validator rejects it before ever consulting the Root.
+
+### The External Intermediate CA tier (new with §25)
+
+The §25 design opens up a use case the existing 4-intermediate
+model doesn't cover: **delegating signing authority to an external
+entity** who can then mint whatever they want under it, without
+exposing the mssh Root's signing key.
+
+```
+              ┌─────────────────────────────┐
+              │  Root CA   (self-signed,    │
+              │   ~20 yr, never online)     │
+              └────────────┬────────────────┘
+                           │
+       ┌───────────────────┼───────────────────────────────┐
+       │                   │                                │
+ ┌─────▼─────┐ ┌─────▼─────┐ ┌─────▼──────┐ ┌──────▼──────┐
+ │ user-mint │ │ host-mint │ │  auth      │ │ bypass-mint │
+ │  (signs   │ │  (signs   │ │  (signs    │ │  (signs     │
+ │  authz)   │ │  server   │ │  user/admin│ │  bypass     │
+ │           │ │  identity)│ │  mTLS)     │ │  authz)     │
+ │ path_len=0│ │ path_len=0│ │ path_len=0 │ │ path_len=0  │
+ └───────────┘ └───────────┘ └────────────┘ └─────────────┘
+       │              │              │               │
+       ▼              ▼              ▼               ▼
+   short-lived  CA/msshd TLS  admin/client    pre-minted
+   authz certs  server certs  mTLS certs      bypass certs
+
+       ┌─────────────────────┐
+       │ external-X (NEW)    │  ← signed by Root, given to an
+       │ ORG="customer X"    │     external entity
+       │ path_len >= 1       │     (can sign sub-CAs)
+       └──────────┬──────────┘     OR path_len=0 (leaves only)
+                  │
+                  ▼
+        anything the customer wants
+        (NOT validated by mssh for any auth purpose)
+```
+
+The External Intermediate CA differs from the 4 internal ones in
+three ways that matter for security:
+
+1. **Higher path_length** if the operator wants the external entity
+   to mint further sub-CAs (`path_length >= 1`). The four internal
+   intermediates are `path_length=0` so they can only sign leaves.
+2. **mssh actively *refuses* to recognize this intermediate for any
+   authentication purpose.** msshd's trust store does not include
+   the External CA cert; chain-validation of an incoming user mTLS
+   that goes via External-X terminates without a trust anchor.
+3. **Marked, ideally**, with an explicit Name (OU=external) and an
+   audit record at mint time. A CRL entry on the External CA's own
+   cert is the last-resort revocation channel — operators can pull
+   the entire CA back if it's misused.
+
+The **attack vector this guards against** is the one §5 expansion
+introduced: "ask mssh to sign an X.509 leaf you control, then
+present that leaf as an mssh user/host cert." Without
+intermediate-pinning, any leaf chaining to Root passes validation;
+with it, only leaves signed by the specific authoritative
+intermediate pass.
+
+### Implementation implications for §25
+
+`mssh-admin pki` therefore covers TWO distinct operations, with
+different threat profiles:
+
+  - **User-facing PKI ceremony (the §25 v1 scope as originally
+    captured).** Local crypto: bootstrap a user-CA, mint wrapper
+    server certs, mint user mTLS certs. No network call, no
+    interaction with the mssh-CA. This is the easyrsa-shaped
+    workflow — formalize the current `scripts/mint-user-pki.py`.
+  - **External intermediate CA mint (new scope).** Network call to
+    the mssh-CA's admin endpoint asking the Root (via the bootstrap
+    chain) to sign a sub-CA cert with `path_length` set as
+    requested + a clear OU marker. The minted CA cert + its private
+    key go to the external entity. The mssh-CA records the mint in
+    its audit log and emits the cert serial to the CRL channel so
+    the operator can revoke later.
+
+The first one is offline + safe. The second one is the dangerous
+new capability — and the load-bearing protection is the
+intermediate-pinning rule documented above: any leaves the External
+CA later mints will not be honored by mssh for auth.
+
 ### Idea
 
 Add a `mssh-admin pki` subcommand surface:
