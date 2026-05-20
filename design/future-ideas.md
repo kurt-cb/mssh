@@ -236,12 +236,19 @@ issues), then ACME, then PGP if there's demand.
 
 ## 6. Require 2FA for high-privilege roles (with air-gap fallback)
 
-**Status:** Design needed; implementation isn't trivial.
+**Status:** Design needed; partial. The **passkey factor** has a
+selected design (separate `mssh-passkey` broker module per
+[passkey-design-document.md](passkey-design-document.md) Option 2);
+TOTP / push factors are still unspecified.
 
-**See also:** [ca-integration.md § Passkey / WebAuthn at the CA](ca-integration.md#passkey--webauthn-at-the-ca-)
-— the operator-facing playbook covering WebAuthn as the 2FA factor,
-the AAGUID allowlist, the per-msshd 2FA cache, and the
-mssh-CLI-prompt-flow open question.
+**See also:**
+  - [ca-integration.md § mssh-passkey integration](ca-integration.md#mssh-passkey-integration-for-2fa-on-ca-operations-)
+    — the CA-side consumer integration: how mssh-ca configures
+    itself to use mssh-passkey, the operator flow, the two API
+    contracts still to nail down.
+  - [passkey-design-document.md](passkey-design-document.md) — the
+    architectural decision record for the passkey path (4 options
+    evaluated, #2 chosen).
 
 ### Idea
 
@@ -309,14 +316,40 @@ significantly more (browser-style challenge protocol).
 
 ## 7. Passkey / WebAuthn support
 
-**Status:** Investigate. Likely complements (2) and (5) rather than
-standing alone.
+**Status:** Architecture chosen, no code yet. The decision is
+captured in [passkey-design-document.md](passkey-design-document.md)
+(four options evaluated; Option 2 — browser-native WebAuthn — is the
+default; Option 4 — layered WebAuthn + encrypted vault — reserved
+for high-security applications).
 
-**See also:** [ca-integration.md § Passkey / WebAuthn at the CA](ca-integration.md#passkey--webauthn-at-the-ca-)
-— the integration-shaped writeup: CA as credential directory,
-proposed CLI surface, AAGUID allowlist, composition with §26 admin
-portal and §6 2FA flow. The "should we do this" arc from §7 +
-browser.md's hardware-bound-only constraint are answered there.
+The selected implementation shape is a **separate `mssh-passkey`
+module**, not a feature inside mssh-ca or mssh. mssh-passkey is a
+public-facing service (HTTPS, WebAuthn RP) that other components
+in the ecosystem consume via mTLS:
+
+  - **mssh-ca** uses mssh-passkey to gate high-privilege CA
+    operations behind a passkey ceremony. See
+    [ca-integration.md § mssh-passkey integration](ca-integration.md#mssh-passkey-integration-for-2fa-on-ca-operations-).
+  - **[§26 admin web portal](#26-admin-web-portal-via-mssh-tunneled-localhost)**
+    can use mssh-passkey for step-up auth on destructive actions
+    in the browser, hitting the same broker API as mssh-ca.
+  - **Other consumers** (a future kiosk-style mssh client, an
+    "internal app that needs 2FA" use case) get the same broker
+    for free without each having to embed WebAuthn machinery.
+
+This consumer-side integration is what
+[ca-integration.md § mssh-passkey integration](ca-integration.md#mssh-passkey-integration-for-2fa-on-ca-operations-)
+covers in detail; the **mssh-passkey module itself** — registration
+flow, broker API contract, deployment, AAGUID allowlist config — is
+a separate piece of work captured as its own line in
+[design/todo_current_status.md](todo_current_status.md#mssh-passkey-module-separate-deployment-target).
+
+**See also:**
+  - [passkey-design-document.md](passkey-design-document.md) — the
+    decision record + threat model + Option 2 implementation plan.
+  - [browser.md § WebAuthn](browser.md#webauthn-with-hardware-only-authenticators--the-cleaner-path)
+    — the hardware-bound-only constraint + AAGUID allowlist
+    rationale. Both apply to mssh-passkey's registration validator.
 
 ### Idea
 

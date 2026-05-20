@@ -450,156 +450,318 @@ records; account creation requires a one-time admin-approved
 enrollment. Highest adoption-value piece of §5 once the X.509
 expansion is in.
 
-### Passkey / WebAuthn at the CA 🚧
+### mssh-passkey integration for 2FA on CA operations 🚧
 
 Composes with [future-ideas §6](future-ideas.md#6-require-2fa-for-high-privilege-roles-with-air-gap-fallback)
 (2FA for high-privilege roles) and [§7](future-ideas.md#7-passkey--webauthn-support)
-(Passkey / WebAuthn). [browser.md](browser.md) has the threat-model
-analysis for the WebAuthn attestation allowlist; this section is
-the operator-facing playbook for how the CA exposes that
-functionality.
+(Passkey / WebAuthn). Architectural decision and option evaluation
+in [passkey-design-document.md](passkey-design-document.md)
+(Option 2 — Browser-Native WebAuthn — is the selected default).
 
-#### Why passkeys at the CA (not just at the client)
+**Important scoping:** there are multiple potential consumers for
+passkeys in the mssh ecosystem (mssh client step-up, admin web
+portal step-up, kiosk login, etc.). This section is **only** about
+the operator-facing use case: gating high-privilege CA operations
+behind a passkey challenge. Other consumers can use the same
+`mssh-passkey` module independently; their integration shape is out
+of scope here.
 
-WebAuthn credentials are **hardware-resident** — the private key
-lives on a hardware token / TPM / Secure Enclave and never leaves
-the device. The CA can't "mint" a WebAuthn credential the way it
-mints an X.509 cert. What the CA *can* be is the **directory**:
+#### Architecture: mssh-passkey is a separate module
 
-  - **Per-user credential storage.** For each enrolled user, the
-    CA holds zero or more registered WebAuthn credentials (public
-    key + AAGUID + sign counter + friendly name). Same role as
-    today's `keys` list under each user enrollment record, but for
-    WebAuthn-format credentials instead of SSH pubkeys.
-  - **Challenge generation + response verification.** When a
-    high-privilege operation triggers a 2FA challenge, the CA
-    emits a WebAuthn challenge, the user's client (mssh CLI or
-    browser portal) drives the platform's WebAuthn API, and the
-    response comes back to the CA for verification.
-  - **AAGUID allowlist.** Per the
-    [browser.md analysis](browser.md#webauthn-with-hardware-only-authenticators--the-cleaner-path),
-    only hardware-bound authenticators are accepted —
-    iCloud-Keychain-synced passkeys are rejected at registration
-    time. The allowlist is config: a list of approved YubiKey /
-    SoloKey / Feitian / etc. AAGUIDs.
+mssh-passkey is a **new module, independent of mssh and mssh-ca**.
+It lives on a public-facing server reachable both from the user's
+phone browser (via HTTPS) and from mssh-ca (via mTLS).
 
-#### Proposed CLI surface
+```
+                            ┌────────────────────────────┐
+                            │  mssh-ca                   │
+                            │   (private network)        │
+                            │   pushes pending           │
+                            │   transactions             │
+                            └─────────────┬──────────────┘
+                                          │
+                                  mTLS,   │  (mssh-ca is a CLIENT
+                                  full    │   of mssh-passkey;
+                                  cert    │   not the other way
+                                  valid.  │   around)
+                                  both    │
+                                  ways    │
+                                          │
+                            ┌─────────────▼──────────────┐
+                            │  mssh-passkey              │
+                            │   (public-facing,          │
+                            │   HTTPS, WebAuthn RP)      │
+                            │   • holds public keys      │
+                            │   • generates challenges   │
+                            │   • verifies assertions    │
+                            │   • notifies mssh-ca       │
+                            └─────────────┬──────────────┘
+                                          │
+                                          │  HTTPS (public web)
+                                          │  user opens QR URL
+                                          ▼
+                            ┌────────────────────────────┐
+                            │  user's phone browser      │
+                            │   • mobile Safari / Chrome │
+                            │   • WebAuthn ceremony      │
+                            │   • Face ID / Touch ID     │
+                            └────────────────────────────┘
+```
+
+Key consequences of this split:
+
+  - **mssh-ca stays private-network.** WebAuthn requires HTTPS +
+    a public-resolvable origin; mssh-ca shouldn't take on either.
+    mssh-passkey absorbs that responsibility.
+  - **mssh-passkey can be tiny and focused.** One service, one
+    job (WebAuthn relying party + transaction broker). Easier to
+    review, easier to harden.
+  - **mssh-passkey is a generic broker.** Other components (mssh
+    client, admin web portal, kiosk login) can all use it later
+    via the same broker API. Not coupled to mssh-ca's specific
+    use case.
+  - **The CA is a CLIENT, not a server.** mssh-ca initiates the
+    "I need alice to approve this transaction" request; the user
+    completes it asynchronously; mssh-ca learns of the result via
+    a callback (or by polling, depending on the broker API
+    decision below).
+
+#### Operator flow (proposed)
+
+```
+1. Admin runs `mssh-admin <some-high-privilege-command> --user alice`.
+2. Policy says alice's role requires passkey 2FA.
+3. mssh-admin → mssh-ca: invoke the command.
+4. mssh-ca → mssh-passkey (mTLS): "I need alice to approve this
+   transaction. Here's the metadata: action=<desc>, ttl=5min."
+5. mssh-passkey returns: transaction_id, qr_url
+   (https://passkey.example.com/approve/<token>).
+6. mssh-ca holds the operation pending; emits the qr_url back to
+   mssh-admin, which displays it as a QR (or just a URL).
+7. Admin sends the URL to alice (slack / email / hands phone).
+8. alice opens the URL on her phone browser, sees "approve
+   <action>?". She taps. Browser invokes WebAuthn; she completes
+   biometric.
+9. mssh-passkey verifies the WebAuthn assertion against alice's
+   registered public key.
+10. mssh-passkey notifies mssh-ca (webhook or polled):
+    "transaction <id> approved by alice".
+11. mssh-ca proceeds with the original operation; audit logged
+    with the transaction_id + alice's verified identity.
+```
+
+#### Configuration
+
+mssh-ca consumes mssh-passkey via config:
+
+```yaml
+# ca-config.yaml
+passkey:
+  # Public URL of the mssh-passkey service. Users will see this
+  # in QR codes / browser address bar.
+  url: https://passkey.example.com
+
+  # mTLS cert + key mssh-ca presents when calling the broker
+  # API. Signed by the operator's trust hierarchy; mssh-passkey
+  # validates incoming clients against ca_cert below.
+  client_cert: /etc/mssh-ca/passkey-client.crt
+  client_key:  /etc/mssh-ca/passkey-client.key
+
+  # Trust anchor for verifying mssh-passkey's own TLS cert. Full
+  # cert validation in both directions.
+  ca_cert: /etc/mssh-ca/passkey-server-ca.pem
+
+  # Callback URL mssh-passkey hits when a transaction completes.
+  # Hosted by mssh-ca on its existing admin listener; uses the
+  # same mTLS hierarchy.
+  callback_url: https://mssh-ca.internal:8443/v1/admin/passkey/callback
+```
+
+If `passkey:` is absent from ca-config.yaml, passkey 2FA is
+unavailable and policies requiring it fail closed at policy load
+time.
+
+#### CLI surface (proposed)
 
 ```bash
-# Enrollment ceremony — interactive, requires the user present
-# with their hardware token. Initiated by an admin; the user
-# touches their token to sign the registration challenge.
-mssh-admin user webauthn register --user alice \
-    [--label "alice yubikey 5C"] \
-    [--allowlist /etc/mssh/aaguid-allowlist.yaml]
+# Initiate alice's first-time enrollment with the mssh-passkey
+# module. Returns a QR-URL alice opens on her phone to register
+# her hardware-bound credential. mssh-ca records (via callback)
+# that alice has at least one credential registered.
+mssh-admin user passkey enroll --user alice
 
-# Inspect registered credentials.
-mssh-admin user webauthn list --user alice
-mssh-admin user webauthn show --user alice --credential-id <hex>
+# Show what mssh-passkey holds for alice (credentials, last-use
+# timestamps). mssh-ca asks the broker via mTLS.
+mssh-admin user passkey list --user alice
 
-# Revoke a single credential (e.g. lost token).
-mssh-admin user webauthn revoke --user alice --credential-id <hex>
+# Revoke a credential at the broker. mssh-ca calls passkey API
+# with the credential ID.
+mssh-admin user passkey revoke --user alice --credential-id <hex>
 
-# Per-role 2FA requirement.
+# Tag a policy as passkey-required.
 mssh-admin policy add --user alice \
     --servers prod-* \
     --channels session \
-    --require-2fa webauthn \
+    --require-2fa passkey \
     --2fa-within-seconds 60
 ```
 
-#### Use cases this unlocks
+Note these are all **CA-side** commands; the user-facing
+ceremony happens in the browser at mssh-passkey's URL, not
+through the mssh CLI.
 
-1. **2FA for high-privilege SSH sessions.** Per §6: msshd's
-   `POST /v1/authorize` request grows a `2fa_evidence` field
-   carrying the WebAuthn assertion. The mssh CLI prompts the user
-   to touch their token when policy requires it; signature is
-   forwarded to the CA, which validates against the user's
-   registered credential.
+#### Two open contracts to solidify before any code
 
-2. **Web admin portal step-up.** Per [§26](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost):
-   the localhost-tunneled Flask portal can require a WebAuthn
-   confirmation for destructive actions (revoke, delete, mint
-   external CA). Browsers natively support the WebAuthn JS API;
-   nothing extra to install.
+The architecture above is settled; two API contracts are not, and
+both need to be pinned down before implementation starts.
 
-3. **Hardware-only admin enrollment ceremony.** Per browser.md
-   "Hardware-only enrollment ceremony": user shows up with their
-   token, admin initiates `webauthn register`, token is enrolled
-   in-person. Attestation validates against the AAGUID allowlist
-   at registration time; only operator-vetted hardware models can
-   ever enroll. After the ceremony the token leaves bound to that
-   user's enrollment record.
+##### (a) Registration contract
 
-4. **Per-user multi-credential.** alice can register multiple
-   tokens (primary YubiKey + travel spare). Either satisfies the
-   2FA challenge; revoking a lost one doesn't lock her out.
+**Question:** how does a new user (alice) get her first credential
+registered at mssh-passkey?
 
-#### Implementation pieces (none landed)
+**Constraints:**
 
-| Piece | Status | Notes |
-|---|---|---|
-| CA-side `webauthn` library integration | 🚧 | Python `webauthn` PyPI package (~10k LOC, well-maintained). Wraps challenge generation + attestation verification + assertion verification. |
-| Enrollment record schema extension | 🚧 | Add `webauthn_credentials: list[Credential]` to user records. Each credential = `{credential_id, public_key, aaguid, sign_count, label, enrolled_at}`. |
-| AAGUID allowlist config | 🚧 | YAML at `/etc/mssh/aaguid-allowlist.yaml`; reload via SIGHUP or admin endpoint. Operator updates when new tokens are vetted. |
-| CA admin endpoints | 🚧 | `POST /v1/admin/user/{u}/webauthn/register-begin` (returns challenge), `POST /v1/admin/user/{u}/webauthn/register-complete` (validates attestation), `GET /list`, `DELETE /{credential_id}`. |
-| `mssh-admin user webauthn ...` CLI | 🚧 | Local pyfido2 / pywebauthn integration to drive the ceremony on the admin's machine. |
-| Policy DSL extension | 🚧 | `require_2fa: webauthn` + `2fa_within_seconds: N` on policies. mssh client prompts; msshd's authorize body grows `2fa_evidence`. |
-| Per-msshd 2FA cache | 🚧 | Once a user satisfies a 2FA challenge, msshd caches the result for `2fa_within_seconds` so subsequent connections in the window skip the prompt. Cache invalidated on token revoke. |
-| Web admin portal step-up | 🚧 | [§26](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost) destructive actions trigger a JS WebAuthn challenge before commit. |
+  - alice must not need to be already authenticated at mssh-passkey
+    (chicken-and-egg).
+  - The CA must be able to assert "this user is alice" to
+    mssh-passkey at enrollment time (so the registered credential
+    binds to the right enrollment record).
+  - The registration URL alice opens must be single-use,
+    short-TTL, and unguessable.
 
-#### LOC estimate
+**Proposed shape (open):**
 
-  - CA-side webauthn endpoint + enrollment schema + AAGUID
-    allowlist: ~400 LOC
-  - mssh-admin CLI (`user webauthn register / list / revoke`):
-    ~200 LOC + a USB transport dep (`fido2`)
-  - mssh client `--2fa-webauthn` prompt flow + msshd's
-    `2fa_evidence` forwarding: ~300 LOC
-  - Policy DSL extension + per-msshd 2FA cache: ~150 LOC
-  - Web portal step-up integration: ~100 LOC
-  - **Total v1: ~1150 LOC** + the webauthn library dep
-  - Tests: ~300 LOC
+  - `POST /broker/register` from mssh-ca (mTLS):
+    ```json
+    { "user_id": "alice", "ttl_seconds": 300 }
+    ```
+  - Response:
+    ```json
+    { "registration_token": "...", "url": "https://passkey.example.com/register/<token>" }
+    ```
+  - alice opens the URL on her phone, mssh-passkey serves a page
+    that calls `navigator.credentials.create()`, registers the
+    new credential against the token's `user_id`, marks the
+    token consumed.
+  - mssh-passkey callbacks mssh-ca: `POST /v1/admin/passkey/callback`
+    with `{ event: "registered", user_id: "alice", credential_id: "..." }`.
 
-#### Open questions
+**Things still to nail down:**
 
-  - **CLI flow for the token tap.** The mssh CLI is terminal-only;
-    WebAuthn challenges traditionally run in a browser. Two
-    approaches: (a) shell out to a `pinentry`-style helper that
-    drives `libfido2`; (b) the CLI exits with a URL + nonce that
-    the user opens in a managed browser, completing the challenge
-    there, then re-runs the original command. (b) is friendlier
-    but requires browser availability; (a) is more Unix-shaped.
-  - **Air-gapped deployments.** Per §6 — WebAuthn defends against
-    insider-with-credentials, not external attackers, when the CA
-    is already network-isolated. Operators should be able to make
-    `require_2fa` a no-op per-policy if their threat model is
-    purely external.
-  - **Credential recovery.** Lost token → admin re-enrolls user
-    with a fresh token. Multi-credential support (point 4 above)
-    is the primary mitigation. For single-credential users, the
-    bypass is "admin removes the webauthn requirement on alice's
-    policy, alice connects without 2FA, admin re-enrolls in
-    person, admin re-enables the requirement" — auditable, but
-    slow. Documented operator runbook is the v1 answer.
+  - AAGUID allowlist enforcement (per
+    [browser.md § WebAuthn](browser.md#webauthn-with-hardware-only-authenticators--the-cleaner-path)):
+    where is the allowlist configured (mssh-passkey-side per
+    deployment? mssh-ca-side passed in the register request?),
+    and what's the error path when alice's device doesn't match?
+  - Multi-device enrollment: how does alice add a second
+    credential (travel spare) after the first is registered?
+    Does that require a re-issued registration token, or can she
+    authenticate-then-register from her primary?
+  - Recovery: alice lost her only device. Does the operator
+    revoke her credentials and issue a fresh registration token,
+    or is there an out-of-band recovery code mechanism?
+
+##### (b) Public broker API contract
+
+**Question:** what does the CA push to mssh-passkey when it wants
+alice to approve a pending operation, and how does it learn the
+outcome?
+
+**Constraints:**
+
+  - The push from mssh-ca → mssh-passkey is mTLS-authenticated
+    (full cert validation both ways).
+  - mssh-passkey holds the transaction state — including a
+    description alice sees before approving — long enough for
+    alice to act, but no longer (5-minute typical TTL).
+  - The outcome (approved / denied / expired) must reach mssh-ca
+    reliably without polling forever.
+
+**Proposed shape (open):**
+
+  - `POST /broker/challenge` from mssh-ca (mTLS):
+    ```json
+    {
+      "user_id": "alice",
+      "description": "Revoke admin cert for bob",
+      "ttl_seconds": 300,
+      "callback_url": "https://mssh-ca.internal:8443/v1/admin/passkey/callback"
+    }
+    ```
+  - Response:
+    ```json
+    { "transaction_id": "...", "qr_url": "https://passkey.example.com/approve/<token>" }
+    ```
+  - alice opens the URL, sees the description, approves with
+    biometric.
+  - mssh-passkey posts back to `callback_url`:
+    ```json
+    { "transaction_id": "...", "outcome": "approved", "verified_at": "..." }
+    ```
+  - mssh-ca verifies the callback's mTLS client cert is
+    mssh-passkey's, looks up the transaction by id, proceeds with
+    the original operation.
+
+**Things still to nail down:**
+
+  - Push vs poll for the callback. Push (webhook) is lower
+    latency but requires mssh-ca to expose an inbound endpoint
+    even on a private network (or punch through to it). Poll
+    avoids that but adds latency. Hybrid: webhook by default,
+    poll fallback if the webhook fails.
+  - Replay defense: what stops an attacker who intercepts the
+    callback from replaying it? Probably the transaction_id is
+    one-time-use and mssh-ca's admin TLS terminates the mTLS
+    properly, but worth spelling out.
+  - Denied / expired outcomes: how does mssh-admin surface a
+    denial back to the operator? "User did not approve within
+    5 minutes" should be a clear error, not a hang.
+  - Audit: both mssh-passkey AND mssh-ca log the transaction
+    with the same ID; queryability across them needs a story.
+
+#### Why this architecture (vs. WebAuthn at the CA directly)
+
+A previous draft of this section had mssh-ca holding the WebAuthn
+credentials and running the RP role directly. That collapsed for
+three reasons captured in
+[passkey-design-document.md](passkey-design-document.md):
+
+  - **WebAuthn needs a public, HTTPS, origin-bound endpoint.**
+    Forcing mssh-ca to be that endpoint pulls it out of the
+    private network, defeating its core "stolen creds useless
+    off-network" property.
+  - **The mssh CLI is terminal-only.** Driving a WebAuthn
+    ceremony from a terminal requires either `pinentry`-style
+    helpers (Unix-shaped but limited platform support) OR a
+    browser fallback URL. The browser fallback IS this
+    architecture, made first-class instead of bolted-on.
+  - **Multiple consumers want passkeys.** The admin web portal,
+    a future kiosk-style mssh client, a separate "internal app"
+    that wants 2FA — all benefit from a shared broker. Locking
+    WebAuthn into mssh-ca couples it to one use case.
 
 #### Composition / cross-references
 
   - **[future-ideas §6](future-ideas.md#6-require-2fa-for-high-privilege-roles-with-air-gap-fallback)** —
-    the operator-facing 2FA design. WebAuthn is one of the
-    factors §6 mentions; this section is the concrete
-    implementation path.
+    2FA for high-privilege roles. mssh-passkey is the *passkey
+    factor* implementation §6 mentions; TOTP/push are separate
+    factors §6 still defers.
   - **[future-ideas §7](future-ideas.md#7-passkey--webauthn-support)** —
-    the umbrella WebAuthn / passkey discussion. This section's
-    "Why passkeys at the CA" subsection is the answer to §7's
-    "should we do this".
+    Passkey / WebAuthn umbrella discussion. Settled by
+    [passkey-design-document.md](passkey-design-document.md)
+    Option 2.
+  - **[passkey-design-document.md](passkey-design-document.md)** —
+    architectural decision record (4 options, picked #2).
+    Trust model details, server hardening requirements, threat
+    matrix.
   - **[browser.md § WebAuthn](browser.md#webauthn-with-hardware-only-authenticators--the-cleaner-path)** —
-    the threat-model analysis + the AAGUID allowlist rationale.
-    The "hardware-bound only, reject synced passkeys" position is
-    central; carries into the v1 implementation.
+    AAGUID allowlist rationale, hardware-bound-only constraint.
+    Carries into mssh-passkey's registration validation.
   - **[§26 admin web portal](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost)** —
-    natural consumer of the WebAuthn endpoint for step-up auth on
-    destructive actions.
+    *separate* consumer of mssh-passkey; the web portal can use
+    the same broker API for step-up auth on destructive actions
+    without going through mssh-ca. Out of scope here.
 
 ---
 
@@ -694,7 +856,7 @@ migration paths for the common cases:
 | CRL Distribution Point embedded in leaves | ✅ | Set `cert_generation.crl_url` in `ca-config.yaml`; CA exposes `GET /v1/crl.pem` (X.509 CRL signed by the TLS CA) |
 | PGP (OpenPGP) key directory + signing | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) + [§27](future-ideas.md#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory) — needs OpenPGP library + parallel signing key |
 | ACME endpoint | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) — separate listener + RFC 8555 state machine; full server is ~2000+ LOC, deserves its own design pass |
-| Passkey / WebAuthn directory + 2FA | 🚧 | This doc § "Passkey / WebAuthn at the CA"; composes with [§6](future-ideas.md#6-require-2fa-for-high-privilege-roles-with-air-gap-fallback) + [§7](future-ideas.md#7-passkey--webauthn-support) + [browser.md](browser.md). ~1150 LOC v1 |
+| mssh-passkey integration (CA-side 2FA via separate broker) | 🚧 | mssh-passkey is a new public-facing module (per [passkey-design-document.md](passkey-design-document.md) Option 2); mssh-ca consumes it via mTLS. See this doc § "mssh-passkey integration for 2FA on CA operations". Two API contracts still to solidify (registration, public broker). |
 | v2 PKI hierarchy (Root + named intermediates) | 🟡 | Foundation primitives landed; full migration is roadmapped at [notes-pki-hierarchy.md](notes-pki-hierarchy.md). Until v2 ships, all §5 leaves share one signing key — see "implication for currently-landed §5 work" below |
 
 Remaining roadmap, in priority order:

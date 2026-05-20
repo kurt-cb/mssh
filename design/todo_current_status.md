@@ -20,6 +20,37 @@ Status icons used throughout this doc, matching
 None. All historical bugs in [archive/closedbugs/](../archive/closedbugs/)
 (12 files, including 5 closed by v0.1.1's §21 typed framing).
 
+## mssh-passkey module (separate deployment target)
+
+A **new module, not part of mssh or mssh-ca.** Public-facing
+WebAuthn relying party + transaction broker. mssh-ca consumes it
+via mTLS for 2FA on high-privilege operations; future consumers
+(§26 admin portal, kiosk login, internal apps) can share it.
+
+Architectural decision in
+[passkey-design-document.md](passkey-design-document.md)
+(Option 2 — browser-native WebAuthn). Operator-facing CA-side
+consumer integration in
+[ca-integration.md § mssh-passkey integration](ca-integration.md#mssh-passkey-integration-for-2fa-on-ca-operations-).
+
+| Piece | Status | Notes |
+|---|---|---|
+| mssh-passkey HTTP service skeleton | 🚧 | New Python package, separate from mssh/mssh-ca. HTTPS-only, WebAuthn library (`webauthn` PyPI), small DB for users + credentials + transactions. |
+| Registration contract (mssh-ca → broker → user) | 🚧 | Open — proposed shape in ca-integration.md. AAGUID allowlist enforcement + multi-device + recovery flows all need to be pinned down. |
+| Public broker API (transaction push + callback) | 🚧 | Open — proposed shape in ca-integration.md. Push vs poll for the outcome, replay defense, denied/expired surfacing, audit-across-services all to be solidified. |
+| mTLS contract: mssh-ca ↔ mssh-passkey | 🚧 | Full cert validation both ways. Operator-managed trust hierarchy for both directions. Cert distribution at deploy time. |
+| WebAuthn RP implementation | 🚧 | Challenge generation + attestation verification + assertion verification + counter tracking. AAGUID allowlist applied at registration per [browser.md](browser.md#webauthn-with-hardware-only-authenticators--the-cleaner-path). |
+| Browser UI for registration + approval | 🚧 | Minimal HTML pages: registration ceremony (`navigator.credentials.create()`), approval ceremony (display transaction description + `navigator.credentials.get()`). |
+| mssh-ca client integration | 🚧 | Config block in `ca-config.yaml`; CLI: `mssh-admin user passkey enroll / list / revoke`; policy DSL: `--require-2fa passkey`. |
+| Layered (Option 4) upgrade path | 🚧 | Optional — adds an encrypted vault layer for high-security applications. Reserved per [passkey-design-document.md](passkey-design-document.md). |
+
+The whole thing lives in a separate repo / package, not in
+python/packages/. Deployment is independent; mssh-ca operators can
+opt in to passkey 2FA per policy without changing anything about
+mssh-ca itself if they're not using it.
+
+---
+
 ## v2 PKI hierarchy (Root + named intermediates)
 
 Roadmap from [notes-pki-hierarchy.md](notes-pki-hierarchy.md) +
@@ -66,7 +97,7 @@ notes-pki-hierarchy.md "Why we're shipping this in phases".
 |---|---|---|---|
 | [§22](future-ideas.md#22-push-channel-for-revocation--live-session-kill) | Push channel for revocation + live-session kill | 🚧 | Design pending |
 | [§13](future-ideas.md#13-legacy-config-migration-with-dual-enforce--shadow-mode) | Legacy-config migration / dual-enforce / shadow mode | 🚧 | Composes with §20 |
-| [§6 + §7 + ca-integration WebAuthn](ca-integration.md#passkey--webauthn-at-the-ca-) | Passkey / WebAuthn at the CA + 2FA for high-privilege roles | 🚧 | Design captured in [ca-integration.md](ca-integration.md#passkey--webauthn-at-the-ca-). ~1150 LOC v1 (CA endpoints, enrollment schema, AAGUID allowlist, CLI, policy DSL extension, msshd 2FA cache, web portal step-up). Library: `webauthn` PyPI |
+| [§6 2FA + mssh-passkey integration](ca-integration.md#mssh-passkey-integration-for-2fa-on-ca-operations-) | 2FA for high-privilege CA operations via separate mssh-passkey broker | 🚧 | Architecture chosen ([passkey-design-document.md](passkey-design-document.md) Option 2); CA-side consumer integration designed in [ca-integration.md](ca-integration.md#mssh-passkey-integration-for-2fa-on-ca-operations-). Two API contracts (registration + public broker) still open. **mssh-passkey module itself is a separate work item — see top of this doc.** TOTP / push factors still unspecified. |
 | [§4](future-ideas.md#4-wrapper-supports-protocols-beyond-ssh--https--tcp-proxy) | Protocols beyond SSH (HTTPS/TCP proxy) | 🚧 | Needs analysis |
 
 ## Future-ideas — substantial / deferred
