@@ -313,6 +313,107 @@ policies — and prints `✓` or `✗` per check. `next` prints only the
 first failing check plus a suggested command, useful while
 onboarding a new server or user.
 
+### Browse the deployment from a web UI (`msshd-admin-web`)
+
+The `msshd-admin-web` portal is a Flask + Bootstrap 5 frontend over
+the same admin endpoints `mssh-admin` uses. It's useful when you'd
+rather scroll a sortable list than retype filter flags, or hand a
+read-only view to someone who doesn't know the CLI.
+
+#### Install
+
+The portal ships in the `mssh-admin` wheel as the `[web]` extra
+(Flask is a heavier dep than the CLI needs by itself):
+
+```bash
+pip install -e python/packages/mssh-admin[web]      # editable
+# or, once published to PyPI:
+#   pip install 'mssh-admin[web]'
+```
+
+That adds `msshd-admin-web` to `$PATH`.
+
+#### Configure
+
+`msshd-admin-web` reads `~/.mssh-admin/config` — same fields as
+`mssh-admin`. If `mssh-admin status` works from your workstation,
+the portal does too. Override the config path with `--config` or
+`MSSH_ADMIN_CONFIG`.
+
+#### Run
+
+```bash
+msshd-admin-web                       # binds 127.0.0.1:8443
+msshd-admin-web --port 8000           # different port
+msshd-admin-web --dev                 # Flask debug + reload (dev only)
+```
+
+Open `http://127.0.0.1:8443/` in a browser on the same machine.
+The sidebar links to:
+
+  - **Dashboard** — host / user / group / admin counts.
+  - **Users** — sortable list; click a row to expand SSH keys +
+    policies; per-row **Export PKI…** button.
+  - **Groups** — server groups with member hosts + users-with-policy.
+  - **Hosts** — sortable list; per-row **Re-issue mTLS…** button
+    that re-enrolls the server and downloads `ca-cert.pem`,
+    `<name>-cert.pem`, `<name>-key.pem` as a tarball.
+  - **Audit log** — filterable by decision / user / server / limit.
+
+v1 is **read-only plus cert export**. Adding users / policies / new
+servers still goes through `mssh-admin` CLI. Mutating CRUD in the
+web UI is tracked in
+[design/future-ideas.md §26](../design/future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost).
+
+#### Re-issuing a host's mTLS — what it does
+
+Clicking **Re-issue mTLS…** on the Hosts page runs:
+1. `DELETE /v1/admin/server/<name>` — drops the existing enrollment.
+2. `POST /v1/admin/server/add` — re-creates with the same groups,
+   minting a fresh keypair.
+3. Streams a tarball back to the browser containing the CA cert,
+   the new server cert, and the new server key.
+
+**Important:** the old keypair stops working immediately. Push the
+new tarball to `/etc/mssh/wrapper-mtls.{crt,key}` on the host
+(matching paths in [wrapper.yaml] `ca.client_cert` / `ca.client_key`)
+and `systemctl restart msshd` to pick it up. While the host is
+between old and new key, msshd's authorize calls will fail closed
+— that's a few seconds of denied sessions.
+
+#### Security model — localhost only
+
+The portal binds to `127.0.0.1` by default. It has **no
+authentication of its own** — the trust model is "anyone who can
+reach localhost:8443 on this machine is allowed to administer the
+CA." On a workstation that's usually just you; on a shared machine
+it's whoever has a shell.
+
+For a multi-admin deployment, the intended pattern is **don't expose
+the portal on a public address.** Instead, the operator opens an
+mssh-mediated local port forward from their workstation to the CA
+host's localhost; the browser only ever talks to localhost on the
+operator's own machine. That avoids the public-CA TLS attack
+surface analysed in
+[design/browser.md](../design/browser.md). The mssh `-L` flag that
+sets up the forward is tracked as the client-side half of
+[future-ideas §26](../design/future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost);
+until it lands you can drive the tunnel with `ssh -L 8443:localhost:8443 ca-host`.
+
+`msshd-admin-web` will print a loud warning if you start it with
+`--host` set to anything other than localhost — that's a deliberate
+foot-gun guard.
+
+#### Air-gapped operation
+
+Templates load Bootstrap 5 from `cdn.jsdelivr.net`. For deployments
+without outbound internet, mirror the two files locally and edit
+[`web/templates/base.html`](../python/packages/mssh-admin/src/mssh/admin/web/templates/base.html)
+to point at your mirror (or vendor them into `web/static/` and
+swap the hrefs).
+
+---
+
 ### Ask the CA in natural language (MCP)
 
 The `mssh-mcp` server exposes the read-only admin API over the

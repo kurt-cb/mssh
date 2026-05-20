@@ -19,6 +19,11 @@ credentials useless if the attacker can't reach the CA**.
     Terminates mTLS, calls the CA, runs a hermetic inner sshd.
   - `mssh-ca` — the central authorization service.
   - `mssh-admin` — operator CLI.
+  - `msshd-admin-web` — optional Flask portal (`[web]` extra) with
+    sortable users/groups/hosts tables and per-host mTLS re-issue.
+    See [docs/operations.md](docs/operations.md#browse-the-deployment-from-a-web-ui-msshd-admin-web).
+  - `mssh-mcp` — optional MCP server (`[mcp]` extra) exposing the
+    read-only admin API to LLM clients.
   - `debug_sshd` — debug-only AsyncSSH server that calls the CA inline;
     useful for isolating CA issues from gateway machinery.
 

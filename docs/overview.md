@@ -79,7 +79,9 @@ Net effect:
     a network reachable only from your SSH servers and operator
     workstations.
   - **mssh-admin** — operator CLI for enrolling servers, users,
-    and policies.
+    and policies. Optional `msshd-admin-web` portal (Flask +
+    Bootstrap 5) exposes the same operations through a browser;
+    see [operations.md § browse from a web UI](operations.md#browse-the-deployment-from-a-web-ui-msshd-admin-web).
 
 For full detail see [design/architecture.md](../design/architecture.md).
 

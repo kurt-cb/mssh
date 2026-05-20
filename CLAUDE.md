@@ -202,6 +202,8 @@ See [archive/design/notes-bypass-cache.md](archive/design/notes-bypass-cache.md)
 - `design/architecture.md` — components, modes, hermetic inner sshd
 - `design/api.md` — REST + admin API contract + enrollment YAML
 - `design/security.md` — trust model + threat analysis
+- `design/ca-integration.md` — install + configure mssh-ca; mint
+  certs/keys for OpenVPN / WireGuard / PGP / generic TLS (§5 playbook)
 - `design/future-ideas.md` — deferred features (read this before
   proposing new ones — many ideas are captured here already)
 

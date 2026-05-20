@@ -121,6 +121,11 @@ session cookie handling.
 types (WireGuard, PGP) require per-family issuance backends but
 reuse the same enrollment DB + audit + policy DSL.
 
+**See also:** [ca-integration.md](ca-integration.md) — operator
+playbook for what's implemented today vs. the §5 target shape, with
+proposed CLI for each protocol family and migration recipes from
+existing CAs / OpenVPN / WireGuard / PGP deployments.
+
 ### Idea
 
 The CA already:

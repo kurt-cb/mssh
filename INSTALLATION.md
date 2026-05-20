@@ -19,7 +19,11 @@ following binaries to `.venv/bin/`:
   - `msshd` — server-side gateway daemon
   - `mssh-ca` — CA service
   - `mssh-admin` — operator CLI
-  - `mssh-debug-sshd`, `msshd-admin`, `mssh-mcp` (optional extra)
+  - `mssh-debug-sshd`, `msshd-admin` — diagnostics
+  - `mssh-mcp` (optional `[mcp]` extra) — admin API over MCP for
+    LLM clients
+  - `msshd-admin-web` (optional `[web]` extra) — Flask + Bootstrap 5
+    admin portal; see [docs/operations.md § browse from a web UI](docs/operations.md#browse-the-deployment-from-a-web-ui-msshd-admin-web)
 
 For an air-gapped server install via pre-built wheel tarball, see
 `scripts/install_mssh.sh` (run `make tarball` to produce the input).
