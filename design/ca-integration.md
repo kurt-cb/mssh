@@ -450,551 +450,293 @@ records; account creation requires a one-time admin-approved
 enrollment. Highest adoption-value piece of §5 once the X.509
 expansion is in.
 
-### mssh-passkey integration for 2FA on CA operations 🚧
+### Passkey RP service for external tools 🚧
 
-Composes with [future-ideas §6](future-ideas.md#6-require-2fa-for-high-privilege-roles-with-air-gap-fallback)
-(2FA for high-privilege roles) and [§7](future-ideas.md#7-passkey--webauthn-support)
-(Passkey / WebAuthn). Architectural decision and option evaluation
-in [passkey-design-document.md](passkey-design-document.md)
-(Option 2 — Browser-Native WebAuthn — is the selected default).
+mssh-ca can act as a **WebAuthn relying party on behalf of external
+applications**, using [mssh-passkey](mssh-passkey-module.md) as
+the public-facing broker. An external tool with its own users gets
+a turnkey passkey integration without having to embed WebAuthn
+machinery itself: it pushes "challenge user X" through mssh-ca,
+mssh-ca + mssh-passkey run the ceremony, the external tool gets
+back a verified outcome.
 
-**Important scoping:** there are multiple potential consumers for
-passkeys in the mssh ecosystem (mssh client step-up, admin web
-portal step-up, kiosk login, etc.). This section is **only** about
-the operator-facing use case: gating high-privilege CA operations
-behind a passkey challenge. Other consumers can use the same
-`mssh-passkey` module independently; their integration shape is out
-of scope here.
+Composes with [future-ideas §5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel)
+— mssh-ca offering credential-ish services to neighboring
+applications. Architectural decision in
+[passkey-design-document.md](passkey-design-document.md) (Option 2 —
+Browser-Native WebAuthn). Broker module in
+[mssh-passkey-module.md](mssh-passkey-module.md).
 
-The **module itself** (storage schema, registration ceremony,
-broker API, browser pages, Apache2 deployment shape) is designed
-in [mssh-passkey-module.md](mssh-passkey-module.md). This section
-covers only what mssh-ca operators need to know to consume it.
+This is **distinct from** the mssh-admin 2FA flow ([admin-2fa.md](admin-2fa.md)),
+which gates *mssh-ca's own* privileged operations behind a
+passkey ceremony. The dataflow has a different shape (more
+hops, different consumer of the outcome). See the **Why two
+flows?** subsection below if you're unsure which you want.
 
-#### Architecture: mssh-passkey is a **broker-only** separate module
+#### Architecture
 
-mssh-passkey is a **new module, independent of mssh and mssh-ca**.
-It lives on a public-facing server reachable both from the user's
-phone browser (via HTTPS) and from mssh-ca (via mTLS).
-
-Critically: **mssh-passkey is a relay only.** Credentials (public
-keys, AAGUIDs, sign counts), challenge generation, attestation +
-assertion verification, AAGUID allowlist enforcement — all of it
-lives in mssh-ca. The broker holds in-flight ceremony state
-(`options_json`, response, callback URL, TTL) and nothing else.
+mssh-ca holds the credentials, performs WebAuthn verification,
+and acts as a service layer between the external tool and the
+mssh-passkey broker. The external tool never talks to mssh-passkey
+directly; it talks to mssh-ca, which talks to mssh-passkey, which
+talks to the user's phone.
 
 ```
-                            ┌────────────────────────────┐
-                            │  mssh-ca                   │
-                            │   (private network)        │
-                            │                            │
-                            │   • holds credentials       │
-                            │     (in user enrollment    │
-                            │      records)              │
-                            │   • generates WebAuthn     │
-                            │     options + challenges   │
-                            │   • verifies attestation   │
-                            │     + assertion responses  │
-                            │   • enforces AAGUID        │
-                            │     allowlist              │
-                            └─────────────┬──────────────┘
-                                          │
-                                  mTLS,   │  (mssh-ca is a CLIENT
-                                  full    │   of mssh-passkey;
-                                  cert    │   not the other way
-                                  valid.  │   around)
-                                  both    │
-                                  ways    │
-                                          │
-                            ┌─────────────▼──────────────┐
-                            │  mssh-passkey  (broker)    │
-                            │   (public-facing, HTTPS)   │
-                            │                            │
-                            │   • stores in-flight       │
-                            │     ceremonies (one table) │
-                            │   • serves register +      │
-                            │     approve HTML pages     │
-                            │   • RELAYS opaque blobs:   │
-                            │       options_json down,   │
-                            │       response_json up     │
-                            │   • DOES NOT verify        │
-                            │   • holds NO keys, NO      │
-                            │     user identities        │
-                            └─────────────┬──────────────┘
-                                          │
-                                          │  HTTPS (public web)
-                                          │  user opens QR URL
-                                          ▼
-                            ┌────────────────────────────┐
-                            │  user's phone browser      │
-                            │   • mobile Safari / Chrome │
-                            │   • navigator.credentials. │
-                            │       create() / get()     │
-                            │   • Face ID / Touch ID     │
-                            │   • signs over the         │
-                            │     mssh-ca-issued         │
-                            │     challenge              │
-                            └────────────────────────────┘
+            ┌──────────────────────────┐
+            │  external tool           │
+            │   (separate application; │
+            │    not part of mssh)     │
+            │                          │
+            │   "challenge user X      │
+            │    for operation Y"      │
+            └────────────┬─────────────┘
+                         │  mTLS — external
+                         │  tool authenticates
+                         │  to mssh-ca with its
+                         │  own client cert
+                         ▼
+            ┌──────────────────────────┐
+            │  mssh-ca                 │
+            │   (private network)      │
+            │                          │
+            │   • holds credentials    │
+            │     PER EXTERNAL TOOL    │
+            │     (each tool's users   │
+            │      stored separately   │
+            │      under tool_id)      │
+            │   • generates options    │
+            │   • verifies responses   │
+            │   • forwards outcome to  │
+            │     external tool        │
+            └────────────┬─────────────┘
+                         │  mTLS, same
+                         │  passkey broker
+                         │  as elsewhere
+                         ▼
+            ┌──────────────────────────┐
+            │  mssh-passkey (broker)   │
+            │   (public-facing, HTTPS) │
+            └────────────┬─────────────┘
+                         │
+                         │ HTTPS (public web)
+                         ▼
+            ┌──────────────────────────┐
+            │  user's phone browser    │
+            └──────────────────────────┘
 ```
 
-Key consequences of this split:
+#### External-tool dataflow
 
-  - **mssh-ca stays private-network.** WebAuthn requires HTTPS +
-    a public-resolvable origin for the browser; mssh-ca shouldn't
-    take on either. mssh-passkey absorbs that responsibility for
-    the user-facing TLS only — the cryptographic verification
-    happens in mssh-ca behind the mTLS wall.
-  - **The broker holds no keys.** Compromise of mssh-passkey
-    cannot forge signatures or fabricate authentic credentials;
-    the worst it can do is drop transactions or swap descriptions
-    across in-flight ceremonies. Both are bounded incidents, not
-    full identity-store breaches.
-  - **One source of truth for credentials.** alice's registered
-    authenticators sit in mssh-ca's enrollment record alongside
-    her SSH keys + policies. No second database to sync.
-  - **The broker is a generic relay.** Other consumers (msshd,
-    admin web portal, future kiosks) can each hold their own
-    credentials in their own enrollment DBs and share the broker
-    without coordinating with mssh-ca.
-
-#### Registration dataflow
-
-End-to-end registration of alice's first authenticator. mssh-ca
-generates the `PublicKeyCredentialCreationOptions` (with its own
-challenge), the broker relays it to the browser, the browser does
-the WebAuthn ceremony, and the response comes back through the
-broker to mssh-ca which verifies + stores the credential.
+End-to-end: an external tool wants its user `alice@externalcorp`
+to approve operation Y. Three back-end layers + the browser.
 
 ```
-  mssh-admin            mssh-ca              mssh-passkey         user's phone
-   (operator)        (private net)             (broker)            (browser)
+  external tool         mssh-ca              mssh-passkey         user's
+                     (private net)             (broker)            phone
        │                  │                       │                     │
-       │ user passkey     │                       │                     │
-       │ enroll           │                       │                     │
-       │ --user alice     │                       │                     │
-       │  ──────────────► │                       │                     │
+       │ POST /v1/         │                       │                     │
+       │ external/        │                       │                     │
+       │ passkey/         │                       │                     │
+       │ challenge        │                       │                     │
+       │ (mTLS)           │                       │                     │
+       │ {tool_id,        │                       │                     │
+       │  user_id,        │                       │                     │
+       │  description,    │                       │                     │
+       │  ttl_seconds,    │                       │                     │
+       │  outcome_url}    │                       │                     │
+       ├─────────────────►│                       │                     │
        │                  │                       │                     │
-       │                  │ 1. webauthn.          │                     │
+       │                  │ 1. authn external     │                     │
+       │                  │    tool by mTLS CN;   │                     │
+       │                  │    lookup tool's      │                     │
+       │                  │    enrollment +       │                     │
+       │                  │    user_id's          │                     │
+       │                  │    registered         │                     │
+       │                  │    credentials        │                     │
+       │                  │                       │                     │
+       │                  │ 2. webauthn.          │                     │
        │                  │    generate_          │                     │
-       │                  │    registration_      │                     │
-       │                  │    options(           │                     │
-       │                  │      rp_id="passkey   │                     │
-       │                  │             .example  │                     │
-       │                  │             .com",    │                     │
-       │                  │      user="alice")    │                     │
-       │                  │ → options_json,       │                     │
-       │                  │   challenge_bytes     │                     │
-       │                  │                       │                     │
-       │                  │ 2. store challenge    │                     │
-       │                  │    locally under      │                     │
-       │                  │    ceremony_id        │                     │
+       │                  │    authentication_    │                     │
+       │                  │    options(rp_id,     │                     │
+       │                  │      allow_           │                     │
+       │                  │      credentials=     │                     │
+       │                  │      user's IDs)      │                     │
        │                  │                       │                     │
        │                  │ 3. POST /broker/      │                     │
        │                  │    ceremony  (mTLS)   │                     │
-       │                  │    {type:"register",  │                     │
-       │                  │     options_json,     │                     │
-       │                  │     description,      │                     │
-       │                  │     callback_url}     │                     │
-       │                  │ ──────────────────►   │                     │
-       │                  │                       │                     │
-       │                  │                       │ 4. INSERT ceremony  │
-       │                  │                       │    (stores opaque   │
-       │                  │                       │     options_json +  │
-       │                  │                       │     callback_url)   │
-       │                  │                       │                     │
-       │                  │ 5. {ceremony_id, url} │                     │
-       │                  │ ◄──────────────────   │                     │
-       │                  │                       │                     │
-       │ 6. URL printed   │                       │                     │
-       │ ◄────────────────│                       │                     │
-       │                  │                       │                     │
-       │ 7. (operator     │                       │                     │
-       │     sends url    │                       │                     │
-       │     to alice OOB)│                       │                     │
-       │                  │                       │                     │
-       │                  │                       │  GET /register/<id> │
-       │                  │                       │ ◄───────────────────│
-       │                  │                       │                     │
-       │                  │                       │ 8. HTML page with   │
-       │                  │                       │    options_json     │
-       │                  │                       │    embedded         │
-       │                  │                       │ ───────────────────►│
-       │                  │                       │                     │
-       │                  │                       │      9. navigator.  │
-       │                  │                       │         credentials.│
-       │                  │                       │         create(     │
-       │                  │                       │           options)  │
-       │                  │                       │         → Face ID   │
-       │                  │                       │         → attestation
-       │                  │                       │           Object    │
-       │                  │                       │                     │
-       │                  │                       │  POST /register/    │
-       │                  │                       │  <id>/respond       │
-       │                  │                       │  {attestation       │
-       │                  │                       │   Object, client    │
-       │                  │                       │   DataJSON,         │
-       │                  │                       │   transports}       │
-       │                  │                       │ ◄───────────────────│
-       │                  │                       │                     │
-       │                  │                       │ 10. UPDATE ceremony │
-       │                  │                       │     outcome=        │
-       │                  │                       │     "approved",     │
-       │                  │                       │     response_json   │
-       │                  │                       │     (broker does    │
-       │                  │                       │      NOT verify)    │
-       │                  │                       │                     │
-       │                  │                       │ {ok: true}          │
-       │                  │                       │ ───────────────────►│
-       │                  │                       │                     │
-       │                  │                       │      11. "Submitted"│
-       │                  │                       │           page      │
-       │                  │                       │                     │
-       │                  │ 12. POST callback_url │                     │
-       │                  │     (mTLS)            │                     │
-       │                  │     {ceremony_id,     │                     │
-       │                  │      outcome:         │                     │
-       │                  │       "approved",     │                     │
-       │                  │      response_json}   │                     │
-       │                  │ ◄──────────────────   │                     │
-       │                  │                       │                     │
-       │                  │ 13. webauthn.verify_  │                     │
-       │                  │     registration_     │                     │
-       │                  │     response(         │                     │
-       │                  │       response,       │                     │
-       │                  │       expected_       │                     │
-       │                  │         challenge,    │                     │
-       │                  │       expected_rp_id, │                     │
-       │                  │       expected_origin)│                     │
-       │                  │                       │                     │
-       │                  │     • signature valid?│                     │
-       │                  │     • origin/rp_id    │                     │
-       │                  │       match?          │                     │
-       │                  │     • AAGUID in       │                     │
-       │                  │       allowlist?      │                     │
-       │                  │                       │                     │
-       │                  │ 14. INSERT credential │                     │
-       │                  │     into alice's      │                     │
-       │                  │     enrollment        │                     │
-       │                  │     record:           │                     │
-       │                  │     (credential_id,   │                     │
-       │                  │      public_key,      │                     │
-       │                  │      aaguid,          │                     │
-       │                  │      sign_count, ...) │                     │
-       │                  │                       │                     │
-       │                  │ 15. 200 OK            │                     │
-       │                  │ ──────────────────►   │                     │
-```
-
-If any of mssh-ca's verifications fail at step 13 (signature
-invalid, origin mismatch, AAGUID not in allowlist, etc.),
-mssh-ca refuses to insert the credential, logs the failure with
-the ceremony_id, and returns 200 to the broker anyway (the
-broker doesn't care whether mssh-ca accepted — its job ended at
-step 11). mssh-admin sees the registration as failed via mssh-ca's
-own audit log.
-
-#### Authentication (approval) dataflow
-
-End-to-end approval of a pending high-privilege operation. Same
-broker-only shape as registration; mssh-ca generates the
-`PublicKeyCredentialRequestOptions` with alice's registered
-credential IDs in `allowCredentials`, the broker relays it, the
-browser signs the challenge, mssh-ca verifies and proceeds with
-the original operation.
-
-```
-  mssh-admin            mssh-ca              mssh-passkey         user's phone
-   (operator)        (private net)             (broker)            (browser)
-       │                  │                       │                     │
-       │ <high-privilege  │                       │                     │
-       │  command>        │                       │                     │
-       │  ──────────────► │                       │                     │
-       │                  │                       │                     │
-       │                  │ 1. check policy:      │                     │
-       │                  │    "alice's role      │                     │
-       │                  │     requires passkey  │                     │
-       │                  │     2FA → defer the   │                     │
-       │                  │     operation pending │                     │
-       │                  │     ceremony"         │                     │
-       │                  │                       │                     │
-       │                  │ 2. lookup alice's     │                     │
-       │                  │    registered         │                     │
-       │                  │    credential_ids     │                     │
-       │                  │                       │                     │
-       │                  │ 3. webauthn.          │                     │
-       │                  │    generate_          │                     │
-       │                  │    authentication_    │                     │
-       │                  │    options(           │                     │
-       │                  │      rp_id, challenge,│                     │
-       │                  │      allow_           │                     │
-       │                  │      credentials=     │                     │
-       │                  │      alice's IDs)     │                     │
-       │                  │ → options_json,       │                     │
-       │                  │   challenge_bytes     │                     │
-       │                  │                       │                     │
-       │                  │ 4. store ceremony     │                     │
-       │                  │    locally:           │                     │
-       │                  │    (ceremony_id,      │                     │
-       │                  │     challenge,        │                     │
-       │                  │     pending_op_id,    │                     │
-       │                  │     description,      │                     │
-       │                  │     expected_user=    │                     │
-       │                  │     alice)            │                     │
-       │                  │                       │                     │
-       │                  │ 5. POST /broker/      │                     │
-       │                  │    ceremony  (mTLS)   │                     │
        │                  │    {type:"approve",   │                     │
        │                  │     options_json,     │                     │
-       │                  │     description=      │                     │
-       │                  │       "Revoke admin   │                     │
-       │                  │        cert for bob", │                     │
-       │                  │     callback_url}     │                     │
+       │                  │     description,      │                     │
+       │                  │     callback_url=     │                     │
+       │                  │       mssh-ca's own   │                     │
+       │                  │       callback URL}   │                     │
        │                  │ ──────────────────►   │                     │
-       │                  │                       │                     │
-       │                  │                       │ 6. INSERT ceremony  │
        │                  │                       │                     │
        │                  │ {ceremony_id, qr_url} │                     │
        │                  │ ◄──────────────────   │                     │
        │                  │                       │                     │
-       │ 7. URL printed   │                       │                     │
+       │ 4. {ceremony_id, │                       │                     │
+       │     qr_url}      │                       │                     │
        │ ◄────────────────│                       │                     │
        │                  │                       │                     │
-       │ 8. (operator     │                       │                     │
-       │     sends url    │                       │                     │
-       │     to alice via │                       │                     │
-       │     slack/email/ │                       │                     │
-       │     hands phone) │                       │                     │
+       │ 5. (external     │                       │                     │
+       │     tool sends   │                       │                     │
+       │     qr_url to    │                       │                     │
+       │     alice via    │                       │                     │
+       │     its own UX)  │                       │                     │
        │                  │                       │                     │
        │                  │                       │   GET /approve/<id> │
        │                  │                       │ ◄───────────────────│
        │                  │                       │                     │
-       │                  │                       │ 9. HTML page:       │
-       │                  │                       │    description +    │
-       │                  │                       │    [Approve][Deny]  │
-       │                  │                       │    options_json     │
-       │                  │                       │    embedded for JS  │
+       │                  │                       │   page + ceremony   │
        │                  │                       │ ───────────────────►│
        │                  │                       │                     │
-       │                  │                       │     10. navigator.  │
-       │                  │                       │         credentials.│
-       │                  │                       │         get(options)│
-       │                  │                       │         → Face ID   │
-       │                  │                       │         → assertion │
+       │                  │                       │       6. WebAuthn   │
+       │                  │                       │          get(opts)  │
        │                  │                       │                     │
-       │                  │                       │  POST /approve/<id>/│
-       │                  │                       │  respond            │
-       │                  │                       │  {credentialId,     │
-       │                  │                       │   authData,         │
-       │                  │                       │   clientDataJSON,   │
-       │                  │                       │   signature}        │
+       │                  │                       │ POST /approve/<id>/ │
+       │                  │                       │ respond             │
        │                  │                       │ ◄───────────────────│
        │                  │                       │                     │
-       │                  │                       │ 11. UPDATE ceremony │
-       │                  │                       │     outcome=        │
-       │                  │                       │     "approved",     │
-       │                  │                       │     response_json   │
-       │                  │                       │     (broker does    │
-       │                  │                       │      NOT verify)    │
-       │                  │                       │                     │
-       │                  │                       │ {ok: true}          │
-       │                  │                       │ ───────────────────►│
-       │                  │                       │                     │
-       │                  │                       │      12. "Submitted"│
-       │                  │                       │                     │
-       │                  │ 13. POST callback_url │                     │
-       │                  │     (mTLS)            │                     │
-       │                  │     {ceremony_id,     │                     │
-       │                  │      outcome:         │                     │
-       │                  │       "approved",     │                     │
-       │                  │      response_json}   │                     │
+       │                  │ 7. POST callback      │                     │
+       │                  │    {ceremony_id,      │                     │
+       │                  │     outcome,          │                     │
+       │                  │     response_json}    │                     │
        │                  │ ◄──────────────────   │                     │
        │                  │                       │                     │
-       │                  │ 14. webauthn.verify_  │                     │
-       │                  │     authentication_   │                     │
-       │                  │     response(         │                     │
-       │                  │       response,       │                     │
-       │                  │       expected_       │                     │
-       │                  │         challenge,    │                     │
-       │                  │       expected_rp_id, │                     │
-       │                  │       expected_origin,│                     │
-       │                  │       credential_     │                     │
-       │                  │         public_key,   │                     │
-       │                  │       credential_     │                     │
-       │                  │         current_sign_ │                     │
-       │                  │         count)        │                     │
+       │                  │ 8. verify response    │                     │
+       │                  │    against user's     │                     │
+       │                  │    stored public      │                     │
+       │                  │    key + signing      │                     │
+       │                  │    counter            │                     │
        │                  │                       │                     │
-       │                  │     • signature valid?│                     │
-       │                  │     • counter > prev? │                     │
-       │                  │                       │                     │
-       │                  │ 15. UPDATE alice's    │                     │
-       │                  │     credential        │                     │
-       │                  │     sign_count +      │                     │
-       │                  │     last_used_at      │                     │
-       │                  │                       │                     │
-       │                  │ 16. APPROVE the       │                     │
-       │                  │     original          │                     │
-       │                  │     pending operation │                     │
-       │                  │                       │                     │
-       │                  │ 17. 200 OK            │                     │
-       │                  │ ──────────────────►   │                     │
-       │                  │                       │                     │
-       │ 18. operation    │                       │                     │
-       │     result       │                       │                     │
+       │                  │ 9. POST outcome_url   │                     │
+       │                  │    (mTLS)             │                     │
+       │                  │    {ceremony_id,      │                     │
+       │                  │     outcome,          │                     │
+       │                  │     user_id,          │                     │
+       │                  │     verified: true}   │                     │
        │ ◄────────────────│                       │                     │
+       │                  │                       │                     │
+       │ 10. external tool│                       │                     │
+       │     proceeds     │                       │                     │
+       │     with Y       │                       │                     │
 ```
 
-If alice clicks **Deny** instead, step 10 is replaced by a
-`POST /approve/<id>/deny` (no WebAuthn). Broker sets
-`outcome = "denied"`, callback posts back with the denial,
-mssh-ca cancels the pending operation.
+Notice the **two callback hops**: mssh-passkey calls back to
+mssh-ca (its trust boundary stops there); mssh-ca then verifies
+and calls back to the external tool's outcome_url. The external
+tool never sees the raw `response_json` — only the verified
+boolean + the ceremony metadata.
 
-If the ceremony times out, the broker's sweeper runs every 30s
-and marks expired ceremonies; mssh-ca either receives an
-`"expired"` callback or learns via its own TTL poll on the
-pending operation.
+#### Per-tool isolation
 
-#### Operator flow (proposed)
-
-```
-1. Admin runs `mssh-admin <some-high-privilege-command> --user alice`.
-2. Policy says alice's role requires passkey 2FA.
-3. mssh-admin → mssh-ca: invoke the command.
-4. mssh-ca → mssh-passkey (mTLS): "I need alice to approve this
-   transaction. Here's the metadata: action=<desc>, ttl=5min."
-5. mssh-passkey returns: transaction_id, qr_url
-   (https://passkey.example.com/approve/<token>).
-6. mssh-ca holds the operation pending; emits the qr_url back to
-   mssh-admin, which displays it as a QR (or just a URL).
-7. Admin sends the URL to alice (slack / email / hands phone).
-8. alice opens the URL on her phone browser, sees "approve
-   <action>?". She taps. Browser invokes WebAuthn; she completes
-   biometric.
-9. mssh-passkey verifies the WebAuthn assertion against alice's
-   registered public key.
-10. mssh-passkey notifies mssh-ca (webhook or polled):
-    "transaction <id> approved by alice".
-11. mssh-ca proceeds with the original operation; audit logged
-    with the transaction_id + alice's verified identity.
-```
-
-#### Configuration
-
-mssh-ca consumes mssh-passkey via config:
-
-```yaml
-# ca-config.yaml
-passkey:
-  # Public URL of the mssh-passkey service. Users will see this
-  # in QR codes / browser address bar.
-  url: https://passkey.example.com
-
-  # mTLS cert + key mssh-ca presents when calling the broker
-  # API. Signed by the operator's trust hierarchy; mssh-passkey
-  # validates incoming clients against ca_cert below.
-  client_cert: /etc/mssh-ca/passkey-client.crt
-  client_key:  /etc/mssh-ca/passkey-client.key
-
-  # Trust anchor for verifying mssh-passkey's own TLS cert. Full
-  # cert validation in both directions.
-  ca_cert: /etc/mssh-ca/passkey-server-ca.pem
-
-  # Callback URL mssh-passkey hits when a transaction completes.
-  # Hosted by mssh-ca on its existing admin listener; uses the
-  # same mTLS hierarchy.
-  callback_url: https://mssh-ca.internal:8443/v1/admin/passkey/callback
-```
-
-If `passkey:` is absent from ca-config.yaml, passkey 2FA is
-unavailable and policies requiring it fail closed at policy load
-time.
-
-#### CLI surface (proposed)
+Each external tool gets its own "namespace" in mssh-ca's
+credential store. Tool `foo` enrolling `alice@foo` and tool `bar`
+enrolling `alice@bar` are independent — different credentials,
+different RP IDs (potentially), different audit lanes. Tools are
+enrolled at mssh-ca with their own mTLS client certs (similar to
+admin enrollment, but with a separate role):
 
 ```bash
-# Initiate alice's first-time enrollment with the mssh-passkey
-# module. Returns a QR-URL alice opens on her phone to register
-# her hardware-bound credential. mssh-ca records (via callback)
-# that alice has at least one credential registered.
-mssh-admin user passkey enroll --user alice
-
-# Show what mssh-passkey holds for alice (credentials, last-use
-# timestamps). mssh-ca asks the broker via mTLS.
-mssh-admin user passkey list --user alice
-
-# Revoke a credential at the broker. mssh-ca calls passkey API
-# with the credential ID.
-mssh-admin user passkey revoke --user alice --credential-id <hex>
-
-# Tag a policy as passkey-required.
-mssh-admin policy add --user alice \
-    --servers prod-* \
-    --channels session \
-    --require-2fa passkey \
-    --2fa-within-seconds 60
+mssh-admin external-tool add \
+    --name internal-payroll-app \
+    --rp-id payroll.example.com \
+    --outcome-url-prefix https://payroll.example.com/mssh-callbacks/
 ```
 
-Note these are all **CA-side** commands; the user-facing
-ceremony happens in the browser at mssh-passkey's URL, not
-through the mssh CLI.
+This produces an mTLS client cert+key for the external tool to
+present when calling mssh-ca's `/v1/external/passkey/...`
+endpoints. mssh-ca records the tool's `name`, allowed `rp_id`,
+and the URL prefix the tool's outcome callbacks must use (so a
+compromised tool cert can only deliver outcomes to that tool's
+own infrastructure, not somewhere unexpected).
 
-#### Broker API surface (mTLS)
+#### Proposed CLI surface (mssh-ca)
 
-The two dataflow diagrams above show the request shapes. The
-broker API is intentionally tiny: one POST to create a ceremony
-(register or approve), one GET for status, one DELETE to cancel.
-See [mssh-passkey-module.md § 5](mssh-passkey-module.md#5-broker-api-surface-mtls)
-for the complete contract — the broker is its own module and the
-contract lives in its own design doc.
+```bash
+# Tool lifecycle:
+mssh-admin external-tool add    --name <tool> --rp-id <fqdn> --outcome-url-prefix <url>
+mssh-admin external-tool list
+mssh-admin external-tool remove --name <tool>
 
-#### Why this architecture (vs. WebAuthn at the CA directly,
-or the broker holding keys)
+# User-under-tool lifecycle (parallels mssh-admin user passkey ...):
+mssh-admin external-tool user-passkey enroll --tool <name> --user <user_id>
+mssh-admin external-tool user-passkey list   --tool <name> --user <user_id>
+mssh-admin external-tool user-passkey revoke --tool <name> --user <user_id> --credential-id <hex>
+```
 
-Two earlier drafts collapsed for distinct reasons:
+These all live under `mssh-admin external-tool ...` to keep them
+visually distinct from the admin-2FA management commands
+(`mssh-admin user passkey ...`), which operate on mssh-ca's own
+admin enrollments.
 
-  1. **mssh-ca as WebAuthn RP directly** — WebAuthn requires a
-     public HTTPS origin, which would pull mssh-ca out of its
-     private network. Loses the core "stolen creds useless
-     off-network" property.
+#### Proposed mssh-ca endpoints (external-tool-facing)
 
-  2. **Broker holds credentials** — A compromised broker could
-     forge assertions. With credentials at mssh-ca and the broker
-     as relay, a compromised broker can only drop transactions or
-     swap descriptions (transaction-binding attack, bounded —
-     mitigated by description correlation IDs and operator OOB
-     confirmation).
+  - `POST /v1/external/passkey/enroll-begin` — get a registration
+    URL for a new user-under-tool credential
+  - `POST /v1/external/passkey/challenge` — push an approval
+    ceremony for an existing user-under-tool
+  - `GET  /v1/external/passkey/ceremony/<id>` — poll fallback
+  - `DELETE /v1/external/passkey/credential/<tool>/<user>/<cred_id>` —
+    remote revoke
+  - `POST /v1/external/passkey/admin/tool` — admin-only CRUD on
+    external-tool enrollments
 
-The broker-only architecture is strictly better than either:
+All mTLS-authenticated. The first four are scoped to the calling
+tool's own users — tool `foo` cannot mint a challenge for a user
+belonging to tool `bar`.
 
-  - **Tiny attack surface.** No keys, no per-user data, no
-    AAGUID allowlist. Broker compromise is bounded.
-  - **One source of truth.** Credentials live alongside SSH keys
-    in mssh-ca's enrollment record; no two-database sync.
-  - **Multi-consumer reuse.** Any back-end with its own
-    enrollment DB (msshd, future kiosks, admin web portal) can
-    share the broker without coordinating with mssh-ca.
+#### Why two flows?
+
+The flow above and the [admin-2fa.md](admin-2fa.md) flow share
+the broker, the WebAuthn protocol, and the cryptographic
+verification path. They differ in:
+
+| Aspect | admin-2fa flow | external-tool flow |
+|---|---|---|
+| Who is the user being challenged? | An mssh-ca admin (operator) | An end-user of an external tool |
+| Where do their credentials live? | Under their admin record in mssh-ca's enrollment DB | Under their user record namespaced to a `tool_id` in mssh-ca's external-tool store |
+| Who initiated the operation? | The admin themselves (via mssh-admin CLI) | The external tool (via mTLS to /v1/external/passkey/...) |
+| Who consumes the verified outcome? | mssh-ca itself, to proceed with the privileged operation | The external tool, via a callback to its `outcome_url` |
+| Number of callback hops | 1 (broker → mssh-ca) | 2 (broker → mssh-ca → external tool) |
+| Audit trail location | mssh-ca's admin audit log | mssh-ca's external-tool audit log + the tool's own |
+
+Use **admin-2fa** when you want to gate operations on mssh-ca
+itself. Use **external-tool integration** when you have a
+separate application that wants WebAuthn auth for its users and
+doesn't want to embed the machinery.
+
+#### Open questions
+
+  - **Tool-level rate limits.** A buggy or compromised external
+    tool could flood mssh-ca with ceremony requests. Per-tool
+    rate limits should be configurable at `external-tool add`
+    time. Probably defaulting to something like 10 ceremonies
+    per minute per tool, raisable as needed.
+  - **Tool-cert rotation.** Same shape as admin cert rotation;
+    needs an explicit operator runbook entry.
+  - **AAGUID allowlist per tool.** Should each external tool be
+    able to require its own allowlist (different hardware
+    standards for different applications)? Probably yes — a
+    field on the external-tool enrollment record. v1 inherits
+    mssh-ca's global allowlist; per-tool override is v2.
+  - **Outcome_url scheme.** What scheme is `outcome_url` allowed
+    to use? https:// only with mTLS validation, definitely;
+    additional restrictions (must match `outcome_url_prefix`
+    from enrollment) catch a compromised tool delivering to
+    unexpected destinations.
 
 #### Composition / cross-references
 
-  - **[future-ideas §6](future-ideas.md#6-require-2fa-for-high-privilege-roles-with-air-gap-fallback)** —
-    2FA for high-privilege roles. mssh-passkey is the *passkey
-    factor* implementation §6 mentions; TOTP/push are separate
-    factors §6 still defers.
-  - **[future-ideas §7](future-ideas.md#7-passkey--webauthn-support)** —
-    Passkey / WebAuthn umbrella discussion. Settled by
-    [passkey-design-document.md](passkey-design-document.md)
-    Option 2.
-  - **[passkey-design-document.md](passkey-design-document.md)** —
-    architectural decision record (4 options, picked #2).
-    Trust model details, server hardening requirements, threat
-    matrix.
-  - **[browser.md § WebAuthn](browser.md#webauthn-with-hardware-only-authenticators--the-cleaner-path)** —
-    AAGUID allowlist rationale, hardware-bound-only constraint.
-    Carries into mssh-passkey's registration validation.
-  - **[§26 admin web portal](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost)** —
-    *separate* consumer of mssh-passkey; the web portal can use
-    the same broker API for step-up auth on destructive actions
-    without going through mssh-ca. Out of scope here.
-
+  - [mssh-passkey-module.md](mssh-passkey-module.md) — broker
+    internals.
+  - [admin-2fa.md](admin-2fa.md) — the *other* passkey flow:
+    mssh-ca challenging its own admins.
+  - [passkey-design-document.md](passkey-design-document.md) —
+    architectural decision record for Option 2.
+  - [browser.md § WebAuthn](browser.md#webauthn-with-hardware-only-authenticators--the-cleaner-path)
+    — AAGUID allowlist + hardware-bound constraint.
 ---
 
 ## Part 4 — Policy and audit across credential types 🚧

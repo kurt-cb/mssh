@@ -242,13 +242,17 @@ selected design (separate `mssh-passkey` broker module per
 TOTP / push factors are still unspecified.
 
 **See also:**
-  - [ca-integration.md § mssh-passkey integration](ca-integration.md#mssh-passkey-integration-for-2fa-on-ca-operations-)
-    — the CA-side consumer integration: how mssh-ca configures
-    itself to use mssh-passkey, the operator flow, the two API
-    contracts still to nail down.
+  - [admin-2fa.md](admin-2fa.md) — design of the mssh-admin 2FA
+    flow (gating mssh-ca's own privileged operations behind a
+    passkey ceremony). Operator-facing playbook at
+    [docs/operations.md § Require passkey 2FA](../docs/operations.md#require-passkey-2fa-for-high-privilege-admin-operations).
+  - [ca-integration.md § Passkey RP service for external tools](ca-integration.md#passkey-rp-service-for-external-tools-)
+    — the *other* passkey flow: mssh-ca as RP for external apps.
+    Same broker, different consumer.
+  - [mssh-passkey-module.md](mssh-passkey-module.md) — the broker
+    module itself; identical regardless of which flow uses it.
   - [passkey-design-document.md](passkey-design-document.md) — the
-    architectural decision record for the passkey path (4 options
-    evaluated, #2 chosen).
+    architectural decision record (4 options evaluated, #2 chosen).
 
 ### Idea
 
@@ -324,25 +328,31 @@ for high-security applications).
 
 The selected implementation shape is a **separate `mssh-passkey`
 module**, not a feature inside mssh-ca or mssh. mssh-passkey is a
-public-facing service (HTTPS, WebAuthn RP) that other components
-in the ecosystem consume via mTLS:
+public-facing broker (HTTPS for browsers, mTLS for back-end clients)
+that does NO WebAuthn verification itself — it just shuttles opaque
+options/response blobs. Back-end clients (mssh-ca, etc.) hold
+credentials and do the verification.
 
-  - **mssh-ca** uses mssh-passkey to gate high-privilege CA
-    operations behind a passkey ceremony. See
-    [ca-integration.md § mssh-passkey integration](ca-integration.md#mssh-passkey-integration-for-2fa-on-ca-operations-).
-  - **[§26 admin web portal](#26-admin-web-portal-via-mssh-tunneled-localhost)**
-    can use mssh-passkey for step-up auth on destructive actions
-    in the browser, hitting the same broker API as mssh-ca.
-  - **Other consumers** (a future kiosk-style mssh client, an
-    "internal app that needs 2FA" use case) get the same broker
-    for free without each having to embed WebAuthn machinery.
+Two distinct flows use the broker:
 
-This consumer-side integration is what
-[ca-integration.md § mssh-passkey integration](ca-integration.md#mssh-passkey-integration-for-2fa-on-ca-operations-)
-covers in detail; the **mssh-passkey module itself** — registration
-flow, broker API contract, deployment, AAGUID allowlist config — is
-a separate piece of work captured as its own line in
+  - **mssh-admin 2FA** — mssh-ca gates *its own* privileged
+    operations behind a passkey ceremony on the operator's
+    phone. Design in [admin-2fa.md](admin-2fa.md); operator
+    playbook in
+    [docs/operations.md § Require passkey 2FA](../docs/operations.md#require-passkey-2fa-for-high-privilege-admin-operations).
+  - **External-tool RP service** — mssh-ca acts as a WebAuthn
+    relying party on behalf of external applications, with
+    per-tool isolation. Design in
+    [ca-integration.md § Passkey RP service for external tools](ca-integration.md#passkey-rp-service-for-external-tools-).
+
+Both flows compose with the **broker module itself** which is
+designed in [mssh-passkey-module.md](mssh-passkey-module.md) and
+captured as a separate line in
 [design/todo_current_status.md](todo_current_status.md#mssh-passkey-module-separate-deployment-target).
+
+**[§26 admin web portal](#26-admin-web-portal-via-mssh-tunneled-localhost)**
+can use the same broker for in-browser step-up auth without
+involving the phone — a third future consumer.
 
 **See also:**
   - [passkey-design-document.md](passkey-design-document.md) — the

@@ -414,6 +414,154 @@ swap the hrefs).
 
 ---
 
+### Require passkey 2FA for high-privilege admin operations
+
+🚧 **Design captured, implementation in progress.** Reference:
+[design/admin-2fa.md](../design/admin-2fa.md) for the dataflow +
+state-machine; [design/mssh-passkey-module.md](../design/mssh-passkey-module.md)
+for the broker.
+
+mssh-ca can gate any admin operation behind a WebAuthn ceremony
+on the operator's phone. The operator runs an `mssh-admin` command
+as usual; policy detects "2FA required"; mssh-admin pauses, shows
+the operator a URL/QR to open on their enrolled phone; the
+operator approves with Face ID / Touch ID; mssh-ca completes the
+operation. A short per-admin cache (default 60 seconds) avoids
+re-prompting on every command in a session.
+
+#### Prerequisites
+
+  1. **mssh-passkey deployed.** A `mssh-passkey` broker is running
+     on a public-facing host. See
+     [design/mssh-passkey-module.md § 8](../design/mssh-passkey-module.md#8-deployment-shape)
+     for the deployment shape (Apache2 + Flask in production; the
+     adhoc-lab uses an in-process dev mode).
+  2. **mTLS trust established.** mssh-ca holds a client cert
+     signed by the broker's trust root; the broker holds a client
+     cert mssh-ca trusts (for the outbound callback). Both
+     directions are validated.
+  3. **Passkey config block in ca-config.yaml:**
+
+     ```yaml
+     passkey:
+       url: https://passkey.example.com
+       client_cert: /etc/mssh-ca/passkey-client.crt
+       client_key:  /etc/mssh-ca/passkey-client.key
+       ca_cert:     /etc/mssh-ca/passkey-server-ca.pem
+       callback_url: https://mssh-ca.internal:8443/v1/admin/passkey/callback
+     ```
+
+  4. **At least one admin has a passkey credential registered.**
+     If `require_2fa: passkey` is set on a policy and the admin
+     has no credentials, the operation fails closed.
+
+#### Enroll an admin's first passkey
+
+```bash
+mssh-admin user passkey enroll --user alice-admin
+# Returns a registration URL the admin opens ONCE on their phone.
+# Example:
+#   passkey enrollment URL (1-time, expires in 5 min):
+#     https://passkey.example.com/register/8c3e2f4b-...
+#
+# Open this on the admin's phone; touch the hardware token /
+# biometric to register. mssh-ca records the credential under
+# alice-admin's enrollment when the broker callback fires.
+```
+
+Multi-device: re-run the same command to mint a fresh
+registration URL for a second device (e.g. a backup token).
+
+#### Inspect / revoke
+
+```bash
+mssh-admin user passkey list --user alice-admin
+# username        label              fingerprint            enrolled_at           revoked_at
+# alice-admin     yubikey 5C usb     SHA256:abcd...         2026-05-20T14:00:00Z  null
+# alice-admin     phone (face-id)    SHA256:efgh...         2026-05-20T14:05:00Z  null
+
+mssh-admin user passkey revoke \
+    --user alice-admin \
+    --credential-id SHA256:abcd...
+```
+
+Revoking a credential immediately invalidates any 2FA cache
+entry that references it.
+
+#### Require 2FA on a policy
+
+```bash
+mssh-admin policy add \
+    --user alice-admin \
+    --servers prod-* \
+    --channels session \
+    --require-2fa passkey \
+    --2fa-within-seconds 60
+```
+
+`--require-2fa passkey` means any mssh-admin command matching
+this policy interrupts and requires a successful passkey
+ceremony to complete. `--2fa-within-seconds 60` is the cache
+window — within 60 seconds of a successful ceremony, subsequent
+matching commands skip the prompt.
+
+If a policy has `require_2fa: passkey` but ca-config.yaml has no
+`passkey:` block, mssh-ca refuses to start (fail closed).
+
+#### What the operator sees
+
+```
+$ mssh-admin user remove --user bob
+mssh-admin: 2FA required for this operation.
+
+  Open this URL on your enrolled phone:
+    https://passkey.example.com/approve/8c3e2f4b-...
+
+  ┌─────────────────────────────┐
+  │  (QR code in supported      │
+  │   terminals)                │
+  └─────────────────────────────┘
+
+  Expires in 4:58. Polling for approval…
+
+⠋ awaiting approval
+✓ approved (alice-admin's yubikey 5C)
+removed  bob
+status   ok
+```
+
+If the operation times out before approval, the operation is
+cancelled and the operator re-runs the command. If the operator
+explicitly denies the prompt, same outcome with a clearer error.
+
+#### Why localhost-only — wait, this isn't localhost
+
+Unlike the `msshd-admin-web` portal (which binds 127.0.0.1 and is
+reached via mssh tunnel), the passkey broker has to be **public**
+so the operator's phone can reach it. mTLS protects the mssh-ca
+↔ broker channel; the phone-facing HTTPS path is hardened
+separately (HSTS, public CA cert, etc. — see
+[design/mssh-passkey-module.md § 8](../design/mssh-passkey-module.md#8-deployment-shape)).
+
+If you want a portal-style approval flow that stays
+localhost-only, [§26 admin web portal](../design/future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost)
+is the path; it can use the same broker for in-browser step-up
+without involving the phone.
+
+#### Security note
+
+A compromised broker has bounded blast radius (it holds no
+keys), but mssh-ca should still defend its callback interface
+against injection / DoS / bogus-outcome attacks. The hardening
+roadmap is in
+[design/mssh-passkey-module.md § Hardening v2](../design/mssh-passkey-module.md#hardening-v2--defending-against-a-compromised-broker-deferred);
+mssh-ca will enter a **2FA fail-state** on detected anomalies
+that operators clear out-of-band via `mssh-admin passkey-broker
+reset`. Not implemented in v1; documented so operators know it's
+coming.
+
+---
+
 ### Ask the CA in natural language (MCP)
 
 The `mssh-mcp` server exposes the read-only admin API over the
