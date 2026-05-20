@@ -218,6 +218,44 @@ class CAClient:
             body['validity_days'] = int(validity_days)
         return self._request('POST', '/v1/admin/openvpn/issue', json=body)
 
+    # ---- §5 WireGuard catalog ----
+    def wireguard_server_init(self, name: str, network: str,
+                              endpoint: str, *,
+                              listen_port: int = 51820) -> dict[str, Any]:
+        return self._request('POST', '/v1/admin/wireguard/server', json={
+            'name': name, 'network': network,
+            'listen_port': listen_port, 'endpoint': endpoint,
+        })
+
+    def wireguard_server_remove(self, name: str) -> dict[str, Any]:
+        return self._request('DELETE', f'/v1/admin/wireguard/server/{name}')
+
+    def wireguard_server_show(self, name: str) -> dict[str, Any]:
+        return self._request('GET', f'/v1/admin/wireguard/server/{name}')
+
+    def wireguard_server_list(self) -> dict[str, Any]:
+        return self._request('GET', '/v1/admin/wireguard/server')
+
+    def wireguard_peer_issue(self, name: str, server: str, *,
+                             persistent_keepalive: int = 0,
+                             dns: str | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            'name': name, 'server': server,
+            'persistent_keepalive': persistent_keepalive,
+        }
+        if dns:
+            body['dns'] = dns
+        return self._request('POST', '/v1/admin/wireguard/peer', json=body)
+
+    def wireguard_peer_revoke(self, name: str, server: str) -> dict[str, Any]:
+        return self._request('DELETE',
+                             f'/v1/admin/wireguard/peer/{server}/{name}')
+
+    def wireguard_peer_list(self, server: str | None = None
+                            ) -> dict[str, Any]:
+        params = {'server': server} if server else None
+        return self._request('GET', '/v1/admin/wireguard/peer', params=params)
+
     # ---- CRL ----
     def cert_revoke(self, serials: list[str], *,
                     reason: str = '') -> dict[str, Any]:

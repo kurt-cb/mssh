@@ -117,26 +117,33 @@ session cookie handling.
 
 ## 5. The CA could mint credentials for other applications (step-ca parallel)
 
-**Status:** **X.509 family LANDED in v0.1.4.** `mssh-admin cert mint
---type {tls-server, https-user, code-sign}` and `mssh-admin openvpn
-issue` are first-class commands; both wire through new admin
-endpoints (`/v1/admin/cert/mint`, `/v1/admin/openvpn/issue`) and the
-extended `cert_minter` helpers (`issue_server_cert`,
-`issue_codesign_cert`). PKCS#12 packaging for HTTPS-user is built
-into the CLI; `.ovpn` bundle assembly is built into `openvpn issue`.
+**Status:** **Mostly LANDED.** Implemented in v0.1.4:
+  - X.509 family (`tls-server`, `https-user`, `code-sign`) via
+    `mssh-admin cert mint`.
+  - OpenVPN bundles via `mssh-admin openvpn issue` (single-file
+    `.ovpn` with inline cert/key/CA).
+  - WireGuard via `mssh-admin wireguard server-init / issue /
+    server-show / revoke` — Curve25519 keypair generation, IP
+    allocation, persistence in a JSON catalog, wg-quick config
+    emission, cascade-on-server-remove.
+  - CRL Distribution Point embedded in issued leaves (set
+    `cert_generation.crl_url` in `ca-config.yaml`) plus a
+    `GET /v1/crl.pem` endpoint returning an X.509 CRL signed by
+    the TLS CA. OpenVPN's `--crl-verify` consumes this directly.
 
-Still outstanding under §5:
-  - **CRL Distribution Point** embedded in issued leaves (OpenVPN
-    consumers want this; today CRL is out-of-band via `GET /v1/crl`).
-  - **ACME endpoint** (RFC 8555 listener + state machine).
-  - **WireGuard Curve25519 keypair issuance + wg-quick config emission.**
+Still outstanding:
+  - **ACME endpoint** (RFC 8555 listener + state machine). Highest
+    adoption multiplier; ~2000+ LOC for a from-scratch server.
+    Deserves its own library-evaluation design pass.
   - **PGP (OpenPGP) signing hierarchy.** Composes with
     [§27](#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory).
+    Needs an OpenPGP library + a parallel signing key with its own
+    custody requirements.
 
 **See also:** [ca-integration.md](ca-integration.md) — operator
-playbook for both the implemented commands and the proposed CLI
-shapes for the remaining pieces, plus migration recipes from
-existing CAs / OpenVPN / WireGuard / PGP deployments.
+playbook with the working CLI invocations for each protocol plus
+migration recipes from existing CAs / OpenVPN / WireGuard / PGP
+deployments.
 
 ### Idea
 

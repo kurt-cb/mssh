@@ -1,11 +1,11 @@
 # mssh-ca — install, configure, mint credentials for other apps
 
 How to stand up `mssh-ca` and use it as your org's credential
-service. SSH/mTLS credential minting, generic-TLS, HTTPS user certs,
-OpenVPN bundles, and code-signing certs are **implemented today**
-under `mssh-admin cert mint` and `mssh-admin openvpn issue`.
-WireGuard, PGP, and ACME are still **design only** — see
-[future-ideas.md §5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel).
+service. SSH/mTLS, generic-TLS, HTTPS user certs, OpenVPN bundles,
+code-signing certs, and WireGuard peer keypairs are **implemented
+today** under `mssh-admin cert mint`, `mssh-admin openvpn issue`,
+and `mssh-admin wireguard ...`. PGP/OpenPGP and ACME are still
+**design only** — see [future-ideas.md §5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel).
 
 Each subsection labels itself:
 
@@ -302,12 +302,12 @@ Drop into any OpenVPN client; no further setup required.
 `--proto {udp,tcp}` and `--dev {tun,tap}` flags exist for non-default
 transports. Audit entry: `openvpn.issue` with full metadata.
 
-Revocation: standard `mssh-admin cert revoke <serial>` adds the
-cert to the CRL; configure your OpenVPN server to poll the CA's
-`GET /v1/crl` endpoint (or use the `--crl-verify` directive against
-a periodically-fetched copy). CRL Distribution Point embedded in
-each cert is still the open piece — operators currently distribute
-the CRL out-of-band.
+Revocation: standard `mssh-admin cert revoke <serial>` appends to
+the CRL log. Each leaf the CA issues carries a `CRLDistributionPoints`
+extension pointing at the CA's signed X.509 CRL endpoint
+(`GET /v1/crl.pem`) — set `crl_url` in `ca-config.yaml` to enable.
+OpenVPN's `--crl-verify` reads the CRL directly from this URL, or
+operators can pull it periodically with `curl` and feed it to OpenVPN.
 
 ### Code-signing certs ✅
 
@@ -332,33 +332,49 @@ typically also need a timestamping authority — RFC 3161 timestamping
 is a separate piece not part of v1 (operators can sign + timestamp
 with a separate service like `signtool` / `osslsigncode`).
 
-### WireGuard peer keypairs 🚧
+### WireGuard peer keypairs ✅
 
 Non-X.509 — WireGuard uses raw Curve25519 keypairs plus metadata
 (AllowedIPs, endpoint, persistent-keepalive). The CA owns the
-keypair lifecycle but can't sign anything; it stores per-user /
-per-host metadata and emits `wg-quick`-compatible config bundles:
+keypair lifecycle and emits `wg-quick`-compatible config bundles.
+Enable WireGuard on the CA by setting `wireguard.path` in
+`ca-config.yaml` (path to a JSON catalog the CA maintains).
+
+**Bootstrap a server (interface):**
 
 ```bash
-# Proposed shape:
-mssh-admin wireguard server init \
-                              --interface wg0 \
-                              --network 10.20.0.0/24 \
-                              --endpoint vpn.example.com:51820
-
-mssh-admin wireguard issue --user alice \
-                            --server wg0 \
-                            --out alice-wg.conf
+mssh-admin wireguard server-init \
+    --name wg0 \
+    --network 10.20.0.0/24 \
+    --endpoint vpn.example.com:51820
+# created WireGuard server 'wg0' (pubkey xZ7yRzMnPg...)
 ```
 
-Output is a ready-to-import `wg-quick` config:
+The CA generates a Curve25519 keypair, allocates `10.20.0.1/24` as
+the server address (first usable IP in the network), and records
+the metadata. The server's private key never leaves the CA — pull
+the config via `server-show` and install on the WireGuard host.
+
+**Issue a peer:**
+
+```bash
+mssh-admin wireguard issue \
+    --name alice \
+    --server wg0 \
+    --persistent-keepalive 25 \
+    --out alice-wg.conf
+# wrote alice-wg.conf (mode 0600 — contains private key)
+```
+
+Output is a ready-to-`wg-quick-up` config:
 
 ```ini
+# mssh-admin wireguard issue — config for alice
 [Interface]
+Address    = 10.20.0.2/32
 PrivateKey = <alice's freshly-minted private key>
-Address    = 10.20.0.10/32
-DNS        = 10.20.0.1
 
+# wg0
 [Peer]
 PublicKey  = <server's WG public key>
 Endpoint   = vpn.example.com:51820
@@ -366,11 +382,25 @@ AllowedIPs = 10.20.0.0/24
 PersistentKeepalive = 25
 ```
 
-Revocation removes the peer from the server's `wg0` config, which
-admins push to the WireGuard host (a small daemon on the WG server
-polls `mssh-admin wireguard sync` and rewrites `/etc/wireguard/wg0.conf`).
-For details on the polling agent see future design doc;
-v1 leaves operators to script the sync.
+IP allocation is sequential — each new peer takes the next free
+address in the server's network. Returns 507 (Insufficient Storage)
+if the network is exhausted.
+
+**Emit the server-side `wg0.conf`:**
+
+```bash
+mssh-admin wireguard server-show --name wg0 --out /etc/wireguard/wg0.conf
+# wrote /etc/wireguard/wg0.conf
+systemctl reload wg-quick@wg0    # or: wg syncconf wg0 <(wg-quick strip wg0)
+```
+
+Re-run after every `issue` / `revoke` and reload. Revocation
+(`mssh-admin wireguard revoke --name alice --server wg0`) removes
+the peer immediately from the CA catalog; reloading the server
+applies the change.
+
+**Auditor role** has read access (`server-list`, `server-show`,
+`peer-list`); only `superuser` can init / issue / revoke.
 
 ### PGP (OpenPGP) keys 🚧
 
@@ -509,12 +539,18 @@ migration paths for the common cases:
 | HTTPS user mTLS certs | ✅ | `mssh-admin cert mint --type https-user [--p12-password ...]` |
 | OpenVPN cert + `.ovpn` bundle | ✅ | `mssh-admin openvpn issue` |
 | Code-signing certs | ✅ | `mssh-admin cert mint --type code-sign` (codeSigning EKU; no TSA in v1) |
-| WireGuard peer keypair + config | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) — non-X.509 (Curve25519), separate issuance backend |
+| WireGuard peer keypair + config | ✅ | `mssh-admin wireguard server-init / issue / server-show / revoke` |
+| CRL Distribution Point embedded in leaves | ✅ | Set `cert_generation.crl_url` in `ca-config.yaml`; CA exposes `GET /v1/crl.pem` (X.509 CRL signed by the TLS CA) |
 | PGP (OpenPGP) key directory + signing | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) + [§27](future-ideas.md#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory) — needs OpenPGP library + parallel signing key |
-| ACME endpoint | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) — separate listener + RFC 8555 state machine |
-| CRL Distribution Point embedded in leaves | 🚧 | OpenVPN clients want this; today CRL is fetched out-of-band via `GET /v1/crl` |
+| ACME endpoint | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) — separate listener + RFC 8555 state machine; full server is ~2000+ LOC, deserves its own design pass |
 
-Sensible incremental rollout: X.509 expansion (TLS server, HTTPS
-user, OpenVPN, code-sign) → ACME → WireGuard → PGP. The X.509
-chunk is the highest payoff for the smallest risk; everything
-after that depends on actual operator demand.
+Remaining roadmap, in priority order:
+
+  - **ACME endpoint** — biggest adoption multiplier (every certbot /
+    cert-manager / lego deployment becomes a consumer), biggest
+    implementation cost (~2000+ LOC for a from-scratch RFC 8555
+    server). Most likely a library evaluation pass (`acme`/`josepy`
+    from EFF) precedes any code.
+  - **PGP (OpenPGP)** — composes with [§27](future-ideas.md#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory)
+    (the `mscp` consumer). Needs an OpenPGP library and a parallel
+    signing key with its own custody requirements.

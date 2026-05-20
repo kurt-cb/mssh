@@ -170,3 +170,63 @@ class CRLStore:
 
 def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def build_x509_crl(store: CRLStore, *, signing_key, signing_cert,
+                   validity_hours: int = 24) -> bytes:
+    """Render the JSON CRL log as an X.509 v2 CRL signed by the given
+    issuer (typically the TLS CA's key + cert).
+
+    Consumers that expect an X.509 CRL (OpenVPN's ``--crl-verify``,
+    most TLS stacks' revocation checks) fetch this via the
+    ``GET /v1/crl.pem`` endpoint. The JSON CRL at ``GET /v1/crl``
+    stays the canonical msshd-internal feed.
+
+    ``validity_hours`` sets ``nextUpdate``; the CRL is regenerated on
+    every fetch so consumers always get a fresh signature.
+    """
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.x509 import oid
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+    builder = (
+        x509.CertificateRevocationListBuilder()
+        .issuer_name(signing_cert.subject)
+        .last_update(now - _dt.timedelta(minutes=5))
+        .next_update(now + _dt.timedelta(hours=validity_hours))
+    )
+    # Walk every entry, add each revoked serial. Empty log → empty
+    # CRL (the path doesn't exist until the first append).
+    entries = store._iter_all() if store.path.exists() else iter(())  # noqa: SLF001
+    for entry in entries:
+        try:
+            revoked_at = _dt.datetime.strptime(
+                entry.revoked_at, '%Y-%m-%dT%H:%M:%SZ'
+            ).replace(tzinfo=_dt.timezone.utc)
+        except ValueError:
+            revoked_at = now
+        for serial_hex in entry.serials:
+            try:
+                serial = int(serial_hex, 16)
+            except ValueError:
+                continue
+            rev = (
+                x509.RevokedCertificateBuilder()
+                .serial_number(serial)
+                .revocation_date(revoked_at)
+                .build()
+            )
+            builder = builder.add_revoked_certificate(rev)
+    # Choose hash based on the signing key type. Ed25519 uses None;
+    # EC + RSA use SHA-256.
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        is_ed25519 = isinstance(signing_key, ed25519.Ed25519PrivateKey)
+    except ImportError:
+        is_ed25519 = False
+    crl = builder.sign(
+        private_key=signing_key,
+        algorithm=None if is_ed25519 else hashes.SHA256(),
+    )
+    return crl.public_bytes(serialization.Encoding.PEM)

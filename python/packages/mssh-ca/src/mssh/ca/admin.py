@@ -59,6 +59,16 @@ _PERMISSIONS = {
     # outside the SSH path.
     'cert.mint':        {'superuser'},
     'openvpn.issue':    {'superuser'},
+    # WireGuard catalog management. Same sensitivity as openvpn —
+    # the CA owns the server private key and mints per-peer
+    # credentials.
+    'wireguard.server.init':   {'superuser'},
+    'wireguard.server.remove': {'superuser'},
+    'wireguard.server.show':   {'superuser', 'auditor'},
+    'wireguard.server.list':   {'superuser', 'auditor'},
+    'wireguard.peer.issue':    {'superuser'},
+    'wireguard.peer.revoke':   {'superuser'},
+    'wireguard.peer.list':     {'superuser', 'auditor'},
 }
 
 
@@ -85,6 +95,16 @@ class AdminContext:
     # up entries on its next authorize call. See ca/crl.py +
     # archive/design/notes-bypass-cache.md "CRL Amendment".
     crl: Any = None             # CRLStore
+    # CRL Distribution Point URL stamped into each issued leaf via
+    # the X.509 CRLDistributionPoints extension. None disables the
+    # extension. Consumers (OpenVPN, browsers) fetch the signed
+    # X.509 CRL from this URL when checking revocation. Typically
+    # served by the same CA at GET /v1/crl.pem.
+    crl_url: str | None = None
+    # WireGuard registry — server + peer records, server keypairs,
+    # IP allocation. Lazily loaded by WireGuard endpoints; None means
+    # no WireGuard configured for this CA. See ca/wireguard.py.
+    wireguard: Any = None       # WireGuardStore
 
 
 def _now_iso() -> str:
@@ -914,12 +934,17 @@ def cert_mint(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
             bundle = cert_minter.issue_server_cert(
                 cn, ctx.tls_ca_key, ctx.tls_ca_cert,
                 validity_days=days, key_type=ctx.mtls_key_type,
-                sans=sans or None)
+                sans=sans or None,
+                crl_url=ctx.crl_url)
         elif cert_type == 'https-user':
             bundle = cert_minter.issue_client_cert(
                 cn, ctx.tls_ca_key, ctx.tls_ca_cert,
-                validity_days=days, key_type=ctx.mtls_key_type)
+                validity_days=days, key_type=ctx.mtls_key_type,
+                crl_url=ctx.crl_url)
         else:  # code-sign
+            # Code-signing certs intentionally skip CRLDP — long-lived
+            # build identities + downstream timestamping authorities
+            # typically handle revocation differently.
             bundle = cert_minter.issue_codesign_cert(
                 cn, ctx.tls_ca_key, ctx.tls_ca_cert,
                 validity_days=days, key_type=ctx.mtls_key_type)
@@ -995,7 +1020,8 @@ def openvpn_issue(ctx: AdminContext, admin: Admin,
     try:
         bundle = cert_minter.issue_client_cert(
             cn, ctx.tls_ca_key, ctx.tls_ca_cert,
-            validity_days=days, key_type=ctx.mtls_key_type)
+            validity_days=days, key_type=ctx.mtls_key_type,
+            crl_url=ctx.crl_url)
     except Exception as e:
         return _err(500, 'internal', f'cert issuance failed: {e}')
 
@@ -1018,3 +1044,234 @@ def openvpn_issue(ctx: AdminContext, admin: Admin,
             'ca_cert_pem': bundle.ca_cert_pem.decode('ascii'),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# §5 WireGuard catalog
+# ---------------------------------------------------------------------------
+
+def _wg_or_503(ctx: AdminContext):
+    """Return ctx.wireguard or a 503 payload if WireGuard isn't
+    configured on this CA (no `wireguard.path` in ca-config.yaml)."""
+    if ctx.wireguard is None:
+        return None, _err(503, 'unavailable',
+                          'WireGuard not configured on this CA '
+                          '(set wireguard.path in ca-config.yaml)')
+    return ctx.wireguard, None
+
+
+def wireguard_server_init(ctx: AdminContext, admin: Admin,
+                          body: dict) -> tuple[int, dict]:
+    """POST /v1/admin/wireguard/server  — create a WireGuard interface.
+
+    Body: {name, network (CIDR), listen_port, endpoint ("host:port")}.
+    """
+    if (err := _check('wireguard.server.init', admin)):
+        return err
+    wg, err = _wg_or_503(ctx)
+    if err:
+        return err
+    from . import wireguard as _wg
+
+    name = (body.get('name') or '').strip()
+    network = (body.get('network') or '').strip()
+    endpoint = (body.get('endpoint') or '').strip()
+    if not name or not network or not endpoint:
+        return _err(400, 'bad_request',
+                    'name, network, and endpoint are required')
+    try:
+        listen_port = int(body.get('listen_port') or 51820)
+    except (TypeError, ValueError):
+        return _err(400, 'bad_request', 'listen_port must be an integer')
+
+    try:
+        srv = wg.server_init(name=name, network=network,
+                             listen_port=listen_port, endpoint=endpoint,
+                             created_by=admin.name)
+    except _wg.WireGuardConflict as e:
+        return _err(409, 'conflict', str(e))
+    except _wg.WireGuardError as e:
+        return _err(400, 'bad_request', str(e))
+
+    _audit_admin(ctx, admin, 'wireguard.server.init',
+                 {'name': name, 'network': network,
+                  'listen_port': listen_port, 'endpoint': endpoint}, 'ok')
+    return 201, {'status': 'ok',
+                 'server': {
+                     'name': srv.name, 'network': srv.network,
+                     'listen_port': srv.listen_port,
+                     'endpoint': srv.endpoint,
+                     'public_key_b64': srv.public_key_b64,
+                     'server_address': srv.server_address,
+                     'created_at': srv.created_at,
+                 }}
+
+
+def wireguard_server_remove(ctx: AdminContext, admin: Admin,
+                            name: str) -> tuple[int, dict]:
+    """DELETE /v1/admin/wireguard/server/<name>."""
+    if (err := _check('wireguard.server.remove', admin)):
+        return err
+    wg, err = _wg_or_503(ctx)
+    if err:
+        return err
+    from . import wireguard as _wg
+    try:
+        wg.server_remove(name)
+    except _wg.WireGuardNotFound as e:
+        return _err(404, 'not_found', str(e))
+    _audit_admin(ctx, admin, 'wireguard.server.remove',
+                 {'name': name}, 'ok')
+    return 200, {'status': 'ok', 'removed': name}
+
+
+def wireguard_server_show(ctx: AdminContext, admin: Admin,
+                          name: str) -> tuple[int, dict]:
+    """GET /v1/admin/wireguard/server/<name>  — emits server config.
+
+    Returns ``server`` metadata + ``server_config`` (the
+    /etc/wireguard/<name>.conf text the operator writes on the
+    WireGuard host). NB: ``server_config`` contains the server's
+    private key — superuser-only.
+    """
+    if (err := _check('wireguard.server.show', admin)):
+        return err
+    wg, err = _wg_or_503(ctx)
+    if err:
+        return err
+    from . import wireguard as _wg
+    try:
+        srv = wg.server_get(name)
+    except _wg.WireGuardNotFound as e:
+        return _err(404, 'not_found', str(e))
+    peers = wg.peer_list(server_name=name)
+    _audit_admin(ctx, admin, 'wireguard.server.show',
+                 {'name': name, 'peer_count': len(peers)}, 'ok')
+    return 200, {
+        'status': 'ok',
+        'server': {
+            'name': srv.name, 'network': srv.network,
+            'listen_port': srv.listen_port, 'endpoint': srv.endpoint,
+            'public_key_b64': srv.public_key_b64,
+            'server_address': srv.server_address,
+            'created_at': srv.created_at, 'created_by': srv.created_by,
+            'peer_count': len(peers),
+        },
+        'server_config': _wg.render_server_config(srv, peers),
+    }
+
+
+def wireguard_server_list(ctx: AdminContext, admin: Admin
+                          ) -> tuple[int, dict]:
+    """GET /v1/admin/wireguard/server  — list registered servers."""
+    if (err := _check('wireguard.server.list', admin)):
+        return err
+    wg, err = _wg_or_503(ctx)
+    if err:
+        return err
+    servers = wg.server_list()
+    return 200, {'status': 'ok',
+                 'servers': [{
+                     'name': s.name, 'network': s.network,
+                     'listen_port': s.listen_port, 'endpoint': s.endpoint,
+                     'public_key_b64': s.public_key_b64,
+                     'server_address': s.server_address,
+                     'created_at': s.created_at,
+                 } for s in servers]}
+
+
+def wireguard_peer_issue(ctx: AdminContext, admin: Admin,
+                         body: dict) -> tuple[int, dict]:
+    """POST /v1/admin/wireguard/peer  — mint a peer keypair + config.
+
+    Body: {name, server, persistent_keepalive?, dns?}.
+    The peer's freshly-minted private key is returned exactly once;
+    the CA only retains the public half.
+    """
+    if (err := _check('wireguard.peer.issue', admin)):
+        return err
+    wg, err = _wg_or_503(ctx)
+    if err:
+        return err
+    from . import wireguard as _wg
+
+    name = (body.get('name') or '').strip()
+    server_name = (body.get('server') or '').strip()
+    if not name or not server_name:
+        return _err(400, 'bad_request', 'name and server are required')
+
+    try:
+        keepalive = int(body.get('persistent_keepalive') or 0)
+    except (TypeError, ValueError):
+        return _err(400, 'bad_request',
+                    'persistent_keepalive must be an integer')
+    dns = body.get('dns') or None
+
+    try:
+        peer, priv = wg.peer_issue(
+            name=name, server_name=server_name,
+            issued_by=admin.name,
+            persistent_keepalive=keepalive)
+    except _wg.WireGuardNotFound as e:
+        return _err(404, 'not_found', str(e))
+    except _wg.WireGuardConflict as e:
+        return _err(409, 'conflict', str(e))
+    except _wg.WireGuardCapacityError as e:
+        return _err(507, 'capacity', str(e))
+
+    srv = wg.server_get(server_name)
+    client_config = _wg.render_peer_config(srv, peer, priv, dns=dns)
+
+    _audit_admin(ctx, admin, 'wireguard.peer.issue',
+                 {'name': name, 'server': server_name,
+                  'address': peer.address}, 'ok')
+
+    return 201, {
+        'status': 'ok',
+        'peer': {
+            'name': peer.name, 'server': peer.server_name,
+            'address': peer.address,
+            'public_key_b64': peer.public_key_b64,
+            'issued_at': peer.issued_at,
+        },
+        'client_config': client_config,
+    }
+
+
+def wireguard_peer_revoke(ctx: AdminContext, admin: Admin,
+                          server_name: str, name: str
+                          ) -> tuple[int, dict]:
+    """DELETE /v1/admin/wireguard/peer/<server>/<name>."""
+    if (err := _check('wireguard.peer.revoke', admin)):
+        return err
+    wg, err = _wg_or_503(ctx)
+    if err:
+        return err
+    from . import wireguard as _wg
+    try:
+        wg.peer_revoke(name=name, server_name=server_name)
+    except _wg.WireGuardNotFound as e:
+        return _err(404, 'not_found', str(e))
+    _audit_admin(ctx, admin, 'wireguard.peer.revoke',
+                 {'name': name, 'server': server_name}, 'ok')
+    return 200, {'status': 'ok',
+                 'revoked': {'name': name, 'server': server_name}}
+
+
+def wireguard_peer_list(ctx: AdminContext, admin: Admin,
+                        server_name: str | None) -> tuple[int, dict]:
+    """GET /v1/admin/wireguard/peer  — list peers (optionally filtered)."""
+    if (err := _check('wireguard.peer.list', admin)):
+        return err
+    wg, err = _wg_or_503(ctx)
+    if err:
+        return err
+    peers = wg.peer_list(server_name=server_name)
+    return 200, {'status': 'ok',
+                 'peers': [{
+                     'name': p.name, 'server': p.server_name,
+                     'address': p.address,
+                     'public_key_b64': p.public_key_b64,
+                     'issued_at': p.issued_at,
+                     'persistent_keepalive': p.persistent_keepalive,
+                 } for p in peers]}

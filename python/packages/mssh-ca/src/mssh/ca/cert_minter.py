@@ -238,7 +238,8 @@ def _issue_leaf(subject_cn: str, leaf_key,
                 *, validity_days: int = 365,
                 server_auth: bool = False, client_auth: bool = True,
                 code_signing: bool = False,
-                sans: list[str] | None = None) -> x509.Certificate:
+                sans: list[str] | None = None,
+                crl_url: str | None = None) -> x509.Certificate:
     """Issue a leaf cert, signed by the given intermediate."""
     subject = x509.Name([
         x509.NameAttribute(oid.NameOID.COMMON_NAME, subject_cn),
@@ -284,6 +285,18 @@ def _issue_leaf(subject_cn: str, leaf_key,
     if san_entries:
         builder = builder.add_extension(
             x509.SubjectAlternativeName(san_entries), critical=False)
+    if crl_url:
+        # Embed a CRLDistributionPoints extension so consumers like
+        # OpenVPN (`--crl-verify` w/o explicit URL) can self-discover
+        # the revocation list. URL is the CA's /v1/crl.pem endpoint.
+        builder = builder.add_extension(
+            x509.CRLDistributionPoints([
+                x509.DistributionPoint(
+                    full_name=[x509.UniformResourceIdentifier(crl_url)],
+                    relative_name=None, reasons=None, crl_issuer=None),
+            ]),
+            critical=False,
+        )
     return builder.sign(private_key=signing.key,
                         algorithm=_sig_hash_for(signing.key))
 
@@ -492,6 +505,7 @@ def issue_client_cert(common_name: str,
                       validity_days: int = 365,
                       key_type: str = 'ec',
                       root_cert: x509.Certificate | None = None,
+                      crl_url: str | None = None,
                       ) -> IssuedClientCert:
     """Issue a leaf mTLS CLIENT cert.
 
@@ -526,7 +540,8 @@ def issue_client_cert(common_name: str,
     key = generate_signing_key(key_type)
     cert = _issue_leaf(common_name, key, signing,
                        validity_days=validity_days,
-                       server_auth=False, client_auth=True)
+                       server_auth=False, client_auth=True,
+                       crl_url=crl_url)
     return IssuedClientCert(
         cert_pem=(_chain_pem(cert, signing.cert) if chain_bundle
                   else serialize_certificate(cert)),
@@ -546,6 +561,7 @@ def issue_server_cert(common_name: str,
                       key_type: str = 'ec',
                       sans: list[str] | None = None,
                       root_cert: x509.Certificate | None = None,
+                      crl_url: str | None = None,
                       ) -> IssuedClientCert:
     """Issue a leaf mTLS / TLS SERVER cert (EKU = serverAuth).
 
@@ -575,7 +591,7 @@ def issue_server_cert(common_name: str,
     cert = _issue_leaf(common_name, key, signing,
                        validity_days=validity_days,
                        server_auth=True, client_auth=False,
-                       sans=sans)
+                       sans=sans, crl_url=crl_url)
     return IssuedClientCert(
         cert_pem=(_chain_pem(cert, signing.cert) if chain_bundle
                   else serialize_certificate(cert)),

@@ -1027,5 +1027,146 @@ def _format_ovpn_bundle(*, ca_pem: str, cert_pem: str, key_pem: str,
     )
 
 
+@cli.group('wireguard')
+def wireguard_group():
+    """Manage WireGuard servers + peers signed by this CA's catalog.
+
+    The CA owns the server's keypair and tracks IP allocation; peer
+    issuance returns a wg-quick config the recipient drops into their
+    laptop. Server-side, the operator runs ``wireguard server show``
+    periodically to refresh ``/etc/wireguard/<server>.conf`` and
+    reload the WireGuard daemon — revocation propagates that way.
+    """
+
+
+@wireguard_group.command('server-init')
+@click.option('--name', required=True,
+              help='Server (interface) name, e.g. wg0.')
+@click.option('--network', required=True,
+              help='Address pool in CIDR form, e.g. 10.20.0.0/24. '
+                   'First usable IP becomes the server\'s address; '
+                   'subsequent peers take the next free addresses.')
+@click.option('--endpoint', required=True,
+              help='Public endpoint peers connect to, '
+                   'e.g. vpn.example.com:51820.')
+@click.option('--listen-port', type=int, default=51820, show_default=True)
+@click.pass_context
+def wireguard_server_init_cmd(ctx, name, network, endpoint, listen_port):
+    """Create a new WireGuard server (interface)."""
+    c = _make_client(ctx)
+    out = _handle_call(c.wireguard_server_init,
+                       name, network, endpoint,
+                       listen_port=listen_port)
+    click.echo(f'created WireGuard server {name!r} '
+               f'(pubkey {out["server"]["public_key_b64"][:12]}...)',
+               err=True)
+    _output(ctx, out['server'])
+
+
+@wireguard_group.command('server-show')
+@click.option('--name', required=True)
+@click.option('--out', 'out_path', default=None, type=click.Path(),
+              help='Write the wg0.conf-style server config to this path.')
+@click.pass_context
+def wireguard_server_show_cmd(ctx, name, out_path):
+    """Emit the server-side ``/etc/wireguard/<name>.conf``.
+
+    Contains the server's private key + every active peer's PublicKey
+    + AllowedIPs. Re-run this after every issue/revoke and reload
+    WireGuard on the server (``wg syncconf <name> <(wg-quick strip <name>)``).
+    """
+    c = _make_client(ctx)
+    out = _handle_call(c.wireguard_server_show, name)
+    if out_path:
+        op = Path(out_path)
+        op.parent.mkdir(parents=True, exist_ok=True)
+        op.write_text(out['server_config'])
+        os.chmod(op, 0o600)
+        click.echo(f'wrote {op}', err=True)
+    else:
+        click.echo(out['server_config'])
+    _output(ctx, out['server'])
+
+
+@wireguard_group.command('server-list')
+@click.pass_context
+def wireguard_server_list_cmd(ctx):
+    c = _make_client(ctx)
+    out = _handle_call(c.wireguard_server_list)
+    _output(ctx, out['servers'])
+
+
+@wireguard_group.command('server-remove')
+@click.option('--name', required=True)
+@click.pass_context
+def wireguard_server_remove_cmd(ctx, name):
+    """Delete the server and ALL its peers. Irreversible."""
+    c = _make_client(ctx)
+    out = _handle_call(c.wireguard_server_remove, name)
+    _output(ctx, out)
+
+
+@wireguard_group.command('issue')
+@click.option('--name', required=True,
+              help='Peer name (typically the username).')
+@click.option('--server', required=True,
+              help='Server (interface) name the peer joins.')
+@click.option('--persistent-keepalive', type=int, default=0,
+              help='Seconds between WireGuard keepalive packets. '
+                   '0 disables. Use 25 for peers behind NAT.')
+@click.option('--dns', default=None,
+              help='DNS to push into the peer config '
+                   '(written as the [Interface] DNS = ... line).')
+@click.option('--out', 'out_path', default=None, type=click.Path(),
+              help='Write the wg-quick client config to this path.')
+@click.pass_context
+def wireguard_peer_issue_cmd(ctx, name, server, persistent_keepalive,
+                             dns, out_path):
+    """Mint a peer keypair, allocate the next free IP, return the
+    client wg-quick config.
+
+    The private key in the returned config is generated on the CA
+    and returned exactly once — write it somewhere safe before
+    delivering to the user.
+    """
+    c = _make_client(ctx)
+    out = _handle_call(c.wireguard_peer_issue,
+                       name, server,
+                       persistent_keepalive=persistent_keepalive,
+                       dns=dns)
+    if out_path:
+        op = Path(out_path)
+        op.parent.mkdir(parents=True, exist_ok=True)
+        op.write_text(out['client_config'])
+        os.chmod(op, 0o600)
+        click.echo(f'wrote {op} (mode 0600 — contains private key)', err=True)
+    else:
+        click.echo(out['client_config'])
+    _output(ctx, out['peer'])
+
+
+@wireguard_group.command('revoke')
+@click.option('--name', required=True)
+@click.option('--server', required=True)
+@click.pass_context
+def wireguard_peer_revoke_cmd(ctx, name, server):
+    """Revoke a peer. The peer is removed from the catalog
+    immediately; for the change to take effect on a running
+    WireGuard server, re-run ``wireguard server-show`` and reload."""
+    c = _make_client(ctx)
+    out = _handle_call(c.wireguard_peer_revoke, name, server)
+    _output(ctx, out['revoked'])
+
+
+@wireguard_group.command('peer-list')
+@click.option('--server', default=None,
+              help='Filter to peers on this server only.')
+@click.pass_context
+def wireguard_peer_list_cmd(ctx, server):
+    c = _make_client(ctx)
+    out = _handle_call(c.wireguard_peer_list, server)
+    _output(ctx, out['peers'])
+
+
 if __name__ == '__main__':
     sys.exit(cli())  # pragma: no cover

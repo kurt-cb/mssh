@@ -133,6 +133,13 @@ def create_app(config: CAConfig) -> Flask:
         timestamp_drift_seconds=config.timestamp_drift_seconds,
         crl=crl_store,
     )
+    # WireGuard catalog (optional). Loaded lazily; None means
+    # WireGuard endpoints respond 503.
+    wg_store = None
+    if config.wireguard_path:
+        from . import wireguard as _wg
+        wg_store = _wg.WireGuardStore(config.wireguard_path)
+
     admin_ctx = admin_handlers.AdminContext(
         enrollment=enrollment, audit=audit,
         tls_ca_key=tls_ca_key, tls_ca_cert=tls_ca_cert,
@@ -141,6 +148,8 @@ def create_app(config: CAConfig) -> Flask:
         mtls_key_type=config.mtls_key_type,
         signing_key=signing_key, signing_cert=signing_cert,
         crl=crl_store,
+        crl_url=(config.crl_url or None),
+        wireguard=wg_store,
     )
 
     app.config['AUTH_CTX'] = auth_ctx
@@ -417,6 +426,73 @@ def register_routes(app: Flask) -> None:
             app.config['ADMIN_CTX'], adm, body)
         return jsonify(payload), status
 
+    # ---- §5 WireGuard catalog ----
+    @app.post('/v1/admin/wireguard/server')
+    def _wg_server_init():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.wireguard_server_init(
+            app.config['ADMIN_CTX'], adm, body)
+        return jsonify(payload), status
+
+    @app.delete('/v1/admin/wireguard/server/<name>')
+    def _wg_server_remove(name):
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        status, payload = admin_handlers.wireguard_server_remove(
+            app.config['ADMIN_CTX'], adm, name)
+        return jsonify(payload), status
+
+    @app.get('/v1/admin/wireguard/server/<name>')
+    def _wg_server_show(name):
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        status, payload = admin_handlers.wireguard_server_show(
+            app.config['ADMIN_CTX'], adm, name)
+        return jsonify(payload), status
+
+    @app.get('/v1/admin/wireguard/server')
+    def _wg_server_list():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        status, payload = admin_handlers.wireguard_server_list(
+            app.config['ADMIN_CTX'], adm)
+        return jsonify(payload), status
+
+    @app.post('/v1/admin/wireguard/peer')
+    def _wg_peer_issue():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.wireguard_peer_issue(
+            app.config['ADMIN_CTX'], adm, body)
+        return jsonify(payload), status
+
+    @app.delete('/v1/admin/wireguard/peer/<server>/<name>')
+    def _wg_peer_revoke(server, name):
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        status, payload = admin_handlers.wireguard_peer_revoke(
+            app.config['ADMIN_CTX'], adm, server, name)
+        return jsonify(payload), status
+
+    @app.get('/v1/admin/wireguard/peer')
+    def _wg_peer_list():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        status, payload = admin_handlers.wireguard_peer_list(
+            app.config['ADMIN_CTX'], adm,
+            request.args.get('server'))
+        return jsonify(payload), status
+
     # ---- CRL ----
     # cert.revoke appends to the CRL; msshds pick up on next authorize.
     @app.post('/v1/admin/cert/revoke')
@@ -450,6 +526,23 @@ def register_routes(app: Flask) -> None:
         status, payload = admin_handlers.crl_fetch(
             app.config['ADMIN_CTX'], adm, after, limit)
         return jsonify(payload), status
+
+    # /v1/crl.pem is the X.509 CRL that consumers like OpenVPN's
+    # --crl-verify and browsers fetch. Built on the fly from the
+    # JSON CRL log; signed by the TLS CA so anyone trusting
+    # tls-ca-cert.pem can verify the signature. Public read — same
+    # rationale as /v1/crl below: revocation info is not sensitive.
+    @app.get('/v1/crl.pem')
+    def _crl_x509_pem():
+        from . import crl as crl_module
+        ctx = app.config['ADMIN_CTX']
+        if ctx.crl is None:
+            return ('', 503)
+        pem = crl_module.build_x509_crl(
+            ctx.crl, signing_key=ctx.tls_ca_key,
+            signing_cert=ctx.tls_ca_cert,
+        )
+        return (pem, 200, {'Content-Type': 'application/x-pem-file'})
 
     # /v1/crl is the msshd hot-path fetch. Authenticated by the same
     # mTLS chain as /v1/authorize (the wrapper presents its mTLS cert

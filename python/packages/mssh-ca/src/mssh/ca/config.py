@@ -41,6 +41,17 @@ class CAConfig:
     admin_cert_validity_days: int = 365
     mtls_key_type: str = 'ec'
 
+    # CRL Distribution Point URL stamped into each issued leaf (TLS
+    # server, HTTPS user, OpenVPN). Consumers fetch this URL when
+    # checking revocation. Typically points at the CA's own
+    # GET /v1/crl.pem. Unset → no CRLDP extension embedded.
+    crl_url: str = ''
+
+    # WireGuard storage path — JSON catalog of servers + peers.
+    # Created on-demand by `mssh-admin wireguard server init`.
+    # Unset → WireGuard endpoints respond 503 (not configured).
+    wireguard_path: str = ''
+
     @classmethod
     def load(cls, path: str | Path) -> 'CAConfig':
         with Path(path).open() as f:
@@ -69,5 +80,9 @@ class CAConfig:
                 (data.get('cert_generation') or {}).get('admin_cert_validity_days') or 365),
             mtls_key_type=str(
                 (data.get('cert_generation') or {}).get('key_type') or 'ec'),
+            crl_url=str(
+                (data.get('cert_generation') or {}).get('crl_url') or ''),
+            wireguard_path=str(
+                (data.get('wireguard') or {}).get('path') or ''),
         )
         return c
