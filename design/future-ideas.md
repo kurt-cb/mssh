@@ -238,6 +238,11 @@ issues), then ACME, then PGP if there's demand.
 
 **Status:** Design needed; implementation isn't trivial.
 
+**See also:** [ca-integration.md § Passkey / WebAuthn at the CA](ca-integration.md#passkey--webauthn-at-the-ca-)
+— the operator-facing playbook covering WebAuthn as the 2FA factor,
+the AAGUID allowlist, the per-msshd 2FA cache, and the
+mssh-CLI-prompt-flow open question.
+
 ### Idea
 
 Some roles should require a second factor beyond "the user holds the
@@ -306,6 +311,12 @@ significantly more (browser-style challenge protocol).
 
 **Status:** Investigate. Likely complements (2) and (5) rather than
 standing alone.
+
+**See also:** [ca-integration.md § Passkey / WebAuthn at the CA](ca-integration.md#passkey--webauthn-at-the-ca-)
+— the integration-shaped writeup: CA as credential directory,
+proposed CLI surface, AAGUID allowlist, composition with §26 admin
+portal and §6 2FA flow. The "should we do this" arc from §7 +
+browser.md's hardware-bound-only constraint are answered there.
 
 ### Idea
 

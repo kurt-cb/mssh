@@ -450,6 +450,157 @@ records; account creation requires a one-time admin-approved
 enrollment. Highest adoption-value piece of §5 once the X.509
 expansion is in.
 
+### Passkey / WebAuthn at the CA 🚧
+
+Composes with [future-ideas §6](future-ideas.md#6-require-2fa-for-high-privilege-roles-with-air-gap-fallback)
+(2FA for high-privilege roles) and [§7](future-ideas.md#7-passkey--webauthn-support)
+(Passkey / WebAuthn). [browser.md](browser.md) has the threat-model
+analysis for the WebAuthn attestation allowlist; this section is
+the operator-facing playbook for how the CA exposes that
+functionality.
+
+#### Why passkeys at the CA (not just at the client)
+
+WebAuthn credentials are **hardware-resident** — the private key
+lives on a hardware token / TPM / Secure Enclave and never leaves
+the device. The CA can't "mint" a WebAuthn credential the way it
+mints an X.509 cert. What the CA *can* be is the **directory**:
+
+  - **Per-user credential storage.** For each enrolled user, the
+    CA holds zero or more registered WebAuthn credentials (public
+    key + AAGUID + sign counter + friendly name). Same role as
+    today's `keys` list under each user enrollment record, but for
+    WebAuthn-format credentials instead of SSH pubkeys.
+  - **Challenge generation + response verification.** When a
+    high-privilege operation triggers a 2FA challenge, the CA
+    emits a WebAuthn challenge, the user's client (mssh CLI or
+    browser portal) drives the platform's WebAuthn API, and the
+    response comes back to the CA for verification.
+  - **AAGUID allowlist.** Per the
+    [browser.md analysis](browser.md#webauthn-with-hardware-only-authenticators--the-cleaner-path),
+    only hardware-bound authenticators are accepted —
+    iCloud-Keychain-synced passkeys are rejected at registration
+    time. The allowlist is config: a list of approved YubiKey /
+    SoloKey / Feitian / etc. AAGUIDs.
+
+#### Proposed CLI surface
+
+```bash
+# Enrollment ceremony — interactive, requires the user present
+# with their hardware token. Initiated by an admin; the user
+# touches their token to sign the registration challenge.
+mssh-admin user webauthn register --user alice \
+    [--label "alice yubikey 5C"] \
+    [--allowlist /etc/mssh/aaguid-allowlist.yaml]
+
+# Inspect registered credentials.
+mssh-admin user webauthn list --user alice
+mssh-admin user webauthn show --user alice --credential-id <hex>
+
+# Revoke a single credential (e.g. lost token).
+mssh-admin user webauthn revoke --user alice --credential-id <hex>
+
+# Per-role 2FA requirement.
+mssh-admin policy add --user alice \
+    --servers prod-* \
+    --channels session \
+    --require-2fa webauthn \
+    --2fa-within-seconds 60
+```
+
+#### Use cases this unlocks
+
+1. **2FA for high-privilege SSH sessions.** Per §6: msshd's
+   `POST /v1/authorize` request grows a `2fa_evidence` field
+   carrying the WebAuthn assertion. The mssh CLI prompts the user
+   to touch their token when policy requires it; signature is
+   forwarded to the CA, which validates against the user's
+   registered credential.
+
+2. **Web admin portal step-up.** Per [§26](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost):
+   the localhost-tunneled Flask portal can require a WebAuthn
+   confirmation for destructive actions (revoke, delete, mint
+   external CA). Browsers natively support the WebAuthn JS API;
+   nothing extra to install.
+
+3. **Hardware-only admin enrollment ceremony.** Per browser.md
+   "Hardware-only enrollment ceremony": user shows up with their
+   token, admin initiates `webauthn register`, token is enrolled
+   in-person. Attestation validates against the AAGUID allowlist
+   at registration time; only operator-vetted hardware models can
+   ever enroll. After the ceremony the token leaves bound to that
+   user's enrollment record.
+
+4. **Per-user multi-credential.** alice can register multiple
+   tokens (primary YubiKey + travel spare). Either satisfies the
+   2FA challenge; revoking a lost one doesn't lock her out.
+
+#### Implementation pieces (none landed)
+
+| Piece | Status | Notes |
+|---|---|---|
+| CA-side `webauthn` library integration | 🚧 | Python `webauthn` PyPI package (~10k LOC, well-maintained). Wraps challenge generation + attestation verification + assertion verification. |
+| Enrollment record schema extension | 🚧 | Add `webauthn_credentials: list[Credential]` to user records. Each credential = `{credential_id, public_key, aaguid, sign_count, label, enrolled_at}`. |
+| AAGUID allowlist config | 🚧 | YAML at `/etc/mssh/aaguid-allowlist.yaml`; reload via SIGHUP or admin endpoint. Operator updates when new tokens are vetted. |
+| CA admin endpoints | 🚧 | `POST /v1/admin/user/{u}/webauthn/register-begin` (returns challenge), `POST /v1/admin/user/{u}/webauthn/register-complete` (validates attestation), `GET /list`, `DELETE /{credential_id}`. |
+| `mssh-admin user webauthn ...` CLI | 🚧 | Local pyfido2 / pywebauthn integration to drive the ceremony on the admin's machine. |
+| Policy DSL extension | 🚧 | `require_2fa: webauthn` + `2fa_within_seconds: N` on policies. mssh client prompts; msshd's authorize body grows `2fa_evidence`. |
+| Per-msshd 2FA cache | 🚧 | Once a user satisfies a 2FA challenge, msshd caches the result for `2fa_within_seconds` so subsequent connections in the window skip the prompt. Cache invalidated on token revoke. |
+| Web admin portal step-up | 🚧 | [§26](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost) destructive actions trigger a JS WebAuthn challenge before commit. |
+
+#### LOC estimate
+
+  - CA-side webauthn endpoint + enrollment schema + AAGUID
+    allowlist: ~400 LOC
+  - mssh-admin CLI (`user webauthn register / list / revoke`):
+    ~200 LOC + a USB transport dep (`fido2`)
+  - mssh client `--2fa-webauthn` prompt flow + msshd's
+    `2fa_evidence` forwarding: ~300 LOC
+  - Policy DSL extension + per-msshd 2FA cache: ~150 LOC
+  - Web portal step-up integration: ~100 LOC
+  - **Total v1: ~1150 LOC** + the webauthn library dep
+  - Tests: ~300 LOC
+
+#### Open questions
+
+  - **CLI flow for the token tap.** The mssh CLI is terminal-only;
+    WebAuthn challenges traditionally run in a browser. Two
+    approaches: (a) shell out to a `pinentry`-style helper that
+    drives `libfido2`; (b) the CLI exits with a URL + nonce that
+    the user opens in a managed browser, completing the challenge
+    there, then re-runs the original command. (b) is friendlier
+    but requires browser availability; (a) is more Unix-shaped.
+  - **Air-gapped deployments.** Per §6 — WebAuthn defends against
+    insider-with-credentials, not external attackers, when the CA
+    is already network-isolated. Operators should be able to make
+    `require_2fa` a no-op per-policy if their threat model is
+    purely external.
+  - **Credential recovery.** Lost token → admin re-enrolls user
+    with a fresh token. Multi-credential support (point 4 above)
+    is the primary mitigation. For single-credential users, the
+    bypass is "admin removes the webauthn requirement on alice's
+    policy, alice connects without 2FA, admin re-enrolls in
+    person, admin re-enables the requirement" — auditable, but
+    slow. Documented operator runbook is the v1 answer.
+
+#### Composition / cross-references
+
+  - **[future-ideas §6](future-ideas.md#6-require-2fa-for-high-privilege-roles-with-air-gap-fallback)** —
+    the operator-facing 2FA design. WebAuthn is one of the
+    factors §6 mentions; this section is the concrete
+    implementation path.
+  - **[future-ideas §7](future-ideas.md#7-passkey--webauthn-support)** —
+    the umbrella WebAuthn / passkey discussion. This section's
+    "Why passkeys at the CA" subsection is the answer to §7's
+    "should we do this".
+  - **[browser.md § WebAuthn](browser.md#webauthn-with-hardware-only-authenticators--the-cleaner-path)** —
+    the threat-model analysis + the AAGUID allowlist rationale.
+    The "hardware-bound only, reject synced passkeys" position is
+    central; carries into the v1 implementation.
+  - **[§26 admin web portal](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost)** —
+    natural consumer of the WebAuthn endpoint for step-up auth on
+    destructive actions.
+
 ---
 
 ## Part 4 — Policy and audit across credential types 🚧
@@ -543,6 +694,8 @@ migration paths for the common cases:
 | CRL Distribution Point embedded in leaves | ✅ | Set `cert_generation.crl_url` in `ca-config.yaml`; CA exposes `GET /v1/crl.pem` (X.509 CRL signed by the TLS CA) |
 | PGP (OpenPGP) key directory + signing | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) + [§27](future-ideas.md#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory) — needs OpenPGP library + parallel signing key |
 | ACME endpoint | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) — separate listener + RFC 8555 state machine; full server is ~2000+ LOC, deserves its own design pass |
+| Passkey / WebAuthn directory + 2FA | 🚧 | This doc § "Passkey / WebAuthn at the CA"; composes with [§6](future-ideas.md#6-require-2fa-for-high-privilege-roles-with-air-gap-fallback) + [§7](future-ideas.md#7-passkey--webauthn-support) + [browser.md](browser.md). ~1150 LOC v1 |
+| v2 PKI hierarchy (Root + named intermediates) | 🟡 | Foundation primitives landed; full migration is roadmapped at [notes-pki-hierarchy.md](notes-pki-hierarchy.md). Until v2 ships, all §5 leaves share one signing key — see "implication for currently-landed §5 work" below |
 
 Remaining roadmap, in priority order:
 

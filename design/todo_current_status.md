@@ -2,53 +2,90 @@
 
 Snapshot of open work after v0.1.1 tag. Regenerate by re-scanning
 `design/future-ideas.md`, `design/openbugs/`, and in-code `TODO`
-markers. Last updated: 2026-05-20 (post-§5 X.509+WireGuard+CRLDP).
+markers. Last updated: 2026-05-20 (post-trust-model docs).
 
 For full context on any row, follow the link to its
 `design/future-ideas.md` section.
+
+Status icons used throughout this doc, matching
+[ca-integration.md](ca-integration.md):
+
+  - **✅ implemented** — stable CLI / API surface; operators can use it
+  - **🟡 partial** — primitives or scaffolding land; full
+    operator-facing path still incomplete
+  - **🚧 design only** — captured in design docs, no code yet
 
 ## Open bugs
 
 None. All historical bugs in [archive/closedbugs/](../archive/closedbugs/)
 (12 files, including 5 closed by v0.1.1's §21 typed framing).
 
+## v2 PKI hierarchy (Root + named intermediates)
+
+Roadmap from [notes-pki-hierarchy.md](notes-pki-hierarchy.md) +
+[security.md § Chain of trust](security.md#chain-of-trust-v2-multi-intermediate-model).
+Until this lands, the v0.1.4 §5 work signs every leaf through the
+legacy single-signer — acceptable for experimental deployments,
+explicitly not the production end-state.
+
+| Phase | Title | Status | Notes |
+|---|---|---|---|
+| [Commit 1](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Foundation: `Intermediate` dataclass + helpers | ✅ | Landed pre-v0.1.1. `cert_minter._self_signed_root`, `_issue_intermediate`, `compute_pubkey_fp16`, `load_intermediates`. `path_length=0` baked into the 4 internal intermediates. |
+| [Commit 2](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | `bootstrap_ca` refactor: Root + 4 intermediates on disk | 🚧 | Write the new ca_dir/intermediates/{user-mint,host-mint,auth,bypass-mint}/ layout. Keep legacy alias files as symlinks during the transition. |
+| [Commit 3](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Per-issuer CRL | 🚧 | `CRLStore` → `CRLRegistry` of per-issuer stores. `/v1/crl?issuer=X`. Authorize response carries `current_crl_seqs` map (one entry per intermediate). |
+| [Commit 4](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | msshd chain validation + per-issuer cache state | 🚧 | msshd loads Root + intermediates; `_handle_bypass_injection` validates chain to the pinned intermediate, not Root. `AuthzCache.last_crl_seqs: dict[str, int]`. |
+| [Commit 4b](security.md#chain-of-trust-v2-multi-intermediate-model) | **Validation pins to intermediate, not Root** (load-bearing rule) | 🚧 | Wire each validator's trust store to the SPECIFIC intermediate cert: msshd user-mTLS → `auth`, msshd authz → `user-mint`, mssh → `host-mint`, etc. Without this, §5 leaves can impersonate users. |
+| [Commit 5](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | `mssh-admin intermediate ...` CLI | 🚧 | `intermediate list / rotate <role>`; `cert revoke --issuer <id\|name>`. |
+| [Commit 5b](notes-pki-hierarchy.md#amendment-2026-05-20-validation-rule--external-intermediate-ca) | **External Intermediate CA tier** (per §25) | 🚧 | `mssh-admin pki external mint --name <entity> --path-length N`. Root signs; mssh trust stores actively EXCLUDE it. Revoke via CRL on the external-X cert itself. |
+| [Commit 6](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Backfill tests for prior commits | 🚧 | Unit tests for chain validation, strict-mode gate, prefetched-header tests. |
+| [Commit 7](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Doc consolidation | 🚧 | Fold CLAUDE.md amendments into security.md / architecture.md / api.md; docs/operations.md gets the rotation procedure. |
+| (separate) | Root key offline / HSM | 🚧 | Today Root sits on disk. Production wants it in an HSM or on an offline machine. Plumbing is v3+ per notes. |
+
+The full v2 hierarchy is ~1500–2000 LOC across CA + msshd + admin
++ tests. Phasing keeps tests green at each commit boundary; see
+notes-pki-hierarchy.md "Why we're shipping this in phases".
+
+---
+
 ## Future-ideas — active / pickable
 
 | ID | Title | Status | Depends on | Notes |
 |---|---|---|---|---|
-| [§24](future-ideas.md#24-multi-server-group-lab-coverage) | Multi-server group lab coverage | Test gap | [pyinfra-adhoc Phase A](../python/tests/pyinfra-adhoc/adhoc-pyinfra-transition.md) | Becomes a 2-row matrix.py edit + policy assertions once Phase A lands |
-| [§25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony) | `mssh-admin pki` CLI | CLI gap | (none) | Today the helper is [scripts/mint-user-pki.py](../scripts/mint-user-pki.py); promote to subcommand. ~120 LOC |
-| [§8](future-ideas.md#8-centralized-client-config--mssh-replaces-ssh) | Centralized client config (`~/.mssh/`) v2 | Partial | (none, if pull-only) | v1 file layout landed; v2 = msshd-mediated `--sync` writes CA-rendered config. ~200 LOC |
-| [§26](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost) | Admin web portal via mssh-tunneled localhost | **Partial** — Flask app landed | mssh `-L` flag (~150 LOC) for the tunnel half | Server side at [mssh.admin.web](../python/packages/mssh-admin/src/mssh/admin/web/); read-only views + mTLS re-issue. Mutating CRUD and the `-L` client flag still open |
-| [§5 remainder](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) | CA mints credentials — ACME + PGP | Partial | (none) | X.509 + OpenVPN + WireGuard + CRLDP landed in v0.1.4. Still open: ACME (~2000+ LOC, deserves library-eval pass), PGP (~700 LOC, composes with §27) |
-| [§27](future-ideas.md#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory) | `mscp` — PGP-encrypted file transfer via CA-as-directory | Design proposal | (none for v1 BYO keys; §5 PGP backend for v2 CA-minted) | ~560 LOC for v1. CA stores PGP pubkey per user; mscp encrypts/decrypts via local gpg |
-| [§11](future-ideas.md#11-in-situ-debug_sshd-swap-in-for-troubleshooting-sideband-ca-audit) | In-situ debug_sshd swap-in | Partial | (none) | Diagnostics affordance; remaining work documented in-section |
-| [§23](future-ideas.md#23-sshd_config-template-unification) | sshd_config template unification | Partial | (none) | Equivalence test landed; full unification deferred |
+| [§24](future-ideas.md#24-multi-server-group-lab-coverage) | Multi-server group lab coverage | 🚧 | [pyinfra-adhoc Phase A](../python/tests/pyinfra-adhoc/adhoc-pyinfra-transition.md) | Becomes a 2-row matrix.py edit + policy assertions once Phase A lands |
+| [§25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony) | `mssh-admin pki` CLI (user-facing PKI + External CA tier) | 🚧 | (none) | Today the helper is [scripts/mint-user-pki.py](../scripts/mint-user-pki.py); promote to subcommand. External CA tier is a NEW scope per the 2026-05-20 trust-model amendment. ~120 LOC user-PKI + more for External CA |
+| [§8](future-ideas.md#8-centralized-client-config--mssh-replaces-ssh) | Centralized client config (`~/.mssh/`) v2 | 🟡 | (none, if pull-only) | v1 file layout landed; v2 = msshd-mediated `--sync` writes CA-rendered config. ~200 LOC |
+| [§26](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost) | Admin web portal via mssh-tunneled localhost | 🟡 | mssh `-L` flag (~150 LOC) for the tunnel half | Server side at [mssh.admin.web](../python/packages/mssh-admin/src/mssh/admin/web/); read-only views + mTLS re-issue. Mutating CRUD and the `-L` client flag still open |
+| [§5 remainder](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) | CA mints credentials — ACME + PGP | 🟡 | (none) | X.509 + OpenVPN + WireGuard + CRLDP landed in v0.1.4. Still open: ACME (~2000+ LOC, deserves library-eval pass), PGP (~700 LOC, composes with §27) |
+| [§27](future-ideas.md#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory) | `mscp` — PGP-encrypted file transfer via CA-as-directory | 🚧 | (none for v1 BYO keys; §5 PGP backend for v2 CA-minted) | ~560 LOC for v1. CA stores PGP pubkey per user; mscp encrypts/decrypts via local gpg |
+| [§11](future-ideas.md#11-in-situ-debug_sshd-swap-in-for-troubleshooting-sideband-ca-audit) | In-situ debug_sshd swap-in | 🟡 | (none) | Diagnostics affordance; remaining work documented in-section |
+| [§23](future-ideas.md#23-sshd_config-template-unification) | sshd_config template unification | 🟡 | (none) | Equivalence test landed; full unification deferred |
 
 ## Future-ideas — pending design
 
-| ID | Title | Notes |
-|---|---|---|
-| [§22](future-ideas.md#22-push-channel-for-revocation--live-session-kill) | Push channel for revocation + live-session kill | Design pending |
-| [§13](future-ideas.md#13-legacy-config-migration-with-dual-enforce--shadow-mode) | Legacy-config migration / dual-enforce / shadow mode | Composes with §20 |
-| [§6](future-ideas.md#6-require-2fa-for-high-privilege-roles-with-air-gap-fallback) | 2FA for high-privilege roles | Design needed; non-trivial |
-| [§4](future-ideas.md#4-wrapper-supports-protocols-beyond-ssh--https--tcp-proxy) | Protocols beyond SSH (HTTPS/TCP proxy) | Needs analysis |
+| ID | Title | Status | Notes |
+|---|---|---|---|
+| [§22](future-ideas.md#22-push-channel-for-revocation--live-session-kill) | Push channel for revocation + live-session kill | 🚧 | Design pending |
+| [§13](future-ideas.md#13-legacy-config-migration-with-dual-enforce--shadow-mode) | Legacy-config migration / dual-enforce / shadow mode | 🚧 | Composes with §20 |
+| [§6 + §7 + ca-integration WebAuthn](ca-integration.md#passkey--webauthn-at-the-ca-) | Passkey / WebAuthn at the CA + 2FA for high-privilege roles | 🚧 | Design captured in [ca-integration.md](ca-integration.md#passkey--webauthn-at-the-ca-). ~1150 LOC v1 (CA endpoints, enrollment schema, AAGUID allowlist, CLI, policy DSL extension, msshd 2FA cache, web portal step-up). Library: `webauthn` PyPI |
+| [§4](future-ideas.md#4-wrapper-supports-protocols-beyond-ssh--https--tcp-proxy) | Protocols beyond SSH (HTTPS/TCP proxy) | 🚧 | Needs analysis |
 
 ## Future-ideas — substantial / deferred
 
-| ID | Title | Notes |
-|---|---|---|
-| [§20](future-ideas.md#20-end-to-end-migration-test-with-auto-generated-playbook) | E2E migration test + auto-generated playbook | Depends on pyinfra-adhoc Phase A + Phase-1/2 msshd port. ~800 LOC after that |
-| [pyinfra-adhoc Phase A](../python/tests/pyinfra-adhoc/adhoc-pyinfra-transition.md) | Matrix-driven cross-distro spinup | Prereq for §20 and §24. Unblocks both |
-| [§19](future-ideas.md#19-bash-auto-completion-scripts-for-mssh-commands) | Bash auto-completion | Defer until v1 release |
-| [§16](future-ideas.md#16-distro-packaging-path-deb--rpm--apk) | Distro packaging (`.deb` / `.rpm` / `.apk`) | Roadmap item |
+| ID | Title | Status | Notes |
+|---|---|---|---|
+| [§20](future-ideas.md#20-end-to-end-migration-test-with-auto-generated-playbook) | E2E migration test + auto-generated playbook | 🚧 | Depends on pyinfra-adhoc Phase A + Phase-1/2 msshd port. ~800 LOC after that |
+| [pyinfra-adhoc Phase A](../python/tests/pyinfra-adhoc/adhoc-pyinfra-transition.md) | Matrix-driven cross-distro spinup | 🚧 | Prereq for §20 and §24. Unblocks both |
+| [§19](future-ideas.md#19-bash-auto-completion-scripts-for-mssh-commands) | Bash auto-completion | 🚧 | Defer until v1 release |
+| [§16](future-ideas.md#16-distro-packaging-path-deb--rpm--apk) | Distro packaging (`.deb` / `.rpm` / `.apk`) | 🚧 | Roadmap item |
 
 ## Future-ideas — capture-only (no commitment yet)
 
-[§2](future-ideas.md#2-smart-card-piv--pkcs11-support) PIV/PKCS#11 ·
-[§7](future-ideas.md#7-passkey--webauthn-support) WebAuthn ·
-[§10](future-ideas.md#10-browser-based-ssh-terminal-xtermjs-over-https-mtls-authenticated) Browser SSH terminal ·
-[§18](future-ideas.md#18-self-service-why-was-i-denied-report) "Why was I denied?" self-service
+🚧 [§2](future-ideas.md#2-smart-card-piv--pkcs11-support) PIV/PKCS#11 ·
+🚧 [§10](future-ideas.md#10-browser-based-ssh-terminal-xtermjs-over-https-mtls-authenticated) Browser SSH terminal ·
+🚧 [§18](future-ideas.md#18-self-service-why-was-i-denied-report) "Why was I denied?" self-service
+
+(§7 WebAuthn moved to "pending design" — now consolidated with §6 in
+[ca-integration.md § Passkey / WebAuthn at the CA](ca-integration.md#passkey--webauthn-at-the-ca-).)
 
 ## In-code TODOs
 
