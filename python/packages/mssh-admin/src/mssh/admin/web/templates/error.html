@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Error{% endblock %}
+
+{% block content %}
+<h2 class="mb-3">CA unreachable</h2>
+<div class="alert alert-danger">
+  <strong>Could not reach the CA.</strong>
+  <pre class="small mb-0 mt-2">{{ error }}</pre>
+</div>
+<p class="small text-muted">
+  Verify <code>~/.mssh-admin/config</code> points at the running CA
+  and your admin certs are still valid.
+</p>
+{% endblock %}

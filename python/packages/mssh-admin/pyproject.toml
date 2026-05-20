@@ -30,17 +30,26 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = ["mcp>=1.0"]
+# Flask admin portal (see design/future-ideas.md §26). The Flask dep
+# is opt-in so the CLI install stays lean for operators who only use
+# the terminal interface.
+web = ["flask>=3.0"]
 
 [project.scripts]
 mssh-admin = "mssh.admin.main:cli"
 # Exposes the CA's read-only admin API over MCP. Requires `pip install
 # mssh-admin[mcp]`.
 mssh-mcp   = "mssh.mcp.server:main"
+# Flask admin portal. Requires `pip install mssh-admin[web]`.
+msshd-admin-web = "mssh.admin.web_main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["mssh*"]
 namespaces = true
+
+[tool.setuptools.package-data]
+"mssh.admin.web" = ["templates/*.html", "static/*.css", "static/*.js"]
 
 [tool.setuptools_scm]
 root = "../../.."

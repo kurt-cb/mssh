@@ -2,7 +2,7 @@
 
 Snapshot of open work after v0.1.1 tag. Regenerate by re-scanning
 `design/future-ideas.md`, `design/openbugs/`, and in-code `TODO`
-markers. Last updated: 2026-05-20.
+markers. Last updated: 2026-05-20 (post-§26-portal-v1).
 
 For full context on any row, follow the link to its
 `design/future-ideas.md` section.
@@ -19,8 +19,9 @@ None. All historical bugs in [archive/closedbugs/](../archive/closedbugs/)
 | [§24](future-ideas.md#24-multi-server-group-lab-coverage) | Multi-server group lab coverage | Test gap | [pyinfra-adhoc Phase A](../python/tests/pyinfra-adhoc/adhoc-pyinfra-transition.md) | Becomes a 2-row matrix.py edit + policy assertions once Phase A lands |
 | [§25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony) | `mssh-admin pki` CLI | CLI gap | (none) | Today the helper is [scripts/mint-user-pki.py](../scripts/mint-user-pki.py); promote to subcommand. ~120 LOC |
 | [§8](future-ideas.md#8-centralized-client-config--mssh-replaces-ssh) | Centralized client config (`~/.mssh/`) v2 | Partial | (none, if pull-only) | v1 file layout landed; v2 = msshd-mediated `--sync` writes CA-rendered config. ~200 LOC |
-| [§26](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost) | Admin web portal via mssh-tunneled localhost | Design proposal | mssh `-L` flag (~150 LOC) | Supersedes browser.md's MDM-pinned portal path. ~780 LOC for read-only v1, ~1600 for full CRUD |
+| [§26](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost) | Admin web portal via mssh-tunneled localhost | **Partial** — Flask app landed | mssh `-L` flag (~150 LOC) for the tunnel half | Server side at [mssh.admin.web](../python/packages/mssh-admin/src/mssh/admin/web/); read-only views + mTLS re-issue. Mutating CRUD and the `-L` client flag still open |
 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) | CA mints credentials for other apps | Expanded scope | (none) | X.509 expansion (TLS server, HTTPS user, OpenVPN, code-sign) ~800 LOC; WireGuard +400; PGP +700; ACME +500 |
+| [§27](future-ideas.md#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory) | `mscp` — PGP-encrypted file transfer via CA-as-directory | Design proposal | (none for v1 BYO keys; §5 PGP backend for v2 CA-minted) | ~560 LOC for v1. CA stores PGP pubkey per user; mscp encrypts/decrypts via local gpg |
 | [§11](future-ideas.md#11-in-situ-debug_sshd-swap-in-for-troubleshooting-sideband-ca-audit) | In-situ debug_sshd swap-in | Partial | (none) | Diagnostics affordance; remaining work documented in-section |
 | [§23](future-ideas.md#23-sshd_config-template-unification) | sshd_config template unification | Partial | (none) | Equivalence test landed; full unification deferred |
 
@@ -64,6 +65,7 @@ None. All historical bugs in [archive/closedbugs/](../archive/closedbugs/)
 
 ## Recently landed (since v0.1.0)
 
+- [§26 server-side portal v1](../python/packages/mssh-admin/src/mssh/admin/web/) — Flask + Bootstrap5 admin portal with sortable/expandable users/groups/hosts/audit views + mTLS re-issue per server. Console script `msshd-admin-web`. Client-side `-L` flag still open
 - [§21](future-ideas.md#21-protocol-v11--typed-framing-for-the-post-ack-stream) typed framing protocol — closed bugs #1, #2, #3, #4, #11
 - [§17](future-ideas.md#17-per-session-banner-with-variable-substitution) banner v1 + BANNER-frame delivery to mssh client (stretch per-session `{user}` substitution noted in-section but not blocking)
 - [bug #6](../archive/closedbugs/bug-06-no-connect-timeout.md) — 5s connect timeout in mssh client

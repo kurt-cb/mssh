@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Groups{% endblock %}
+
+{% block content %}
+<h2 class="mb-3">Server groups <span class="badge bg-secondary">{{ groups|length }}</span></h2>
+
+<div class="alert alert-light border small">
+  Server groups are derived from each host's <code>groups</code>
+  field — the CA stores them per-host. Policies target either
+  individual hosts or groups; this view aggregates both directions.
+</div>
+
+<div class="table-responsive" style="max-height: 80vh; overflow-y: auto;">
+<table class="table table-hover table-sm sortable">
+  <thead class="table-light sticky-top">
+    <tr>
+      <th style="width: 40px;"></th>
+      <th data-sort="name">Group</th>
+      <th data-sort="server_count">Hosts</th>
+      <th data-sort="user_count">Users w/ policy</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for g in groups %}
+    <tr class="row-expand" data-target="#detail-group-{{ loop.index }}">
+      <td class="chevron">▸</td>
+      <td>{{ g.name }}</td>
+      <td>{{ g.server_count }}</td>
+      <td>{{ g.user_count }}</td>
+    </tr>
+    <tr id="detail-group-{{ loop.index }}" class="row-detail" style="display: none;">
+      <td colspan="4" class="bg-light">
+        <div class="row">
+          <div class="col-md-6">
+            <h6>Hosts in this group</h6>
+            {% if g.servers %}
+              <ul class="list-unstyled mb-0">
+              {% for s in g.servers %}
+                <li><code>{{ s }}</code></li>
+              {% endfor %}
+              </ul>
+            {% else %}
+              <em class="text-muted">(no hosts)</em>
+            {% endif %}
+          </div>
+          <div class="col-md-6">
+            <h6>Users with policy targeting this group</h6>
+            {% if g.users %}
+              <ul class="list-unstyled mb-0">
+              {% for u in g.users %}
+                <li><code>{{ u }}</code></li>
+              {% endfor %}
+              </ul>
+            {% else %}
+              <em class="text-muted">(no users)</em>
+            {% endif %}
+          </div>
+        </div>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Audit log{% endblock %}
+
+{% block content %}
+<h2 class="mb-3">Audit log</h2>
+
+<form class="row g-2 mb-3" method="get">
+  <div class="col-md-3">
+    <label class="form-label small">Decision</label>
+    <select class="form-select form-select-sm" name="decision">
+      <option value="">(any)</option>
+      <option value="granted" {% if filters.decision == 'granted' %}selected{% endif %}>granted</option>
+      <option value="denied"  {% if filters.decision == 'denied'  %}selected{% endif %}>denied</option>
+    </select>
+  </div>
+  <div class="col-md-3">
+    <label class="form-label small">User</label>
+    <input class="form-control form-control-sm" name="user"
+           value="{{ filters.user or '' }}" placeholder="username">
+  </div>
+  <div class="col-md-3">
+    <label class="form-label small">Server</label>
+    <input class="form-control form-control-sm" name="server"
+           value="{{ filters.server or '' }}" placeholder="srv-name">
+  </div>
+  <div class="col-md-2">
+    <label class="form-label small">Limit</label>
+    <input class="form-control form-control-sm" name="limit" type="number"
+           value="{{ filters.limit }}" min="1" max="1000">
+  </div>
+  <div class="col-md-1 d-flex align-items-end">
+    <button class="btn btn-sm btn-primary w-100" type="submit">Filter</button>
+  </div>
+</form>
+
+<div class="table-responsive" style="max-height: 75vh; overflow-y: auto;">
+<table class="table table-hover table-sm">
+  <thead class="table-light sticky-top">
+    <tr>
+      <th>Timestamp</th>
+      <th>Decision</th>
+      <th>User</th>
+      <th>Server</th>
+      <th>Reason</th>
+      <th>Detail</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td><small>{{ r.timestamp }}</small></td>
+      <td>
+        {% if r.decision == 'granted' %}
+          <span class="badge bg-success">granted</span>
+        {% elif r.decision == 'denied' %}
+          <span class="badge bg-danger">denied</span>
+        {% else %}
+          <span class="badge bg-secondary">{{ r.decision }}</span>
+        {% endif %}
+      </td>
+      <td>{{ (r.identity or {}).username or '' }}</td>
+      <td>{{ (r.server or {}).canonical_name or '' }}</td>
+      <td><small>{{ r.reason or '' }}</small></td>
+      <td><small>{{ r.detail or '' }}</small></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="text-center text-muted">(no entries)</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

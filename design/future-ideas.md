@@ -1602,6 +1602,181 @@ MVP picks (1). Per-admin attribution becomes a v2 (probably option
 
 ---
 
+## 27. mscp — PGP-encrypted file transfer using the CA as key directory
+
+**Status:** Design proposal. Composes with
+[§5](#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel)
+(if the CA mints PGP keys) but works equally well with
+user-brought-their-own PGP keys.
+
+### Idea
+
+PGP/GPG encrypt-decrypt is a peer-to-peer operation — no backend
+required. The hard problem is **key discovery**: "I know alice
+exists, but which of these 200 PGP keys is hers?" Keyservers like
+keys.openpgp.org solve this for the public internet, but with
+identity verification weaker than what an organizational PKI
+provides.
+
+mssh's CA enrollment DB already binds usernames to cryptographic
+identities (SSH pubkeys, mTLS certs) with admin-mediated assurance.
+Adding a **PGP key field** to each enrollment record makes the CA a
+trusted-within-the-org PGP key directory. Then `mscp` (mssh-secure-
+copy) becomes a thin client:
+
+```bash
+# Alice encrypts a payroll spreadsheet for bob:
+mscp encrypt --to bob payroll-Q2.xlsx > payroll-Q2.xlsx.gpg
+
+# She can deliver the .gpg blob through any channel:
+#   email, slack, USB stick, public file share, S3, whatever.
+# Only bob's PGP private key can decrypt it.
+
+# Bob decrypts:
+mscp decrypt payroll-Q2.xlsx.gpg > payroll-Q2.xlsx
+```
+
+The transport is whatever the operator already has. The CA's role
+is **key discovery + assurance**: "this is bob's PGP key, vouched
+for by the same admin who enrolled bob's SSH access."
+
+### Why this is valuable
+
+- **No new transport infrastructure.** The encrypted blob can ride
+  on any existing channel. The org's email, chat, file share all
+  become safe carriers for sensitive data.
+- **Authoritative key directory.** "Which key is bob's?" has one
+  answer — the CA's. Users don't have to compare fingerprints
+  out-of-band; the CA is already trusted for identity.
+- **Audit-friendly.** Every `mscp encrypt --to bob` call against
+  the CA leaves an audit entry: "alice fetched bob's PGP key at
+  T1." Doesn't tell you what was encrypted (that's the point) but
+  tells you who's talking to whom.
+- **Revocable.** Removing bob's PGP key from his enrollment
+  record means future encryptions to him fail at key-fetch time.
+  Old encrypted blobs are still valid (per PGP's design), but the
+  flow of new sensitive data to a departed employee stops at the
+  CA.
+- **Independent of `mssh` network reachability for decryption.**
+  Once bob has a blob, he can decrypt it offline — no CA call,
+  no network at all. mssh's "stolen cred is useless off-network"
+  property is preserved for the encryption side; decryption is
+  pure PGP, no network ever needed.
+
+### Endpoint shape
+
+```
+GET /v1/users/<username>/pgp-key
+  → returns ASCII-armored public key, or 404 if unset
+
+POST /v1/users/<username>/pgp-key                    (admin or self)
+  → body: { "key": "-----BEGIN PGP PUBLIC KEY BLOCK-----..." }
+  → CA validates parseable + matches a self-signature with
+    Username UID, stores against enrollment record.
+
+DELETE /v1/users/<username>/pgp-key                  (admin or self)
+  → removes the key. Old blobs still decrypt; new encryptions
+    to this user fail at fetch.
+```
+
+mTLS-authenticated like every other CA endpoint.
+
+### Two ways to get PGP keys into the directory
+
+1. **User brings their own (v1).** User generates a PGP keypair
+   locally (or uses an existing one), uploads the public half via
+   `mssh-admin user pgp-key set --user alice --key alice.pub.asc`
+   or via the §26 admin web portal. CA stores; that's it.
+2. **CA mints (v2, composes with §5).** `mssh-admin user pgp-key
+   mint --user alice` generates an OpenPGP keypair on the CA,
+   signs the public part with the CA's OpenPGP signing key, hands
+   alice the private key + ASCII-armored public. Operator-mediated
+   key custody, like the user mTLS cert ceremony in
+   [scripts/mint-user-pki.py](../scripts/mint-user-pki.py).
+
+v1 is enough for the directory; v2 is a nice-to-have that ties PGP
+identity issuance into the same admin flow as everything else.
+
+### mscp CLI shape
+
+```bash
+mscp encrypt --to <user> [--to <user2> ...] <file>
+  → fetches each recipient's PGP key from the CA, encrypts the
+    file to all of them, emits to stdout (or --out <file.gpg>).
+
+mscp decrypt <file.gpg>
+  → invokes local gpg with the user's private key.
+
+mscp list-keys
+  → "who in the org has a PGP key set?" — sanity check before
+    composing an encryption.
+
+mscp verify <file.sig>
+  → verify a signature against the directory.
+
+mscp sign <file>
+  → sign with own PGP key (delegates to local gpg).
+```
+
+`mscp` is intentionally thin: it's `gpg` plus the CA-as-directory
+lookup. No new crypto in the client; all GPG ops shell out to the
+system `gpg` binary.
+
+### Composition
+
+- **[§5](#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel)**
+  — §5's PGP backend (the +700 LOC piece) is the natural place for
+  CA-minted PGP keys. mscp v1 doesn't depend on §5 (BYO keys work),
+  but the full story is §5 + §27.
+- **[§26](#26-admin-web-portal-via-mssh-tunneled-localhost)** — the
+  admin web portal's user-detail panel grows a "PGP key" section:
+  show fingerprint, upload key, revoke key, mint new key (if §5
+  backend present).
+- **[§22](#22-push-channel-for-revocation--live-session-kill)** —
+  revocation of a PGP key could trigger a push to mscp clients to
+  invalidate cached directory entries. v1 ignores caching; rely on
+  per-encrypt fetch from the CA.
+
+### Why this matters beyond convenience
+
+The "insecure-by-default communication channel" problem is universal:
+every org has email + chat + file-share, all of which are
+operationally insecure for sensitive payloads. Org PGP deployments
+have historically failed on key-discovery and key-trust UX. mssh's
+CA already solves the "who is alice" question; piggy-backing PGP key
+distribution on it removes the last barrier to actually using PGP
+internally.
+
+### LOC estimate
+
+- CA endpoint + storage (BYO keys, v1): ~120 LOC
+- mscp CLI (encrypt/decrypt/list-keys/verify/sign): ~300 LOC
+- `mssh-admin user pgp-key set/show/remove` (CLI parity): ~80 LOC
+- Web-portal panel (composes with §26): ~60 LOC
+- **v1 total: ~560 LOC.**
+- (v2 with CA-minted PGP keys: composes with §5's PGP backend
+  estimate of +700 LOC — no double-counting.)
+
+### Open questions
+
+- **Sub-keys vs. primary-key.** PGP supports separate signing /
+  encryption sub-keys. v1 stores whatever the user uploaded (could
+  be a primary with sub-keys); CA doesn't try to manage rotation.
+- **Trust signatures.** Should the CA also issue a PGP signature
+  on each enrolled user's key (analogous to a private OpenPGP CA)?
+  Useful for downstream verifiers; nice-to-have, not v1.
+- **Group recipients.** `mscp encrypt --to accounting payroll.xlsx`
+  could mean "encrypt to every user in the accounting policy
+  group". Convenient but the cleartext exists in N places after
+  decryption. Make explicit at the CLI level.
+- **mscp + msshd path.** Is there value in routing `mscp` through
+  msshd (like mssh does)? Probably not — there's nothing to
+  authorize at the gateway, and the encrypted blob doesn't need
+  online delivery. Keep mscp talking directly to the CA's key
+  endpoint over mTLS.
+
+---
+
 ## How items relate
 
 ```

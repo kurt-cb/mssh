@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Users{% endblock %}
+
+{% block content %}
+<h2 class="mb-3">Users <span class="badge bg-secondary">{{ users|length }}</span></h2>
+
+<div class="table-responsive" style="max-height: 80vh; overflow-y: auto;">
+<table class="table table-hover table-sm sortable">
+  <thead class="table-light sticky-top">
+    <tr>
+      <th style="width: 40px;"></th>
+      <th data-sort="username">Username</th>
+      <th data-sort="key_count">Keys</th>
+      <th data-sort="policy_count">Policies</th>
+      <th data-sort="enrolled_at">Enrolled</th>
+      <th style="width: 220px;">Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for u in users %}
+    <tr class="row-expand" data-target="#detail-user-{{ loop.index }}">
+      <td class="chevron">▸</td>
+      <td>{{ u.username }}</td>
+      <td>{{ (u['keys'] or [])|length }}</td>
+      <td>{{ (u.policies or [])|length }}</td>
+      <td>{{ u.enrolled_at }}</td>
+      <td>
+        <button class="btn btn-sm btn-outline-primary user-pki-export"
+                data-user="{{ u.username }}">Export PKI…</button>
+      </td>
+    </tr>
+    <tr id="detail-user-{{ loop.index }}" class="row-detail" style="display: none;">
+      <td colspan="6" class="bg-light">
+        <div class="row">
+          <div class="col-md-6">
+            <h6>SSH keys</h6>
+            {% if u['keys'] %}
+              <table class="table table-sm table-borderless mb-0">
+                <thead><tr><th>Type</th><th>Fingerprint</th></tr></thead>
+                <tbody>
+                {% for k in u['keys'] %}
+                  <tr>
+                    <td><code>{{ k.key_type }}</code></td>
+                    <td class="small"><code>{{ k.fingerprint }}</code></td>
+                  </tr>
+                {% endfor %}
+                </tbody>
+              </table>
+            {% else %}
+              <em class="text-muted">(no keys enrolled)</em>
+            {% endif %}
+          </div>
+          <div class="col-md-6">
+            <h6>Policies</h6>
+            {% if u.policies %}
+              <table class="table table-sm table-borderless mb-0">
+                <thead><tr><th>ID</th><th>Servers / Groups</th><th>Channels</th></tr></thead>
+                <tbody>
+                {% for p in u.policies %}
+                  <tr>
+                    <td><code>{{ p.id }}</code></td>
+                    <td class="small">
+                      {% if p.server_groups %}groups: {{ p.server_groups|join(', ') }}{% endif %}
+                      {% if p.servers %}{% if p.server_groups %} · {% endif %}servers: {{ p.servers|join(', ') }}{% endif %}
+                    </td>
+                    <td class="small">{{ (p.channels or [])|join(', ') }}</td>
+                  </tr>
+                {% endfor %}
+                </tbody>
+              </table>
+            {% else %}
+              <em class="text-muted">(no policies)</em>
+            {% endif %}
+          </div>
+        </div>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

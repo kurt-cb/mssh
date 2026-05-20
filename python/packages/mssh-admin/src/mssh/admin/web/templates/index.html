@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<h2 class="mb-3">Dashboard</h2>
+
+<div class="row g-3">
+  <div class="col-sm-6 col-lg-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted small text-uppercase">Hosts enrolled</div>
+        <div class="display-6">{{ server_count }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-6 col-lg-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted small text-uppercase">Users enrolled</div>
+        <div class="display-6">{{ user_count }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-6 col-lg-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted small text-uppercase">Server groups</div>
+        <div class="display-6">{{ group_count }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm-6 col-lg-3">
+    <div class="card">
+      <div class="card-body">
+        <div class="text-muted small text-uppercase">Admins</div>
+        <div class="display-6">{{ admin_count }}</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="alert alert-light border mt-4 small">
+  This portal is read-only in v1 plus cert export. Mutating CRUD
+  (enroll user, add policy, etc.) still goes through
+  <code>mssh-admin</code> CLI. See
+  <code>design/future-ideas.md §26</code> for the v2 plan.
+</div>
+{% endblock %}
