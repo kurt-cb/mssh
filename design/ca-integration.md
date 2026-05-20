@@ -1,13 +1,20 @@
 # mssh-ca — install, configure, mint credentials for other apps
 
 How to stand up `mssh-ca` and use it as your org's credential
-service. The first half (install + SSH/mTLS credential minting) is
-**implemented today**. The second half (OpenVPN, WireGuard, PGP,
-generic TLS, code-signing) is the **§5 design proposal** — see
-[future-ideas.md §5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel)
-for status. Each subsection below labels itself ✅ (implemented),
-🟡 (partial), or 🚧 (design only) so operators can tell what they
-can use today vs. what's planned.
+service. SSH/mTLS credential minting is **implemented today**.
+Generic-TLS, HTTPS user certs, and OpenVPN are **partially usable**
+— the crypto primitives in [cert_minter.py](../python/packages/mssh-ca/src/mssh/ca/cert_minter.py)
+work today, but the operator-facing CLI surface and bundle exporters
+are the gap. Code-signing, WireGuard, PGP, and ACME are **design
+only** — see [future-ideas.md §5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel).
+
+Each subsection labels itself:
+
+  - **✅ implemented** — has a stable CLI / API surface; operators can use it.
+  - **🟡 partial** — crypto primitive lands in `cert_minter.py` today;
+    operators have to call it from Python or stitch outputs by hand.
+    The first-class CLI is the gap.
+  - **🚧 design only** — needs new crypto family / library / endpoint.
 
 Cross-references:
   - Day-to-day operator tasks: [operations.md](../docs/operations.md).
@@ -229,13 +236,28 @@ target shape for `mssh-admin` and `mssh-ca`; the LOC estimates in
     `audit.jsonl` with `type=cert.<protocol>`. One tail for the
     whole credential surface.
 
-### TLS server certs for internal services (X.509) 🚧
+### TLS server certs for internal services (X.509) 🟡
 
-The most direct §5 extension — same minting machinery as the user-
-facing CA's wrapper server certs, exposed as a first-class admin
-operation:
+**Primitive exists, CLI surface doesn't.**
+[cert_minter.issue_server_cert](../python/packages/mssh-ca/src/mssh/ca/cert_minter.py#L538)
+will sign a leaf cert with any CN + SAN list against the existing
+intermediate, returning a full PEM chain bundle. Operators with
+direct access to the CA host can call it today from a 5-line Python
+snippet. What's missing is the operator-facing surface:
 
 ```bash
+# What works today (Python-only, on the CA host):
+python -c "
+from mssh.ca.cert_minter import bootstrap_ca, load_intermediates, issue_server_cert
+inters = load_intermediates('/etc/mssh-ca')
+cert = issue_server_cert('grafana.internal.example.com',
+                          signing=inters['tls'],
+                          sans=['DNS:grafana.internal.example.com', 'IP:10.10.0.42'],
+                          validity_days=30)
+open('grafana-cert.pem','wb').write(cert.cert_pem)
+open('grafana-key.pem','wb').write(cert.key_pem)
+"
+
 # Proposed shape (§5):
 mssh-admin cert mint --type tls-server \
                      --cn grafana.internal.example.com \
@@ -249,41 +271,85 @@ ACME endpoint compatibility (so existing certbot-style clients can
 use mssh-ca with no code changes) is the high-leverage adoption
 multiplier in §5; budgeted separately.
 
-### HTTPS user (client) certs 🚧
+### HTTPS user (client) certs 🟡
 
-Browser-imported mTLS for authenticating users to internal HTTPS
-apps. Same signing machinery as the user-facing CA mTLS path; the
-difference is the consumer (browser keystore vs `mssh` CLI):
+**Works today via `admin add`; needs a non-admin verb.** Every
+`mssh-admin admin add` invocation mints an X.509 client cert
+(EKU=clientAuth) signed by the CA's existing TLS hierarchy — the
+identical building block a browser-imported HTTPS user cert needs.
+A browser-mTLS workflow today looks like:
 
 ```bash
-# Proposed shape:
+# Mint an admin-named-as-the-user — works today, abuses the admin role:
+mssh-admin admin add --name alice --role auditor --out-dir ./alice-https/
+# → alice-https/alice-cert.pem + alice-https/alice-key.pem
+
+# Convert PEM pair to PKCS#12 for browser import:
+openssl pkcs12 -export -inkey alice-https/alice-key.pem \
+               -in alice-https/alice-cert.pem \
+               -out alice-https/alice-https.p12
+# Drag-drop alice-https.p12 into Chrome / Firefox / Safari keystore.
+```
+
+The cert authenticates fine on any HTTPS endpoint that trusts the
+mssh-CA's `tls-ca-cert.pem` as a client-cert root. The gaps:
+
+  - **Role abuse.** `admin add` is currently the only path; the
+    user gets enrolled as an admin (even if `auditor`) which
+    inflates the admin list.
+  - **No `.p12` output.** Operator has to run an extra `openssl
+    pkcs12` step.
+  - **No per-cert validity policy.** `admin add` doesn't take a
+    `--validity-days` flag today.
+
+```bash
+# Proposed shape (§5):
 mssh-admin cert mint --type https-user \
                      --user alice \
                      --validity-days 90 \
                      --out alice-https.p12
 ```
 
-`.p12` (PKCS#12) output for one-click browser import.
+### OpenVPN certs 🟡
 
-### OpenVPN certs 🚧
+**Primitives work today; bundle exporter is the gap.** OpenVPN's
+trust model is plain X.509 with client-cert authentication —
+exactly what `issue_client_cert` already produces. An operator can
+get a working OpenVPN client cert today via the same `admin add`
+pattern above (or by calling `issue_client_cert` from Python). The
+only missing pieces are:
 
-OpenVPN uses standard X.509 PKI — same cert_minter.py codepath as
-TLS server / HTTPS-user certs, plus an exporter that emits a
-`.ovpn` config bundle with the cert+key+CA stitched together:
+  - **`.ovpn` bundle exporter.** OpenVPN clients typically want
+    one file containing client cert + key + server CA + connection
+    params. Today the operator stitches it together by hand.
+  - **OpenVPN-specific extensions.** Some OpenVPN configurations
+    pin EKUs (`tlsClientAuth` / `tlsServerAuth`) or require a CRL
+    distribution point in the cert. The mssh-CA's existing X.509
+    leafs carry clientAuth EKU; CRLDP is not embedded today
+    (`mssh-admin cert revoke` works via `GET /v1/crl` polling, not
+    embedded CRLDP).
+  - **Per-cert validity policy** — same gap as HTTPS user.
 
 ```bash
-# Proposed shape:
+# Works today (manual stitching after admin add or direct Python call):
+mssh-admin admin add --name alice-vpn --role auditor --out-dir .
+# Hand-build alice.ovpn:
+#   client / dev tun / proto udp / remote vpn.example.com 1194 / ...
+#   <ca>            ...contents of tls-ca-cert.pem...        </ca>
+#   <cert>          ...contents of alice-vpn-cert.pem...     </cert>
+#   <key>           ...contents of alice-vpn-key.pem...      </key>
+
+# Proposed shape (§5):
 mssh-admin openvpn issue --user alice \
                           --server-cn vpn.example.com \
                           --validity-days 30 \
                           --out alice-vpn.ovpn
 ```
 
-The `.ovpn` carries the user's leaf cert + key + the OpenVPN
-server's CA fingerprint + the server endpoint. User imports into
-their OpenVPN client and connects. Revocation goes through the
-same CRL (`mssh-admin cert revoke <serial>`) that already drives
-the authz cert flow.
+Revocation works for OpenVPN today via the standard `mssh-admin
+cert revoke <serial>` (which lands in the CRL); operators need to
+configure their OpenVPN server to fetch / poll the CA's
+`GET /v1/crl` endpoint.
 
 ### Code-signing certs 🚧
 
@@ -474,13 +540,13 @@ migration paths for the common cases:
 | Admin mTLS cert | ✅ | `mssh-admin admin add` |
 | User-facing mTLS + wrapper TLS | 🟡 | `scripts/mint-user-pki.py`; `mssh-admin pki` ([§25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony)) pending |
 | msshd local user-CA (per-host) | ✅ | `ssh-keygen` at install time |
-| TLS server certs (generic, internal services) | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) |
-| HTTPS user mTLS certs | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) |
-| Code-signing certs | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) |
-| OpenVPN cert + `.ovpn` bundle | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) |
-| WireGuard peer keypair + config | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) |
-| PGP (OpenPGP) key directory + signing | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) + [§27](future-ideas.md#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory) |
-| ACME endpoint | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) |
+| TLS server certs (generic, internal services) | 🟡 | Primitive in `cert_minter.issue_server_cert`; `mssh-admin cert mint` CLI is the gap |
+| HTTPS user mTLS certs | 🟡 | Works via `mssh-admin admin add` + manual `openssl pkcs12` today; non-admin verb + `.p12` output is the gap |
+| OpenVPN cert + `.ovpn` bundle | 🟡 | X.509 client cert works via `admin add`; `.ovpn` bundle exporter + EKU/CRLDP knobs are the gap |
+| Code-signing certs | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) — needs codeSigning EKU support + timestamping flow |
+| WireGuard peer keypair + config | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) — non-X.509 (Curve25519), separate issuance backend |
+| PGP (OpenPGP) key directory + signing | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) + [§27](future-ideas.md#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory) — needs OpenPGP library + parallel signing key |
+| ACME endpoint | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) — separate listener + RFC 8555 state machine |
 
 Sensible incremental rollout: X.509 expansion (TLS server, HTTPS
 user, OpenVPN, code-sign) → ACME → WireGuard → PGP. The X.509

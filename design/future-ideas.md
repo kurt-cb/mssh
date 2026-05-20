@@ -117,14 +117,22 @@ session cookie handling.
 
 ## 5. The CA could mint credentials for other applications (step-ca parallel)
 
-**Status:** Architecturally trivial for X.509; broader credential
-types (WireGuard, PGP) require per-family issuance backends but
-reuse the same enrollment DB + audit + policy DSL.
+**Status:** **Partial.** Core X.509 minting primitives
+([cert_minter.issue_client_cert + issue_server_cert](../python/packages/mssh-ca/src/mssh/ca/cert_minter.py#L485))
+work today and can produce TLS server / HTTPS user / OpenVPN-shaped
+leaf certs — operators just have to call them from Python or via
+`mssh-admin admin add` (which abuses the admin role to mint a
+generic client cert). The gap is operator-facing CLI surface
+(`mssh-admin cert mint`, `openvpn issue`, etc.), bundle exporters
+(.p12, .ovpn), per-cert validity / SAN policy, and the
+non-X.509 credential families (WireGuard's Curve25519 keypairs and
+PGP's OpenPGP signing) that each need their own issuance backend.
 
 **See also:** [ca-integration.md](ca-integration.md) — operator
 playbook for what's implemented today vs. the §5 target shape, with
-proposed CLI for each protocol family and migration recipes from
-existing CAs / OpenVPN / WireGuard / PGP deployments.
+the manual-stitching recipes that work today and the proposed CLI
+shapes plus migration recipes from existing CAs / OpenVPN /
+WireGuard / PGP deployments.
 
 ### Idea
 
