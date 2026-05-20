@@ -5,6 +5,22 @@ to [future-ideas.md](future-ideas.md) items 4 (HTTPS proxy),
 7 (WebAuthn / passkeys), and 10 (xterm.js bastion). Promote to a
 build-ready design before any implementation work begins.
 
+> **2026-05-20 update:** the "Admin portal — feasible" section
+> below was written assuming the portal must be reachable at a
+> public hostname (`ca.example.com`) and therefore needs MDM-pushed
+> per-domain trust pinning to constrain browsers to the mssh CA.
+> [future-ideas §26](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost)
+> proposes an alternative: bind the portal to `127.0.0.1` on the CA
+> host, reach it from admin laptops via an mssh local-port-forward
+> (`mssh-admin web` opens the tunnel; admin opens
+> `https://localhost:8443/`). The browser never resolves a public
+> hostname for this connection, so the public-CA attack surface
+> doesn't apply — no MDM dependency, no per-domain pinning required.
+> The MDM-pinned discussion below remains relevant only if the
+> portal must also be reachable from devices that can't run the
+> mssh CLI. End-user browser access (the "ruled out" section) is
+> unchanged.
+
 Browser-based access to mssh services — a web admin portal for the
 CA, or a web-SSH terminal for end users — would extend the same
 CA-mediated authorization model to clients that don't run the

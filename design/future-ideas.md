@@ -115,9 +115,11 @@ session cookie handling.
 
 ---
 
-## 5. The CA could mint certs for other applications (step-ca parallel)
+## 5. The CA could mint credentials for other applications (step-ca parallel)
 
-**Status:** Architecturally trivial; worth doing once a real consumer asks.
+**Status:** Architecturally trivial for X.509; broader credential
+types (WireGuard, PGP) require per-family issuance backends but
+reuse the same enrollment DB + audit + policy DSL.
 
 ### Idea
 
@@ -129,34 +131,82 @@ The CA already:
 - Has an admin CLI.
 
 This is **most of what step-ca offers** (https://smallstep.com/docs/step-ca/).
-With modest additions it could mint:
+With modest additions it could become the org's credential service
+for everything, not just SSH-via-mssh.
+
+### Credential types
+
+**X.509-family (trivial extension, all share one backend):**
 
 - **TLS server certs for internal services.** "Issue a 30-day cert
   for grafana.internal.example.com" — same enrollment model, same
   policy DSL, same audit.
+- **TLS server certs for the CA's own admin web UI / Flask portal.**
+  Specifically for the localhost-tunneled admin portal in §26 (the
+  browser sees localhost, but the cert still needs to validate;
+  self-signed-via-CA works since the operator controls trust on the
+  CA host).
+- **HTTPS USER (client) certs.** Browser-imported mTLS certs for
+  authenticating users to internal HTTPS apps. Same minting path
+  as today's mssh client mTLS cert; the difference is the consumer.
 - **Code-signing certs.** Sign binaries with a cert traceable to a
   particular admin / build agent.
 - **SSH user certs.** Today the CA mints X.509 authz certs for the
   shim/wrapper. It could also mint OpenSSH user certs directly,
-  bypassing msshd for shops that just want better SSH
-  certificate management.
+  bypassing msshd for shops that just want better SSH cert
+  management.
 - **mTLS certs for service-to-service.** Each microservice gets a
-  cert from the CA; the CA's enrollment policy decides who's allowed
-  to issue / renew.
+  cert from the CA; the CA's enrollment policy decides who's
+  allowed to issue / renew.
+- **OpenVPN certs.** OpenVPN uses standard X.509 PKI — same minting
+  machinery, just an OpenVPN-flavored config-bundle exporter
+  (`mssh-admin openvpn export --user alice`).
+
+**Non-X.509 families (need per-family backends, but reuse enrollment +
+audit + policy):**
+
+- **WireGuard peer keypairs (Curve25519).** WireGuard doesn't use
+  X.509; "credentials" are raw Curve25519 keypairs + peer metadata.
+  The CA can still own the keypair lifecycle: generate, store
+  metadata (allowed-IPs, endpoint, persistent-keepalive), mint
+  per-user / per-host bundles, and revoke by removing the public
+  key from the server's WireGuard config. Audit + policy reuse;
+  crypto backend is separate.
+- **PGP (OpenPGP) keys.** Different crypto family entirely. The CA
+  signs user PGP public keys with its own OpenPGP signing key
+  (acting as a private CA in the OpenPGP web of trust). Useful for
+  signed email / git commit signing scoped to enrolled employees.
+  Probably the heaviest add — needs an OpenPGP library and a
+  parallel signing key.
 
 ### What we'd need to add
 
-- New admin endpoints: `cert mint --type=tls-server`, `cert mint
-  --type=code-sign`, etc.
-- Per-cert-type policy DSL extensions (validity windows, allowed
-  SANs, allowed signature algorithms).
-- ACME endpoint compatibility (so existing ACME clients can use us).
-  Optional but high adoption-value.
+- **Per-credential-type endpoints.** `cert mint --type=tls-server`,
+  `wireguard issue`, `pgp sign`, etc.
+- **Per-type policy DSL extensions.** Validity windows, allowed
+  SANs / IPs, allowed signature algorithms; WireGuard `AllowedIPs`
+  policy; PGP key usage flags.
+- **Per-type CLI exporters.** Each credential type has its own
+  consumer-facing bundle format (`.ovpn` for OpenVPN, `wg-quick`
+  conf for WireGuard, ASCII-armored for PGP, `.p12` / cert+key for
+  X.509).
+- **ACME endpoint compatibility.** Optional but high adoption-value
+  — existing ACME clients can then use the CA without code changes.
 
 ### LOC estimate
 
-~1500 LOC. Mostly endpoint plumbing, since the core minting
-machinery is already in [ca/cert_minter.py](../ca/cert_minter.py).
+- **X.509 expansion alone (TLS server + HTTPS user + OpenVPN +
+  code-sign + SSH user direct):** ~800 LOC. Mostly endpoint plumbing,
+  since the core minting machinery is already in
+  [ca/cert_minter.py](../ca/cert_minter.py).
+- **WireGuard backend:** +400 LOC.
+- **PGP backend:** +700 LOC (new library dep, parallel signing key,
+  separate key custody).
+- **ACME:** +500 LOC (separate listener, ACME state machine).
+
+Sensible incremental path: ship X.509 expansion first (highest payoff,
+lowest risk), then WireGuard (clean scope, no new crypto family
+issues), then ACME, then PGP if there's demand.
 
 ---
 
@@ -1401,6 +1451,154 @@ them stay in one CLI.
   the CA? Tempting (one command, no forgotten step) but couples the
   local-crypto operation to a network call. Probably leave them
   separate and let `next` recommend the chain.
+
+---
+
+## 26. Admin web portal via mssh-tunneled localhost
+
+**Status:** Design proposal; supersedes the MDM-pinned-portal path
+in [browser.md](browser.md).
+
+### Idea
+
+[browser.md](browser.md) spent 350 lines analysing how to expose an
+admin web portal at `ca.example.com` without preserving the public-CA
+attack surface. Its answer: enterprise-managed browsers + MDM-pushed
+per-domain cert pinning + WebAuthn hardware tokens. Workable, but
+heavy — three preconditions per device.
+
+A simpler path: **don't expose the portal to the network at all.**
+Run the Flask admin app bound to `127.0.0.1:8443` on the CA host.
+Admins reach it by opening an mssh-mediated local port forward:
+
+```
+admin's browser  →  https://localhost:8443/
+                       │
+                       │ (TCP, plain to localhost)
+                       ▼
+                  mssh client on admin's laptop
+                       │
+                       │ direct-tcpip channel
+                       │ inside mTLS tunnel
+                       ▼
+                  msshd on CA host
+                       │
+                       │ port-forward to 127.0.0.1:8443
+                       ▼
+                  Flask admin app (on CA host)
+```
+
+UX wrapper:
+
+```bash
+mssh-admin web
+# → opens tunnel; prints:
+#   Admin portal: https://localhost:8443/
+#   Press Ctrl+C to disconnect.
+# → optionally auto-launches the browser at that URL.
+```
+
+### Why this is strictly stronger than the MDM-pinned path
+
+| Concern | MDM-pinned portal | mssh-tunneled portal |
+|---|---|---|
+| Public-CA forgery for `ca.example.com` | Mitigated by MDM pinning | **Not applicable** — browser never resolves a public hostname for this connection |
+| Trust setup per device | MDM policy push + CA root install | Just install mssh + user's cert (already required for CLI) |
+| Mobile support | None (mobile MDM cert pinning is awkward) | None (mssh CLI isn't mobile-targeted either) — same scope |
+| WebAuthn | Required for auth | Optional (defense in depth); mTLS at the mssh layer already authenticates |
+| Network exposure of the CA's web port | Yes — bound to public address | None — bound only to `127.0.0.1` |
+| If the device is offline | No portal access | No portal access — same |
+
+The trust requirement from browser.md ("mssh-CA-only server-cert
+trust at the device") becomes trivially satisfied: browsers don't
+consult public CAs for `localhost`. The connection to localhost is
+HTTPS-with-self-signed (signed by the CA's own user-facing CA, since
+the operator controls trust on the CA host) — or even HTTP if the
+operator decides the mssh tunnel's TLS is sufficient and accepts
+that Chrome will warn about it.
+
+### Building blocks (most exist; some new)
+
+| Piece | Status |
+|---|---|
+| mssh client `-L local-port:host:port` local port forward | **Missing** — needs ~150 LOC to add a `direct-tcpip` channel to the framed protocol from §21 |
+| msshd allows `direct-tcpip` to localhost-only on the CA host | Policy DSL already supports `--channels direct-tcpip` (visible in `mssh-admin policy add --help`); enforcement path needs verifying |
+| Inner sshd supports port forwarding | OpenSSH default; `AllowTcpForwarding yes` likely already on |
+| Flask admin app on CA host | **New** — implements current `mssh-admin` operations (status, server/user/policy CRUD, audit search, cert minting) as a web UI |
+| `mssh-admin web` UX wrapper | **New** — bundle "open tunnel + open browser at URL" into one command |
+| Authentication inside the Flask app | **Open design question** — see below |
+
+### Identity propagation — how Flask knows which admin is connecting
+
+The TCP forward delivers bytes, not identity. The Flask app sees a
+connection from `127.0.0.1` regardless of which admin opened the
+tunnel. Options, increasing in cost:
+
+1. **Trust-the-mssh-layer.** The CA host's msshd policy says "only
+   admins can `direct-tcpip` to localhost:8443." If the request
+   reached Flask, it's from an admin. Flask logs all actions to the
+   CA's audit log under "admin: $REMOTE_USER" where `$REMOTE_USER`
+   comes from… some side channel (env var, header injected by
+   msshd, etc.). Simple, slightly opaque on identity attribution
+   if multiple admins are tunneling simultaneously.
+2. **Header injection by msshd.** msshd inspects forwarded bytes,
+   detects HTTP request boundaries, injects `X-MSSH-User: alice`
+   header on each request. This means msshd now understands HTTP
+   — a meaningful new responsibility. Reject unless really needed.
+3. **Per-session bearer token.** mssh client, on opening the
+   tunnel, asks the CA for a short-lived token bound to that
+   session's identity. Flask validates the token (cookie) against
+   the CA's session table. Cleanest; ~80 LOC on the CA + a small
+   browser-side login flow that auto-fills the token from the URL.
+
+MVP picks (1). Per-admin attribution becomes a v2 (probably option
+3).
+
+### Composition with other items
+
+- **[§4](#4-wrapper-supports-protocols-beyond-ssh--https--tcp-proxy)** (HTTPS / TCP proxy). §26 IS a special case of §4
+  — local port forward to a specific destination. Implementing §26's
+  `-L` flag gets §4's basic shape for free.
+- **[§5](#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel)** (CA mints other certs). The Flask app needs a TLS server
+  cert for `127.0.0.1` (or accepts HTTP and relies on mssh's TLS).
+  The X.509 expansion in §5 is the natural place to expose
+  `mssh-admin pki server mint --san 127.0.0.1 --san localhost`.
+- **[§7](#7-passkey--webauthn-support)** (WebAuthn). Optional
+  defense in depth — Flask can require WebAuthn confirmation for
+  destructive actions (revoke, delete, etc.) even though the mssh
+  layer already authenticated.
+- **[browser.md](browser.md)** existing analysis. §26 sidesteps the
+  trust-requirement chain (MDM + per-domain pinning + WebAuthn) that
+  motivated browser.md's caution. browser.md's WebAuthn discussion
+  remains relevant for §26's optional defense-in-depth WebAuthn
+  layer.
+
+### Risks / open questions
+
+- **What if the admin's mssh tunnel drops mid-action.** Flask should
+  detect connection closure and not commit half-finished workflows.
+  Standard web-session timeout pattern.
+- **Multiple admins tunneling simultaneously.** Each opens their own
+  `localhost:<port>` — collision-prone if multiple use 8443. The
+  `mssh-admin web` wrapper should grab the next free port and print
+  it.
+- **Browser-side trust.** Easiest path: ship a self-signed cert for
+  `localhost` signed by the user-facing CA (which the operator's
+  laptop already trusts via the CA root install). Chrome accepts
+  this on `localhost`. If we go HTTP, document the trade-off.
+- **What ABOUT the public-CA attack surface for users opening
+  `https://localhost:8443`?** Browsers do not query public CAs for
+  `localhost` resolution — the public-CA worry from browser.md
+  doesn't apply. Verify this assumption with a Chrome trust-store
+  test before shipping.
+
+### LOC estimate
+
+- mssh client `-L` flag (direct-tcpip channel in v1.1 framing): ~150 LOC
+- msshd policy enforcement for `direct-tcpip`: ~50 LOC
+- Flask admin app (read-only views first; full CRUD as v2): ~500 LOC for v1, +800 for v2
+- `mssh-admin web` UX wrapper: ~80 LOC
+- Total: **~780 LOC for v1** (read-only portal), ~1600 for full CRUD
 
 ---
 

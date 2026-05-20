@@ -18,8 +18,10 @@ None. All historical bugs in [archive/closedbugs/](../archive/closedbugs/)
 |---|---|---|---|---|
 | [§24](future-ideas.md#24-multi-server-group-lab-coverage) | Multi-server group lab coverage | Test gap | [pyinfra-adhoc Phase A](../python/tests/pyinfra-adhoc/adhoc-pyinfra-transition.md) | Becomes a 2-row matrix.py edit + policy assertions once Phase A lands |
 | [§25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony) | `mssh-admin pki` CLI | CLI gap | (none) | Today the helper is [scripts/mint-user-pki.py](../scripts/mint-user-pki.py); promote to subcommand. ~120 LOC |
+| [§8](future-ideas.md#8-centralized-client-config--mssh-replaces-ssh) | Centralized client config (`~/.mssh/`) v2 | Partial | (none, if pull-only) | v1 file layout landed; v2 = msshd-mediated `--sync` writes CA-rendered config. ~200 LOC |
+| [§26](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost) | Admin web portal via mssh-tunneled localhost | Design proposal | mssh `-L` flag (~150 LOC) | Supersedes browser.md's MDM-pinned portal path. ~780 LOC for read-only v1, ~1600 for full CRUD |
+| [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) | CA mints credentials for other apps | Expanded scope | (none) | X.509 expansion (TLS server, HTTPS user, OpenVPN, code-sign) ~800 LOC; WireGuard +400; PGP +700; ACME +500 |
 | [§11](future-ideas.md#11-in-situ-debug_sshd-swap-in-for-troubleshooting-sideband-ca-audit) | In-situ debug_sshd swap-in | Partial | (none) | Diagnostics affordance; remaining work documented in-section |
-| [§8](future-ideas.md#8-centralized-client-config--mssh-replaces-ssh) | Centralized client config (`~/.mssh/`) | Partial | (none) | Some pieces in; rest scoped in-section |
 | [§23](future-ideas.md#23-sshd_config-template-unification) | sshd_config template unification | Partial | (none) | Equivalence test landed; full unification deferred |
 
 ## Future-ideas — pending design
@@ -43,7 +45,6 @@ None. All historical bugs in [archive/closedbugs/](../archive/closedbugs/)
 ## Future-ideas — capture-only (no commitment yet)
 
 [§2](future-ideas.md#2-smart-card-piv--pkcs11-support) PIV/PKCS#11 ·
-[§5](future-ideas.md#5-the-ca-could-mint-certs-for-other-applications-step-ca-parallel) Multi-app cert minting ·
 [§7](future-ideas.md#7-passkey--webauthn-support) WebAuthn ·
 [§10](future-ideas.md#10-browser-based-ssh-terminal-xtermjs-over-https-mtls-authenticated) Browser SSH terminal ·
 [§18](future-ideas.md#18-self-service-why-was-i-denied-report) "Why was I denied?" self-service
