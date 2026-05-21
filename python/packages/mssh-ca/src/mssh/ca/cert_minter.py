@@ -310,19 +310,32 @@ class BootstrapArtifacts:
     """Output of bootstrap_ca(). PEMs are returned so callers can
     distribute them (CA host vs operator workstation).
 
-    Legacy single-signer fields are populated today. The PKI
-    hierarchy migration (Phase 2+) will add ``root_cert_pem``,
-    ``intermediates_pem``, etc. — see design/notes-pki-hierarchy.md.
+    Both the legacy single-signer fields AND the new PKI-hierarchy
+    fields are populated since v0.2.1: the legacy files are aliases
+    of two of the intermediates (user-mint, auth) so callers that
+    haven't migrated keep working — see design/notes-pki-hierarchy.md.
     """
-    signing_key_pem: bytes
-    signing_cert_pem: bytes        # authorization trust root (legacy)
-    tls_ca_cert_pem: bytes         # signs server/admin mTLS certs
-    tls_ca_key_pem: bytes
-    tls_server_cert_pem: bytes     # CA's own listener cert
+    # --- Legacy single-signer aliases (still written to disk) ---
+    signing_key_pem: bytes         # alias: user-mint's key
+    signing_cert_pem: bytes        # alias: user-mint's cert (authz signing)
+    tls_ca_cert_pem: bytes         # alias: auth's cert (mTLS signing)
+    tls_ca_key_pem: bytes          # alias: auth's key
+    tls_server_cert_pem: bytes     # CA's own listener cert, signed by host-mint
     tls_server_key_pem: bytes
-    bootstrap_admin_cert_pem: bytes
+    bootstrap_admin_cert_pem: bytes  # signed by auth
     bootstrap_admin_key_pem: bytes
     bootstrap_admin_subject: str
+    # --- New PKI-hierarchy artifacts (v0.2.1+) ---
+    # Root certificate (long-lived self-signed); the SINGLE document
+    # ultimately trusted by everyone. Validators DON'T trust this
+    # directly for leaves — they pin to the appropriate intermediate
+    # per the trust-model amendment.
+    root_cert_pem: bytes = b''
+    root_key_pem: bytes = b''
+    # The 4 named intermediates, by short_name. Each value is a tuple
+    # of (key_pem, cert_pem). short_names match INTERMEDIATE_ROLES:
+    # 'user-mint', 'bypass-mint', 'host-mint', 'auth'.
+    intermediates: dict[str, tuple[bytes, bytes]] = field(default_factory=dict)
 
 
 def _chain_pem(*certs: x509.Certificate) -> bytes:
@@ -368,74 +381,141 @@ def bootstrap_ca(ca_dir: str | Path, *, key_type: str = 'ec',
                  tls_server_cn: str = 'mssh-ca',
                  tls_server_sans: list[str] | None = None
                  ) -> BootstrapArtifacts:
-    """First-time init: create the CA's keys, root certs, and
-    bootstrap admin.
+    """First-time init: create the CA's root + 4 named intermediates,
+    the CA's TLS server cert, and a bootstrap superuser admin cert.
 
-    **Current behavior:** single-signer layout (one signing key
-    for authz certs, one TLS CA for mTLS certs). Files written:
-    ``signing-{key,cert}.pem``, ``tls-ca-{key,cert}.pem``,
-    ``tls-server-{key,cert}.pem``, ``bootstrap-admin-{key,cert}.pem``.
+    Layout written (since v0.2.1):
 
-    **Future (Phase 2+):** ``bootstrap_ca`` will be refactored to
-    produce a root + 4 intermediates layout (user-mint, bypass-mint,
-    host-mint, auth) — see design/notes-pki-hierarchy.md. The
-    helpers ``_self_signed_root``, ``_issue_intermediate``,
-    ``load_intermediates`` are in place and ready to use; only the
-    bootstrap-time wiring still uses the legacy single-signer path.
+        ca_dir/
+          root-cert.pem
+          root-key.pem                  (mode 600)
+          intermediates/
+            user-mint/{cert,key}.pem    — signs per-session authz certs
+            bypass-mint/{cert,key}.pem  — signs operator bypass certs
+            host-mint/{cert,key}.pem    — signs server identities
+            auth/{cert,key}.pem         — signs admin/client mTLS certs
+          tls-server-cert.pem           — chain bundle (leaf + host-mint)
+          tls-server-key.pem            (mode 600)
+          bootstrap-admin-cert.pem      — chain bundle (leaf + auth)
+          bootstrap-admin-key.pem       (mode 600)
+
+    Legacy aliases also written (for callers that haven't migrated):
+
+        signing-{key,cert}.pem   — copies of intermediates/user-mint/*
+        tls-ca-{key,cert}.pem    — copies of intermediates/auth/*
+
+    The aliasing reflects what existing code DID with those files:
+    `signing-*.pem` signed authz certs (now → user-mint), and
+    `tls-ca-*.pem` signed admin/server mTLS certs (now → auth).
+    Callers verifying a leaf's signature against the alias keep
+    working; new code should pin directly to the relevant
+    intermediate per the trust-model amendment.
+
+    See design/notes-pki-hierarchy.md for the design rationale.
     """
     ca_dir = Path(ca_dir)
     ca_dir.mkdir(parents=True, exist_ok=True)
+    (ca_dir / 'intermediates').mkdir(exist_ok=True)
 
-    # Authorization signing key (signs short-lived X.509 authorization certs).
-    signing_key = generate_signing_key(key_type)
-    signing_cert = _self_signed('mssh-authorization-root', signing_key)
+    # 1. Root: self-signed, ~20-year validity.
+    root_key = generate_signing_key(key_type)
+    root_cert = _self_signed_root('mssh-root', root_key)
 
-    # mTLS CA (signs server + admin client certs and the CA's TLS server cert).
-    tls_ca_key = generate_signing_key(mtls_key_type)
-    tls_ca_cert = _self_signed('mssh-mtls-root', tls_ca_key)
+    # 2. Four named intermediates, all signed by root, ~10-year validity.
+    intermediates: dict[str, Intermediate] = {}
+    for role in INTERMEDIATE_ROLES:
+        inter_key = generate_signing_key(key_type)
+        inter_cert = _issue_intermediate(role, inter_key, root_key, root_cert)
+        intermediates[role] = Intermediate(
+            short_name=role, key=inter_key, cert=inter_cert,
+            pubkey_fp16=compute_pubkey_fp16(inter_key.public_key()),
+        )
 
-    # CA's TLS server cert (what shims/admins see when connecting).
+    # 3. CA's TLS server cert — signed by host-mint, written as chain bundle.
     tls_server_key = generate_signing_key(mtls_key_type)
-    tls_server_cert = _issue_leaf_legacy(
-        tls_server_cn, tls_server_key, tls_ca_key, tls_ca_cert,
+    tls_server_cert = _issue_leaf(
+        tls_server_cn, tls_server_key, intermediates['host-mint'],
         server_auth=True, client_auth=False,
         sans=tls_server_sans or ['DNS:localhost', 'IP:127.0.0.1'],
     )
 
-    # Bootstrap superuser admin cert.
+    # 4. Bootstrap superuser admin cert — signed by auth.
     boot_admin_key = generate_signing_key(mtls_key_type)
-    boot_admin_cert = _issue_leaf_legacy(
-        bootstrap_admin_cn, boot_admin_key, tls_ca_key, tls_ca_cert,
+    boot_admin_cert = _issue_leaf(
+        bootstrap_admin_cn, boot_admin_key, intermediates['auth'],
         server_auth=False, client_auth=True,
     )
 
-    artifacts = BootstrapArtifacts(
-        signing_key_pem=serialize_private_key(signing_key),
-        signing_cert_pem=serialize_certificate(signing_cert),
-        tls_ca_cert_pem=serialize_certificate(tls_ca_cert),
-        tls_ca_key_pem=serialize_private_key(tls_ca_key),
-        tls_server_cert_pem=serialize_certificate(tls_server_cert),
+    # 5. Persist new layout.
+    (ca_dir / 'root-cert.pem').write_bytes(serialize_certificate(root_cert))
+    (ca_dir / 'root-key.pem').write_bytes(serialize_private_key(root_key))
+    os.chmod(ca_dir / 'root-key.pem', 0o600)
+    inter_pems: dict[str, tuple[bytes, bytes]] = {}
+    for role, inter in intermediates.items():
+        role_dir = ca_dir / 'intermediates' / role
+        role_dir.mkdir(exist_ok=True)
+        key_pem = serialize_private_key(inter.key)
+        cert_pem = serialize_certificate(inter.cert)
+        (role_dir / 'cert.pem').write_bytes(cert_pem)
+        (role_dir / 'key.pem').write_bytes(key_pem)
+        os.chmod(role_dir / 'key.pem', 0o600)
+        inter_pems[role] = (key_pem, cert_pem)
+
+    # CA TLS server cert. Per the trust-model amendment, clients pin
+    # to host-mint (not root), so the leaf alone suffices — they
+    # already trust the issuer. Bundling the intermediate would be
+    # redundant and triggers "unable to get issuer certificate"
+    # errors in some OpenSSL configurations that don't honor the
+    # PARTIAL_CHAIN flag.
+    tls_server_bundle = serialize_certificate(tls_server_cert)
+    (ca_dir / 'tls-server-cert.pem').write_bytes(tls_server_bundle)
+    (ca_dir / 'tls-server-key.pem').write_bytes(
+        serialize_private_key(tls_server_key))
+    os.chmod(ca_dir / 'tls-server-key.pem', 0o600)
+
+    # Bootstrap admin cert. Leaf alone, same rationale as the TLS
+    # server cert above — server pins to auth, no need to send the
+    # intermediate on the wire.
+    admin_bundle = serialize_certificate(boot_admin_cert)
+    (ca_dir / 'bootstrap-admin-cert.pem').write_bytes(admin_bundle)
+    (ca_dir / 'bootstrap-admin-key.pem').write_bytes(
+        serialize_private_key(boot_admin_key))
+    os.chmod(ca_dir / 'bootstrap-admin-key.pem', 0o600)
+
+    # 6. Legacy alias files. These exist so existing callers don't
+    # break across the bootstrap refactor; new code should pin to the
+    # specific intermediate via load_intermediates() instead.
+    #
+    # For files used as OpenSSL trust stores (tls-ca-cert.pem in
+    # particular), include the root cert alongside the intermediate
+    # so default OpenSSL chain validation finds a self-signed anchor
+    # without needing the PARTIAL_CHAIN flag. The intermediate is
+    # what AUTHORIZES the leaf (pinning rule per the trust-model
+    # amendment); the root is included only to terminate the chain.
+    user_mint_key_pem, user_mint_cert_pem = inter_pems['user-mint']
+    auth_key_pem, auth_cert_pem = inter_pems['auth']
+    root_cert_pem = serialize_certificate(root_cert)
+    (ca_dir / 'signing-key.pem').write_bytes(user_mint_key_pem)
+    (ca_dir / 'signing-cert.pem').write_bytes(user_mint_cert_pem)
+    (ca_dir / 'tls-ca-key.pem').write_bytes(auth_key_pem)
+    (ca_dir / 'tls-ca-cert.pem').write_bytes(auth_cert_pem + root_cert_pem)
+    os.chmod(ca_dir / 'signing-key.pem', 0o600)
+    os.chmod(ca_dir / 'tls-ca-key.pem', 0o600)
+
+    return BootstrapArtifacts(
+        signing_key_pem=user_mint_key_pem,
+        signing_cert_pem=user_mint_cert_pem,
+        tls_ca_cert_pem=auth_cert_pem,
+        tls_ca_key_pem=auth_key_pem,
+        tls_server_cert_pem=tls_server_bundle,
         tls_server_key_pem=serialize_private_key(tls_server_key),
-        bootstrap_admin_cert_pem=serialize_certificate(boot_admin_cert),
+        bootstrap_admin_cert_pem=admin_bundle,
         bootstrap_admin_key_pem=serialize_private_key(boot_admin_key),
         bootstrap_admin_subject=f'CN={bootstrap_admin_cn}',
+        root_cert_pem=serialize_certificate(root_cert),
+        root_key_pem=serialize_private_key(root_key),
+        intermediates=inter_pems,
     )
-
-    # Persist.
-    (ca_dir / 'signing-key.pem').write_bytes(artifacts.signing_key_pem)
-    (ca_dir / 'signing-cert.pem').write_bytes(artifacts.signing_cert_pem)
-    (ca_dir / 'tls-ca-cert.pem').write_bytes(artifacts.tls_ca_cert_pem)
-    (ca_dir / 'tls-ca-key.pem').write_bytes(artifacts.tls_ca_key_pem)
-    (ca_dir / 'tls-server-cert.pem').write_bytes(artifacts.tls_server_cert_pem)
-    (ca_dir / 'tls-server-key.pem').write_bytes(artifacts.tls_server_key_pem)
-    (ca_dir / 'bootstrap-admin-cert.pem').write_bytes(artifacts.bootstrap_admin_cert_pem)
-    (ca_dir / 'bootstrap-admin-key.pem').write_bytes(artifacts.bootstrap_admin_key_pem)
-    for p in [
-        'signing-key.pem', 'tls-ca-key.pem', 'tls-server-key.pem',
-        'bootstrap-admin-key.pem',
-    ]:
-        os.chmod(ca_dir / p, 0o600)
-    return artifacts
 
 
 def _issue_leaf_legacy(subject_cn: str, leaf_key, ca_key, ca_cert,

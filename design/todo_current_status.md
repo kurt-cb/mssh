@@ -84,18 +84,26 @@ Design docs:
 
 ---
 
-## v2 PKI hierarchy (Root + named intermediates)
+## PKI hierarchy (Root + named intermediates) — **v1.0 BLOCKER**
 
 Roadmap from [notes-pki-hierarchy.md](notes-pki-hierarchy.md) +
 [security.md § Chain of trust](security.md#chain-of-trust-v2-multi-intermediate-model).
-Until this lands, the v0.1.4 §5 work signs every leaf through the
-legacy single-signer — acceptable for experimental deployments,
+
+**Scope decision (2026-05-21):** moved from "v2 future" to "v1.0
+blocker" — shipping v1 on the legacy single-signer and then
+immediately rolling out a fundamental trust-model change would
+invalidate the CA model right after release. The trust-model
+amendment (validation pins to a specific intermediate, NOT the root)
+is load-bearing. Version bumped to v0.2.x to signal the shift.
+
+Until these commits land, the v0.1.4 §5 work signs every leaf through
+the legacy single-signer — acceptable for experimental deployments,
 explicitly not the production end-state.
 
 | Phase | Title | Status | Notes |
 |---|---|---|---|
 | [Commit 1](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Foundation: `Intermediate` dataclass + helpers | ✅ | Landed pre-v0.1.1 |
-| [Commit 2](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | `bootstrap_ca` refactor: Root + 4 intermediates on disk | 🚧 | New ca_dir/intermediates/{user-mint,host-mint,auth,bypass-mint}/ layout |
+| [Commit 2](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | `bootstrap_ca` refactor: Root + 4 intermediates on disk | ✅ | Landed v0.2.1. New `ca_dir/{root-cert.pem,intermediates/<role>/{cert,key}.pem}` layout; legacy `signing-*.pem` + `tls-ca-*.pem` aliases preserved for callers that haven't migrated |
 | [Commit 3](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Per-issuer CRL | 🚧 | `CRLStore` → `CRLRegistry`; `/v1/crl?issuer=X` |
 | [Commit 4](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | msshd chain validation + per-issuer cache state | 🚧 | msshd loads Root + intermediates; `last_crl_seqs: dict[str, int]` |
 | [Commit 4b](security.md#chain-of-trust-v2-multi-intermediate-model) | **Validation pins to intermediate, not Root** (load-bearing rule) | 🚧 | Each validator's trust store contains the SPECIFIC intermediate cert. Without this, §5 leaves can impersonate users. |

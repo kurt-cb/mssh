@@ -111,7 +111,17 @@ def loopback_env(tmp_path):
     shim_dir.mkdir()
     (shim_dir / 'srv1-cert.pem').write_bytes(srv_creds.cert_pem)
     (shim_dir / 'srv1-key.pem').write_bytes(srv_creds.key_pem)
-    (shim_dir / 'ca-tls-root.pem').write_bytes(srv_creds.ca_cert_pem)
+    # Trust store for mssh-ca's TLS listener: host-mint + root (since
+    # v0.2.1). The host-mint cert is what AUTHORIZES the leaf (pinning
+    # rule); the root is included so default-OpenSSL chain validation
+    # finds a self-signed anchor without needing PARTIAL_CHAIN flag.
+    # Pre-refactor this was tls-ca-cert.pem alone, which signed
+    # everything in the v1 single-signer layout. Chain-validation
+    # pinning to the specific intermediate is enforced separately
+    # (Commit 4 of the PKI hierarchy work).
+    (shim_dir / 'ca-tls-root.pem').write_bytes(
+        (ca_dir / 'intermediates' / 'host-mint' / 'cert.pem').read_bytes() +
+        (ca_dir / 'root-cert.pem').read_bytes())
     (shim_dir / 'auth-signing-root.pem').write_bytes(
         (ca_dir / 'signing-cert.pem').read_bytes())
 
