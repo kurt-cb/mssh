@@ -1293,3 +1293,382 @@ def wireguard_peer_list(ctx: AdminContext, admin: Admin,
                      'issued_at': p.issued_at,
                      'persistent_keepalive': p.persistent_keepalive,
                  } for p in peers]}
+
+
+# ---------------------------------------------------------------------------
+# Admin-2FA passkey flow (design/admin-2fa.md)
+# ---------------------------------------------------------------------------
+
+def _passkey_or_503(ctx: AdminContext):
+    """Return broker or a 503 if passkey isn't configured."""
+    if ctx.passkey_broker is None:
+        return None, _err(503, 'unavailable',
+                          'mssh-passkey not configured on this CA '
+                          '(set passkey.broker_url in ca-config.yaml)')
+    return ctx.passkey_broker, None
+
+
+def passkey_admin_enroll(ctx: AdminContext, admin: Admin,
+                          body: dict) -> tuple[int, dict]:
+    """POST /v1/admin/user/<admin_name>/passkey/enroll-begin
+
+    Generate WebAuthn registration options for the named admin,
+    push them to the broker, return the resulting URL the operator
+    sends to the admin's phone.
+
+    Restricted to superuser — passkey enrollment is sensitive (it
+    binds a hardware token to a privileged identity)."""
+    if (err := _check('admin.add', admin)):
+        return err
+    broker, err = _passkey_or_503(ctx)
+    if err:
+        return err
+
+    target = (body.get('admin_name') or '').strip()
+    if not target:
+        return _err(400, 'bad_request', 'admin_name required')
+    if target not in ctx.enrollment.admins:
+        return _err(404, 'not_found', f'admin not found: {target}')
+
+    label = body.get('label') or ''
+    display_name = body.get('display_name') or target
+
+    from . import passkey as _pk
+    target_rec = ctx.enrollment.admins[target]
+    exclude = [c.credential_id for c in target_rec.passkey_credentials
+               if not c.revoked_at]
+    options_json, challenge = _pk.generate_registration_options(
+        rp_id=ctx.passkey_rp_id,
+        rp_name=ctx.passkey_rp_name,
+        user_id=f'admin:{target}',
+        display_name=display_name,
+        exclude_credential_ids=exclude or None,
+    )
+
+    try:
+        ceremony = broker.create_ceremony(
+            ceremony_type='register',
+            options_json=options_json,
+            description=f'Enroll a new passkey for admin {target!r}',
+            display_name=display_name,
+            callback_url=ctx.passkey_callback_url,
+            ttl_seconds=300,
+        )
+    except Exception as e:
+        return _err(502, 'broker_error', f'mssh-passkey: {e}')
+
+    # Stash the per-ceremony state until the callback arrives.
+    ctx.passkey_pending_registrations[ceremony.ceremony_id] = {
+        'flow': 'admin',
+        'admin_name': target,
+        'challenge': challenge,
+        'label': label,
+        'allowlist': ctx.passkey_aaguid_allowlist,
+        'rp_id': ctx.passkey_rp_id,
+        'expected_origin': ctx.passkey_expected_origin,
+    }
+    _audit_admin(ctx, admin, 'admin.passkey.enroll-begin',
+                 {'target': target, 'ceremony_id': ceremony.ceremony_id}, 'ok')
+    return 201, {
+        'status': 'ok',
+        'ceremony_id': ceremony.ceremony_id,
+        'url': ceremony.url,
+        'expires_at': ceremony.expires_at,
+    }
+
+
+def passkey_admin_list(ctx: AdminContext, admin: Admin,
+                       admin_name: str) -> tuple[int, dict]:
+    if (err := _check('admin.list', admin)):
+        return err
+    if admin_name not in ctx.enrollment.admins:
+        return _err(404, 'not_found', f'admin not found: {admin_name}')
+    creds = ctx.enrollment.admins[admin_name].passkey_credentials
+    return 200, {
+        'status': 'ok',
+        'admin_name': admin_name,
+        'credentials': [
+            {
+                'credential_id': c.credential_id,
+                'aaguid': c.aaguid,
+                'sign_count': c.sign_count,
+                'label': c.label,
+                'enrolled_at': c.enrolled_at,
+                'revoked_at': c.revoked_at or None,
+                'transports': list(c.transports),
+            }
+            for c in creds
+        ],
+    }
+
+
+def passkey_admin_revoke(ctx: AdminContext, admin: Admin,
+                          admin_name: str,
+                          credential_id: str) -> tuple[int, dict]:
+    if (err := _check('admin.add', admin)):
+        return err
+    try:
+        ctx.enrollment.revoke_admin_passkey(admin_name, credential_id)
+    except EnrollmentError as e:
+        return _err(404, 'not_found', str(e))
+    # Invalidate any 2FA cache for this admin since their credential
+    # set just changed.
+    if ctx.passkey_2fa_cache is not None:
+        ctx.passkey_2fa_cache.pop(admin_name, None)
+    _audit_admin(ctx, admin, 'admin.passkey.revoke',
+                 {'admin_name': admin_name,
+                  'credential_id': credential_id}, 'ok')
+    return 200, {'status': 'ok',
+                 'admin_name': admin_name,
+                 'revoked': credential_id}
+
+
+def passkey_admin_callback(ctx: AdminContext,
+                            body: dict) -> tuple[int, dict]:
+    """POST /v1/admin/passkey/callback — broker delivers a ceremony
+    outcome. Validates origin via mTLS upstream (Apache2 or the
+    Flask server's TLS handler). Body shape comes from
+    mssh_passkey/callback.py."""
+    ceremony_id = body.get('ceremony_id') or ''
+    outcome = body.get('outcome') or ''
+    response_json = body.get('response_json')
+
+    if not ceremony_id or outcome not in ('approved', 'denied', 'expired', 'cancelled'):
+        return _err(400, 'bad_request', 'bad callback body')
+
+    # Registration?
+    if (pending := ctx.passkey_pending_registrations.pop(ceremony_id, None)):
+        if outcome != 'approved':
+            ctx.audit.write({
+                'timestamp': _now_iso(),
+                'type': 'admin',
+                'action': 'admin.passkey.register-failed',
+                'admin': {'name': '<broker>',
+                          'role': 'broker',
+                          'mtls_subject': '<broker>'},
+                'target': {'admin_name': pending['admin_name'],
+                           'ceremony_id': ceremony_id,
+                           'outcome': outcome},
+                'result': 'failed',
+            })
+            return 200, {'status': 'ok', 'outcome': outcome}
+        from . import passkey as _pk
+        challenge = _pk.RegistrationChallenge(
+            challenge_bytes=pending['challenge'],
+            rp_id=pending['rp_id'],
+            expected_origin=pending['expected_origin'],
+            user_id=pending['admin_name'],
+            aaguid_allowlist=pending['allowlist'],
+        )
+        try:
+            cred = _pk.verify_registration(
+                response_json=response_json or '',
+                challenge=challenge,
+            )
+        except ValueError as e:
+            ctx.audit.write({
+                'timestamp': _now_iso(),
+                'type': 'admin',
+                'action': 'admin.passkey.register-rejected',
+                'admin': {'name': '<broker>', 'role': 'broker',
+                          'mtls_subject': '<broker>'},
+                'target': {'admin_name': pending['admin_name'],
+                           'ceremony_id': ceremony_id,
+                           'error': str(e)},
+                'result': 'rejected',
+            })
+            return _err(400, 'verification_failed', str(e))
+        cred.label = pending.get('label') or ''
+        cred.enrolled_by = '<broker callback>'
+        try:
+            ctx.enrollment.add_admin_passkey(pending['admin_name'], cred)
+        except EnrollmentError as e:
+            return _err(409, 'conflict', str(e))
+        ctx.audit.write({
+            'timestamp': _now_iso(),
+            'type': 'admin',
+            'action': 'admin.passkey.register-complete',
+            'admin': {'name': '<broker>', 'role': 'broker',
+                      'mtls_subject': '<broker>'},
+            'target': {'admin_name': pending['admin_name'],
+                       'credential_id': cred.credential_id,
+                       'aaguid': cred.aaguid},
+            'result': 'ok',
+        })
+        return 200, {'status': 'ok',
+                     'admin_name': pending['admin_name'],
+                     'credential_id': cred.credential_id}
+
+    # Authentication?
+    if (pending := ctx.passkey_pending_authentications.pop(ceremony_id, None)):
+        if outcome != 'approved':
+            ctx.audit.write({
+                'timestamp': _now_iso(),
+                'type': 'admin',
+                'action': 'admin.passkey.2fa-failed',
+                'admin': {'name': '<broker>', 'role': 'broker',
+                          'mtls_subject': '<broker>'},
+                'target': {'admin_name': pending['admin_name'],
+                           'ceremony_id': ceremony_id,
+                           'outcome': outcome},
+                'result': 'failed',
+            })
+            return 200, {'status': 'ok', 'outcome': outcome}
+        from . import passkey as _pk
+        target_rec = ctx.enrollment.admins.get(pending['admin_name'])
+        if not target_rec:
+            return _err(404, 'not_found',
+                        f'admin {pending["admin_name"]} no longer enrolled')
+        creds_by_id = {c.credential_id: c
+                       for c in target_rec.passkey_credentials
+                       if not c.revoked_at}
+        challenge = _pk.AuthenticationChallenge(
+            challenge_bytes=pending['challenge'],
+            rp_id=pending['rp_id'],
+            expected_origin=pending['expected_origin'],
+            user_id=pending['admin_name'],
+            credentials_by_id=creds_by_id,
+        )
+        try:
+            res = _pk.verify_authentication(
+                response_json=response_json or '',
+                challenge=challenge,
+            )
+        except ValueError as e:
+            return _err(400, 'verification_failed', str(e))
+
+        ctx.enrollment.update_admin_passkey_sign_count(
+            pending['admin_name'], res.credential_id, res.new_sign_count)
+        # Record success in the 2FA cache.
+        ctx.passkey_2fa_cache[pending['admin_name']] = _now_iso()
+        ctx.audit.write({
+            'timestamp': _now_iso(),
+            'type': 'admin',
+            'action': 'admin.passkey.2fa-success',
+            'admin': {'name': '<broker>', 'role': 'broker',
+                      'mtls_subject': '<broker>'},
+            'target': {'admin_name': pending['admin_name'],
+                       'credential_id': res.credential_id},
+            'result': 'ok',
+        })
+        return 200, {'status': 'ok',
+                     'admin_name': pending['admin_name'],
+                     'credential_id': res.credential_id}
+
+    return _err(404, 'not_found',
+                f'no pending ceremony {ceremony_id}')
+
+
+def passkey_admin_challenge(ctx: AdminContext, admin: Admin) -> tuple[int, dict]:
+    """Internal helper called from the policy-enforcement layer when an
+    admin needs to satisfy a 2FA requirement. Builds an
+    authentication ceremony for ``admin`` against their registered
+    credentials and returns the qr_url + ceremony_id.
+
+    Surfaced as a 202 Accepted from the admin endpoint that triggered
+    it (see passkey_2fa_interrupt below)."""
+    broker, err = _passkey_or_503(ctx)
+    if err:
+        return err
+
+    target_rec = ctx.enrollment.admins.get(admin.name)
+    if not target_rec or not [c for c in target_rec.passkey_credentials
+                              if not c.revoked_at]:
+        return _err(403, 'forbidden',
+                    f'admin {admin.name!r} has no active passkey '
+                    f'credentials; cannot satisfy 2FA')
+
+    from . import passkey as _pk
+    cred_ids = [c.credential_id for c in target_rec.passkey_credentials
+                if not c.revoked_at]
+    options_json, challenge = _pk.generate_authentication_options(
+        rp_id=ctx.passkey_rp_id,
+        allow_credential_ids=cred_ids,
+    )
+
+    try:
+        ceremony = broker.create_ceremony(
+            ceremony_type='approve',
+            options_json=options_json,
+            description=f'2FA approval for admin {admin.name!r}',
+            callback_url=ctx.passkey_callback_url,
+            ttl_seconds=300,
+        )
+    except Exception as e:
+        return _err(502, 'broker_error', f'mssh-passkey: {e}')
+
+    ctx.passkey_pending_authentications[ceremony.ceremony_id] = {
+        'flow': 'admin',
+        'admin_name': admin.name,
+        'challenge': challenge,
+        'rp_id': ctx.passkey_rp_id,
+        'expected_origin': ctx.passkey_expected_origin,
+    }
+    return 202, {
+        'status': 'pending_2fa',
+        'reason': 'passkey_required',
+        'ceremony_id': ceremony.ceremony_id,
+        'url': ceremony.url,
+        'expires_at': ceremony.expires_at,
+    }
+
+
+def passkey_check_2fa(ctx: AdminContext, admin: Admin,
+                      policy: 'Policy') -> tuple[int, dict] | None:
+    """Returns (status, body) — typically a 202 challenge — if the
+    admin must complete a 2FA ceremony before the operation can
+    proceed. Returns None if the cache is fresh or no 2FA required.
+
+    Callers chain this in front of the actual operation."""
+    if policy is None or policy.require_2fa == 'none':
+        return None
+    if policy.require_2fa != 'passkey':
+        return _err(500, 'internal',
+                    f'unknown require_2fa: {policy.require_2fa!r}')
+    if ctx.passkey_broker is None:
+        return _err(503, 'unavailable',
+                    'policy requires passkey 2FA but the broker is not '
+                    'configured on this CA')
+    last = ctx.passkey_2fa_cache.get(admin.name)
+    if last:
+        try:
+            last_dt = _dt.datetime.strptime(
+                last, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=_dt.timezone.utc)
+        except ValueError:
+            last_dt = None
+        if last_dt:
+            age = (_dt.datetime.now(_dt.timezone.utc) - last_dt).total_seconds()
+            if age <= policy.twofa_within_seconds:
+                return None
+    # Cache miss → issue a challenge.
+    return passkey_admin_challenge(ctx, admin)
+
+
+def passkey_poll_outcome(ctx: AdminContext,
+                          ceremony_id: str) -> tuple[int, dict]:
+    """GET /v1/admin/passkey/ceremony/<id> — clients poll while
+    waiting for the user to approve. Returns 202 while pending,
+    200 with terminal outcome when resolved."""
+    broker, err = _passkey_or_503(ctx)
+    if err:
+        return err
+    # Fast path: have we recorded a verified success in the cache or
+    # rejected the ceremony? Walk our local pending maps + we either
+    # popped the entry (terminal) or it's still pending.
+    if ceremony_id in ctx.passkey_pending_authentications:
+        # Still pending — poll the broker for latest status.
+        pass
+    if ceremony_id in ctx.passkey_pending_registrations:
+        pass
+    try:
+        status = broker.get_ceremony(ceremony_id)
+    except Exception as e:
+        return _err(502, 'broker_error', f'mssh-passkey: {e}')
+    if status.outcome is None:
+        return 202, {'status': 'pending', 'ceremony_id': ceremony_id}
+    return 200, {
+        'status': 'ok',
+        'ceremony_id': ceremony_id,
+        'outcome': status.outcome,
+        'consumed_at': status.consumed_at,
+    }

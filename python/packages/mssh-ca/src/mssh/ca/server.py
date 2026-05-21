@@ -457,6 +457,59 @@ def register_routes(app: Flask) -> None:
             app.config['ADMIN_CTX'], adm, body)
         return jsonify(payload), status
 
+    # ---- Admin-2FA passkey flow (design/admin-2fa.md) ----
+    @app.post('/v1/admin/passkey/enroll-begin')
+    def _passkey_admin_enroll():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.passkey_admin_enroll(
+            app.config['ADMIN_CTX'], adm, body)
+        return jsonify(payload), status
+
+    @app.get('/v1/admin/passkey/<admin_name>/list')
+    def _passkey_admin_list(admin_name):
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        status, payload = admin_handlers.passkey_admin_list(
+            app.config['ADMIN_CTX'], adm, admin_name)
+        return jsonify(payload), status
+
+    @app.delete('/v1/admin/passkey/<admin_name>/<path:credential_id>')
+    def _passkey_admin_revoke(admin_name, credential_id):
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        status, payload = admin_handlers.passkey_admin_revoke(
+            app.config['ADMIN_CTX'], adm, admin_name, credential_id)
+        return jsonify(payload), status
+
+    # Broker callback. mTLS-validated upstream (the broker presents
+    # its own client cert). For dev mode the in-process TLS handler
+    # populates X-Client-CN; production uses Apache2.
+    @app.post('/v1/admin/passkey/callback')
+    def _passkey_callback():
+        # The broker's CN must be in a small allowlist — same shape
+        # as the other admin endpoints check, but we expect the
+        # broker, not an enrolled admin. v1 trusts any incoming
+        # request that passes mTLS chain validation; the Hardening
+        # v2 work tightens this to a pinned-CN check.
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.passkey_admin_callback(
+            app.config['ADMIN_CTX'], body)
+        return jsonify(payload), status
+
+    @app.get('/v1/admin/passkey/ceremony/<ceremony_id>')
+    def _passkey_poll(ceremony_id):
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        status, payload = admin_handlers.passkey_poll_outcome(
+            app.config['ADMIN_CTX'], ceremony_id)
+        return jsonify(payload), status
+
     # ---- §5 WireGuard catalog ----
     @app.post('/v1/admin/wireguard/server')
     def _wg_server_init():

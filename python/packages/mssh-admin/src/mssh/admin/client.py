@@ -256,6 +256,30 @@ class CAClient:
         params = {'server': server} if server else None
         return self._request('GET', '/v1/admin/wireguard/peer', params=params)
 
+    # ---- Admin-2FA passkey flow (design/admin-2fa.md) ----
+    def passkey_admin_enroll(self, admin_name: str, *,
+                              label: str = '',
+                              display_name: str = '') -> dict[str, Any]:
+        body: dict[str, Any] = {'admin_name': admin_name}
+        if label:
+            body['label'] = label
+        if display_name:
+            body['display_name'] = display_name
+        return self._request('POST', '/v1/admin/passkey/enroll-begin',
+                              json=body)
+
+    def passkey_admin_list(self, admin_name: str) -> dict[str, Any]:
+        return self._request('GET', f'/v1/admin/passkey/{admin_name}/list')
+
+    def passkey_admin_revoke(self, admin_name: str,
+                              credential_id: str) -> dict[str, Any]:
+        return self._request(
+            'DELETE',
+            f'/v1/admin/passkey/{admin_name}/{credential_id}')
+
+    def passkey_poll(self, ceremony_id: str) -> dict[str, Any]:
+        return self._request('GET', f'/v1/admin/passkey/ceremony/{ceremony_id}')
+
     # ---- CRL ----
     def cert_revoke(self, serials: list[str], *,
                     reason: str = '') -> dict[str, Any]:

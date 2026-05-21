@@ -376,6 +376,70 @@ def user_show(ctx, username):
 
 
 # ---------------------------------------------------------------------------
+# user passkey commands — admin-2FA enrollment (design/admin-2fa.md)
+# ---------------------------------------------------------------------------
+
+@user.group('passkey')
+def user_passkey():
+    """Manage admin passkey credentials for 2FA on privileged operations."""
+
+
+@user_passkey.command('enroll')
+@click.option('--user', 'admin_name', required=True,
+              help='The enrolled admin whose phone will register a passkey.')
+@click.option('--label', default='',
+              help='Operator-visible label for the credential, e.g. '
+                   '"alice yubikey 5C".')
+@click.option('--display-name', default='',
+              help='Display name shown on the registration page '
+                   '(defaults to the admin name).')
+@click.pass_context
+def user_passkey_enroll_cmd(ctx, admin_name, label, display_name):
+    """Mint a one-time URL the admin opens on their phone to register
+    a new passkey.
+
+    The URL expires in 5 minutes. mssh-ca records the credential
+    against the admin's enrollment record when the broker callback
+    fires after the WebAuthn ceremony completes.
+    """
+    c = _make_client(ctx)
+    out = _handle_call(c.passkey_admin_enroll, admin_name,
+                       label=label, display_name=display_name)
+    click.echo('passkey enrollment URL (1-time, expires in 5 min):', err=True)
+    click.echo(f'  {out["url"]}', err=True)
+    click.echo('Open this on the admin\'s phone and follow the prompts.', err=True)
+    _output(ctx, {
+        'ceremony_id': out['ceremony_id'],
+        'expires_at': out['expires_at'],
+    })
+
+
+@user_passkey.command('list')
+@click.option('--user', 'admin_name', required=True)
+@click.pass_context
+def user_passkey_list_cmd(ctx, admin_name):
+    """List registered passkey credentials for an admin."""
+    c = _make_client(ctx)
+    out = _handle_call(c.passkey_admin_list, admin_name)
+    _output(ctx, out['credentials'])
+
+
+@user_passkey.command('revoke')
+@click.option('--user', 'admin_name', required=True)
+@click.option('--credential-id', required=True,
+              help='base64url credential ID, as shown by `list`.')
+@click.pass_context
+def user_passkey_revoke_cmd(ctx, admin_name, credential_id):
+    """Revoke one passkey credential.
+
+    Active 2FA cache entries for this admin are also invalidated.
+    """
+    c = _make_client(ctx)
+    out = _handle_call(c.passkey_admin_revoke, admin_name, credential_id)
+    _output(ctx, out)
+
+
+# ---------------------------------------------------------------------------
 # policy commands
 # ---------------------------------------------------------------------------
 
@@ -393,9 +457,21 @@ def policy():
 @click.option('--source-cidrs', default='')
 @click.option('--max-validity', 'max_validity', default=3600, type=int)
 @click.option('--force-command', default=None)
+@click.option('--require-2fa', 'require_2fa',
+              type=click.Choice(['none', 'passkey']), default='none',
+              help='Require an additional factor for actions matching '
+                   'this policy. "passkey" triggers a mssh-passkey '
+                   'ceremony before mssh-ca executes the action; the '
+                   'CLI shows a one-time URL the operator opens on '
+                   'their phone.')
+@click.option('--2fa-within-seconds', 'twofa_within_seconds',
+              type=int, default=60,
+              help='Cache window (seconds) after a successful 2FA. '
+                   'Subsequent matching actions within the window '
+                   'skip the prompt. Default 60.')
 @click.pass_context
 def policy_add(ctx, username, servers, server_groups, channels, source_cidrs,
-               max_validity, force_command):
+               max_validity, force_command, require_2fa, twofa_within_seconds):
     def _split(s): return [x.strip() for x in s.split(',') if x.strip()]
     policy = {
         'servers': _split(servers),
@@ -404,6 +480,8 @@ def policy_add(ctx, username, servers, server_groups, channels, source_cidrs,
         'source_cidrs': _split(source_cidrs),
         'max_cert_validity_seconds': max_validity,
         'force_command': force_command,
+        'require_2fa': require_2fa,
+        'twofa_within_seconds': twofa_within_seconds,
     }
     c = _make_client(ctx)
     _output(ctx, _handle_call(c.policy_add, username, policy))

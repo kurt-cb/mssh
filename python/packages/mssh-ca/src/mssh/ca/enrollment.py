@@ -50,6 +50,11 @@ class Policy:
     max_cert_validity_seconds: int = 3600
     environment: dict[str, str] = field(default_factory=dict)
     force_command: str | None = None
+    # 2FA layer: when set to a non-'none' value, mssh-ca challenges
+    # the calling identity via mssh-passkey before honoring requests
+    # matching this policy. See design/admin-2fa.md.
+    require_2fa: str = 'none'                # 'none' | 'passkey'
+    twofa_within_seconds: int = 60           # cache window after success
     created_at: str = ''
     created_by: str = ''
 
@@ -579,6 +584,11 @@ class Enrollment:
                     'policy must reference at least one server or server_group')
             self._policy_seq += 1
             pid = f'pol-{self._policy_seq:03d}'
+            require_2fa = str(policy_fields.get('require_2fa') or 'none')
+            if require_2fa not in ('none', 'passkey'):
+                raise EnrollmentError(
+                    f'require_2fa must be none or passkey, got '
+                    f'{require_2fa!r}')
             policy = Policy(
                 id=pid,
                 servers=list(servers),
@@ -590,6 +600,9 @@ class Enrollment:
                     policy_fields.get('max_cert_validity_seconds') or 3600),
                 environment=dict(policy_fields.get('environment') or {}),
                 force_command=policy_fields.get('force_command'),
+                require_2fa=require_2fa,
+                twofa_within_seconds=int(
+                    policy_fields.get('twofa_within_seconds') or 60),
                 created_at=_now_iso(),
                 created_by=created_by,
             )
