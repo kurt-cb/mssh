@@ -15,7 +15,7 @@ PYTHON ?= python3
 PYTHON := $(shell command -v $(PYTHON) 2>/dev/null || echo $(PYTHON))
 PIP ?= pip
 PY_PKG_DIR := python/packages
-PY_PACKAGES := mssh-common mssh msshd mssh-ca mssh-admin
+PY_PACKAGES := mssh-common mssh msshd mssh-ca mssh-admin mssh-passkey
 DIST_DIR := dist
 
 # Where the venv lives — used so `make dev-install` doesn't accidentally
