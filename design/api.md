@@ -102,7 +102,7 @@ like a 1.0 response.
   "protocol_version":   "1.1",
   "inner_sshd_kind":    "openssh",
   "inner_sshd_version": "OpenSSH_9.6p1",
-  "msshd_version":      "0.1.0"
+  "msshd_version":      "0.1.x"
 }
 ```
 

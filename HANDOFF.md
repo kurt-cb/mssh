@@ -1,5 +1,14 @@
 # Handoff — picking up the mssh work
 
+> **⚠ OUTDATED SNAPSHOT (commit `4ef9818`, pre-multi-package layout).**
+> This file is preserved as a historical handoff record. The path
+> references below (`python/src/mssh/...`) are stale — the project
+> moved to a 6-package layout under `python/packages/<pkg>/src/mssh/`
+> in v0.1.0, and many of the "Things NOT done yet" items have since
+> landed. For current state, read **`CLAUDE.md`** first, then
+> **`design/todo_current_status.md`** (the live status doc), then
+> `design/architecture.md`. Use `git log` for what's actually happened.
+
 State as of commit `4ef9818` (post-rename). This file exists so a
 fresh session — Claude or human — can resume quickly without
 re-reading the conversation history.

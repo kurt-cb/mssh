@@ -161,7 +161,7 @@ Passkey ecosystem section at the top of this doc.)
 
 | Item | Notes |
 |---|---|
-| `make pkg` doesn't clean `dist/` | Bit setup_adhoc.sh during the 2026-05-19 tutorial walk; multi-version wheels confuse pip. Add `make clean-pkg` target or clean inside `pkg:` |
+| (nothing currently open) | `make pkg` dist-cleanup fixed in v0.1.7 polish pass |
 
 ## Recently landed (since v0.1.0)
 

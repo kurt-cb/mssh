@@ -16,13 +16,14 @@
 #
 # Tarball layout expected (produced by `make tarball` at the repo root):
 #
-#   mssh-v0.1.0.tar.gz
-#   ├── dist/                            5 wheels
-#   │   ├── mssh_common-0.1.0-*.whl
-#   │   ├── mssh-0.1.0-*.whl
-#   │   ├── msshd-0.1.0-*.whl
-#   │   ├── mssh_ca-0.1.0-*.whl
-#   │   └── mssh_admin-0.1.0-*.whl
+#   mssh-<version>.tar.gz
+#   ├── dist/                            6 wheels (any version suffix)
+#   │   ├── mssh_common-*.whl
+#   │   ├── mssh-*.whl
+#   │   ├── msshd-*.whl
+#   │   ├── mssh_ca-*.whl
+#   │   ├── mssh_admin-*.whl
+#   │   └── mssh_passkey-*.whl
 #   ├── config/                          template files
 #   │   └── sshd_config.template
 #   └── systemd/                         unit files (msshd.service, mssh-ca.service)
@@ -33,7 +34,7 @@
 #      flask, asyncssh, openssh-server, openssh-client.
 #   3. Extracts the tarball to <install-dir>.
 #   4. Creates a Python venv at <install-dir>/venv.
-#   5. `pip install` the 5 mssh wheels into that venv.
+#   5. `pip install` the 6 mssh wheels into that venv.
 #   6. Drops symlinks for the binaries into /usr/local/bin.
 #   7. Installs systemd units (DISABLED) for msshd and mssh-ca, if
 #      systemd is present and --no-systemd was not passed.
@@ -52,7 +53,7 @@ set -eu
 TARBALL=""
 INSTALL_DIR="/opt/mssh"
 NO_SYSTEMD=0
-RUN_USER="mssh"
+RUN_USER="_msshd"  # matches systemd/msshd.service; underscore-prefix is Debian/BSD system-user convention
 
 usage() {
     sed -n '2,/^$/p' "$0" | sed 's|^# \?||'

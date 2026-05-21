@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # validate-adhoc.sh — run the round-1+round-2 regression probes against
 # a freshly-provisioned adhoc lab. Used after `make pkg` + setup_adhoc.sh
-# to confirm v0.1.0 doesn't regress the bugs we fixed in those rounds.
+# to confirm the build doesn't regress the bugs we fixed in those rounds.
 #
 # Probes:
 #   A1   happy path: mssh user@authorized-server -- whoami

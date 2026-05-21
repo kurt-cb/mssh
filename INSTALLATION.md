@@ -3,7 +3,7 @@
 Quick pointer file. For the full operator workflow (install, enrol,
 adopt, troubleshoot) see [docs/operations.md](docs/operations.md).
 
-## Quick install (v0.1.0 alpha)
+## Quick install
 
 ```bash
 git clone https://github.com/kurt-cb/ssh-rt-auth.git
@@ -12,13 +12,14 @@ python3 -m venv .venv
 make dev-install
 ```
 
-This installs the 5 mssh wheels editable into `.venv` and adds the
+This installs the 6 mssh wheels editable into `.venv` and adds the
 following binaries to `.venv/bin/`:
 
   - `mssh` — the client
   - `msshd` — server-side gateway daemon
   - `mssh-ca` — CA service
   - `mssh-admin` — operator CLI
+  - `mssh-passkey` — WebAuthn broker (optional; see [design/mssh-passkey-module.md](design/mssh-passkey-module.md))
   - `mssh-debug-sshd`, `msshd-admin` — diagnostics
   - `mssh-mcp` (optional `[mcp]` extra) — admin API over MCP for
     LLM clients

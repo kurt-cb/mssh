@@ -5,7 +5,7 @@
 # trees materialize.
 #
 # Version is read from git via setuptools_scm. The latest annotated
-# tag (`v0.1.0`) becomes the wheel version; dirty trees add a suffix.
+# tag becomes the wheel version; dirty trees add a suffix.
 
 # ---- knobs ------------------------------------------------------------
 SHELL := /bin/bash
@@ -35,10 +35,11 @@ help:
 	@echo "mssh — top-level build targets"
 	@echo
 	@echo "  make version          show the current version (from git tag)"
-	@echo "  make pkg              build all 5 Python wheels into $(DIST_DIR)/"
+	@echo "  make pkg              build all 6 Python wheels into $(DIST_DIR)/"
 	@echo "  make pkg-<name>       build just one wheel (e.g. make pkg-msshd)"
-	@echo "  make dev-install      pip install -e the 5 packages into \$$VENV"
-	@echo "  make clean            remove $(DIST_DIR)/, build/, *.egg-info, __pycache__"
+	@echo "  make dev-install      pip install -e the 6 packages into \$$VENV"
+	@echo "  make clean-dist       remove just $(DIST_DIR)/*.whl (stale wheels)"
+	@echo "  make clean            full clean: $(DIST_DIR)/, build/, *.egg-info, __pycache__"
 	@echo "  make redeploy         push wheels into the running adhoc lab"
 	@echo
 	@echo "Current version: $$($(MAKE) -s version)"
@@ -49,8 +50,14 @@ version:
 	    || echo "0.0.0+local"
 
 # ---- build -----------------------------------------------------------
-.PHONY: pkg $(addprefix pkg-,$(PY_PACKAGES))
-pkg: $(addprefix pkg-,$(PY_PACKAGES))
+.PHONY: pkg clean-dist $(addprefix pkg-,$(PY_PACKAGES))
+
+# Remove stale wheels before rebuilding — without this, dist/ accumulates
+# every version ever built and pip sometimes picks the wrong one.
+clean-dist:
+	@rm -f $(DIST_DIR)/*.whl
+
+pkg: clean-dist $(addprefix pkg-,$(PY_PACKAGES))
 	@echo
 	@echo "✓ built $(words $(PY_PACKAGES)) wheels into $(DIST_DIR)/"
 	@ls -1 $(DIST_DIR)/*.whl 2>/dev/null | sed 's/^/  /'
@@ -79,7 +86,7 @@ dev-install:
 
 # ---- tarball (for install_mssh.sh) -----------------------------------
 # `make tarball` produces dist/mssh-<version>.tar.gz containing the
-# 5 wheels + config/ + systemd/. install_mssh.sh consumes this on a
+# 6 wheels + config/ + systemd/. install_mssh.sh consumes this on a
 # clean host (simulates what `apt install mssh-server` will install
 # once we have real distro packaging — future-ideas §16).
 .PHONY: tarball
