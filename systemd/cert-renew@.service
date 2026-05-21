@@ -1,0 +1,34 @@
+# Template: cert-renew@<service>.service
+#
+# Drop this into /etc/systemd/system/ then enable per service:
+#   systemctl enable --now cert-renew@grafana.timer
+#
+# The "<service>" instance name (%i) is used to find the cert path
+# convention /etc/<service>/tls.{crt,key}. Adjust if your service
+# stores certs elsewhere; copy + edit per service if needed.
+#
+# Reads CA URL + trust root from ~/.mssh-admin/config of the user
+# running the unit (root by default). Override with --ca-url +
+# --ca-cert if the service should use a different config.
+
+[Unit]
+Description=Renew mssh TLS cert for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=mssh-admin cert renew \
+    --cert /etc/%i/tls.crt \
+    --key  /etc/%i/tls.key \
+    --out-cert /etc/%i/tls.crt \
+    --out-key  /etc/%i/tls.key \
+    --threshold-days 14 \
+    --on-renew "systemctl reload %i"
+
+# Auto-renew should never crash the host; non-zero exits log to journal
+# without taking the service down.
+SuccessExitStatus=0
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,24 @@
+# Daily timer driving cert-renew@<service>.service. The corresponding
+# service unit is a no-op when the cert is more than --threshold-days
+# from expiry, so running daily is cheap.
+#
+# Enable per service:
+#   systemctl enable --now cert-renew@grafana.timer
+#   systemctl enable --now cert-renew@prometheus.timer
+#
+# Check what's scheduled:
+#   systemctl list-timers 'cert-renew@*'
+
+[Unit]
+Description=Daily TLS-cert renewal check for %i
+
+[Timer]
+OnCalendar=daily
+# Spread fleet renewals so 1000 services don't all hit mssh-ca at 00:00.
+RandomizedDelaySec=30m
+# If the system was off when a fire was scheduled, run on next boot.
+Persistent=true
+Unit=cert-renew@%i.service
+
+[Install]
+WantedBy=timers.target

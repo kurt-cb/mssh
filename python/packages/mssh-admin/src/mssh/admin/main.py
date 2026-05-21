@@ -976,6 +976,153 @@ def _write_pkcs12(cert_pem: str, key_pem: str, *,
     os.chmod(out_path, 0o600)
 
 
+@cert_group.command('renew')
+@click.option('--cert', 'cert_path', required=True, type=click.Path(),
+              help='Path to the cert being renewed. Used as the mTLS '
+                   'client cert when calling the CA.')
+@click.option('--key', 'key_path', required=True, type=click.Path(),
+              help='Path to the cert\'s private key.')
+@click.option('--ca-cert', 'ca_cert_path', default=None, type=click.Path(),
+              help='CA trust root for verifying mssh-ca\'s TLS server '
+                   'cert. Defaults to the value in ~/.mssh-admin/config.')
+@click.option('--ca-url', 'ca_url', default=None,
+              help='mssh-ca URL. Defaults to the value in '
+                   '~/.mssh-admin/config.')
+@click.option('--out-cert', 'out_cert_path', required=True, type=click.Path(),
+              help='Write the renewed cert here (atomic rename).')
+@click.option('--out-key', 'out_key_path', required=True, type=click.Path(),
+              help='Write the renewed key here (mode 0600).')
+@click.option('--threshold-days', type=int, default=14, show_default=True,
+              help='Renew only if the cert expires within this many '
+                   'days. Otherwise exit 0 silently (cron-friendly).')
+@click.option('--revoke-old', is_flag=True, default=False,
+              help='Also revoke the old cert (CRL append). Default: '
+                   'old cert remains valid until its not_after.')
+@click.option('--on-renew', 'on_renew_cmd', default=None,
+              help='Shell command to run after a successful renewal. '
+                   'E.g. "systemctl reload nginx".')
+@click.pass_context
+def cert_renew_cmd(ctx, cert_path, key_path, ca_cert_path, ca_url,
+                   out_cert_path, out_key_path, threshold_days,
+                   revoke_old, on_renew_cmd):
+    """Renew a cert that mssh-ca has previously issued.
+
+    The endpoint is auth-by-cert — the cert at ``--cert`` IS the
+    credential. mssh-ca validates the chain at the TLS layer, checks
+    the CRL, and re-mints with the same CN/SAN/EKU/validity_days
+    when within the renewable window (default 30 days from expiry,
+    7-day grace past expiry).
+
+    Designed for daily systemd-timer execution per service. Exits 0
+    silently when the cert is more than ``--threshold-days`` from
+    expiry, so cron entries can fire daily without churning.
+
+    Example (systemd unit):
+
+      \b
+      ExecStart=mssh-admin cert renew \\
+          --cert /etc/grafana/tls.crt --key /etc/grafana/tls.key \\
+          --out-cert /etc/grafana/tls.crt --out-key /etc/grafana/tls.key \\
+          --threshold-days 14 --on-renew "systemctl reload grafana"
+    """
+    from datetime import datetime, timezone
+    from cryptography import x509
+
+    cp = Path(cert_path)
+    if not cp.exists():
+        click.echo(f'error: --cert not found: {cp}', err=True)
+        ctx.exit(2)
+    try:
+        cert = x509.load_pem_x509_certificate(cp.read_bytes())
+    except Exception as e:
+        click.echo(f'error: --cert at {cp} not parseable: {e}', err=True)
+        ctx.exit(2)
+
+    not_after = cert.not_valid_after_utc
+    if not_after.tzinfo is None:
+        not_after = not_after.replace(tzinfo=timezone.utc)
+    days_to_expiry = (not_after
+                      - datetime.now(timezone.utc)).total_seconds() / 86400
+
+    if days_to_expiry > threshold_days:
+        click.echo(
+            f'cert valid until {not_after.isoformat()} '
+            f'({int(days_to_expiry)} days); nothing to do '
+            f'(threshold {threshold_days})',
+            err=True)
+        ctx.exit(0)
+
+    # Build a CAClient using the cert/key being renewed as the mTLS
+    # client identity, NOT the admin creds.
+    conf = ctx.obj.get('_config', {})
+    base_url = ca_url or conf.get('ca_url')
+    ca_root = ca_cert_path or conf.get('ca_cert')
+    if not base_url or not ca_root:
+        click.echo('error: --ca-url and --ca-cert required (or set in '
+                   '~/.mssh-admin/config)', err=True)
+        ctx.exit(2)
+
+    renew_client = CAClient(
+        base_url=base_url,
+        admin_cert=str(cp),
+        admin_key=str(key_path),
+        ca_cert=str(ca_root),
+    )
+
+    try:
+        resp = renew_client.cert_renew(revoke_predecessor=revoke_old)
+    except CAClientError as e:
+        click.echo(f'renewal failed: HTTP {e.status} — {e.body}', err=True)
+        ctx.exit(3)
+
+    if resp.get('status') == 'too_early':
+        click.echo(f'cert not yet renewable: {resp.get("detail")}',
+                   err=True)
+        ctx.exit(0)
+    if resp.get('status') != 'ok':
+        click.echo(f'unexpected response: {resp}', err=True)
+        ctx.exit(4)
+
+    # Atomic write: write to a tmp file, fsync, rename. Same pattern
+    # the broker uses for hosts_live.py.
+    creds = resp['credentials']
+    _atomic_write(out_cert_path, creds['cert_pem'].encode('ascii'),
+                   mode=0o644)
+    _atomic_write(out_key_path, creds['key_pem'].encode('ascii'),
+                   mode=0o600)
+
+    cert_info = resp['cert']
+    click.echo(
+        f'renewed {cert_info["subject_cn"]} '
+        f'(old serial {cert_info["old_serial"]}); '
+        f'validity {cert_info["validity_days"]} days',
+        err=True)
+
+    if on_renew_cmd:
+        click.echo(f'running --on-renew: {on_renew_cmd}', err=True)
+        import subprocess
+        rc = subprocess.run(on_renew_cmd, shell=True).returncode
+        if rc != 0:
+            click.echo(f'warning: --on-renew exited {rc}', err=True)
+            ctx.exit(5)
+
+
+def _atomic_write(path, data, *, mode=0o644):
+    """Write bytes to ``path`` atomically via rename. Inherits the
+    target's directory."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + '.tmp')
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(p))
+    os.chmod(str(p), mode)
+
+
 @cert_group.command('revoke')
 @click.argument('serials', nargs=-1, required=True)
 @click.option('--reason', default='',

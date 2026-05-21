@@ -294,6 +294,22 @@ class CAClient:
     def external_tool_list(self) -> dict[str, Any]:
         return self._request('GET', '/v1/admin/external-tool/list')
 
+    # ---- §25 cert renew ----
+    def cert_renew(self, *,
+                   revoke_predecessor: bool = False) -> dict[str, Any]:
+        """POST /v1/cert/renew.
+
+        The endpoint is mTLS-authenticated by the cert being renewed
+        (passed via self.admin_cert / self.admin_key); the caller is
+        responsible for setting those to the cert+key it wants
+        renewed, not the admin creds. See ``mssh-admin cert renew``
+        for the canonical call site.
+        """
+        body: dict[str, Any] = {}
+        if revoke_predecessor:
+            body['revoke_predecessor'] = True
+        return self._request('POST', '/v1/cert/renew', json=body)
+
     # ---- CRL ----
     def cert_revoke(self, serials: list[str], *,
                     reason: str = '') -> dict[str, Any]:
