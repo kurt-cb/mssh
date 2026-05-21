@@ -1,8 +1,8 @@
 # mssh — todo status (quick reference)
 
-Snapshot of open work after v0.1.5 tag. Regenerate by re-scanning
+Snapshot of open work after v0.1.6 tag. Regenerate by re-scanning
 `design/future-ideas.md`, `design/openbugs/`, and in-code `TODO`
-markers. Last updated: 2026-05-21 (post-passkey ecosystem).
+markers. Last updated: 2026-05-21 (post cert-renew / ACME drop).
 
 For full context on any row, follow the link to its
 `design/future-ideas.md` section.
@@ -115,10 +115,10 @@ The full v2 hierarchy is ~1500–2000 LOC across CA + msshd + admin
 | ID | Title | Status | Depends on | Notes |
 |---|---|---|---|---|
 | [§24](future-ideas.md#24-multi-server-group-lab-coverage) | Multi-server group lab coverage | 🚧 | [pyinfra-adhoc Phase A](../python/tests/pyinfra-adhoc/adhoc-pyinfra-transition.md) | 2-row matrix.py edit + policy assertions once Phase A lands |
-| [§25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony) | `mssh-admin pki` CLI (user-facing PKI + External CA tier) | 🚧 | (none) | Today helper is [scripts/mint-user-pki.py](../scripts/mint-user-pki.py); promote to subcommand. External CA tier is new scope per the trust-model amendment. ~120 LOC user-PKI + more for External CA |
+| [§25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony) | `mssh-admin pki` CLI (user-PKI ceremony + External CA tier) | 🟡 | (none) | Cert auto-renewal piece landed in v0.1.6 (`mssh-admin cert renew` + systemd template). Still open: promote [scripts/mint-user-pki.py](../scripts/mint-user-pki.py) to a subcommand (~120 LOC) + External CA tier per the trust-model amendment |
 | [§8](future-ideas.md#8-centralized-client-config--mssh-replaces-ssh) | Centralized client config (`~/.mssh/`) v2 | 🟡 | (none, if pull-only) | v1 file layout landed; v2 = msshd-mediated `--sync` writes CA-rendered config. ~200 LOC |
 | [§26](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost) | Admin web portal via mssh-tunneled localhost | 🟡 | mssh `-L` flag (~150 LOC) for the tunnel half | Server side at [mssh.admin.web](../python/packages/mssh-admin/src/mssh/admin/web/); read-only views + mTLS re-issue. Mutating CRUD and the `-L` client flag still open |
-| [§5 remainder](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) | CA mints credentials — ACME + PGP | 🟡 | (none) | X.509 + OpenVPN + WireGuard + CRLDP landed in v0.1.4. Still open: ACME (~2000+ LOC, deserves library-eval pass), PGP (~700 LOC, composes with §27) |
+| [§5 remainder](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) | CA mints credentials — PGP | 🟡 | (none) | X.509 + OpenVPN + WireGuard + CRLDP landed in v0.1.4. ACME was dropped in v0.1.6 (auto-renewal absorbed into §25 `cert renew`). Still open: PGP (~700 LOC, composes with §27) |
 | [§27](future-ideas.md#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory) | `mscp` — PGP-encrypted file transfer via CA-as-directory | 🚧 | (none for v1 BYO keys; §5 PGP backend for v2 CA-minted) | ~560 LOC for v1. CA stores PGP pubkey per user; mscp encrypts/decrypts via local gpg |
 | [§11](future-ideas.md#11-in-situ-debug_sshd-swap-in-for-troubleshooting-sideband-ca-audit) | In-situ debug_sshd swap-in | 🟡 | (none) | Diagnostics affordance; remaining work documented in-section |
 | [§23](future-ideas.md#23-sshd_config-template-unification) | sshd_config template unification | 🟡 | (none) | Equivalence test landed; full unification deferred |
@@ -165,6 +165,26 @@ Passkey ecosystem section at the top of this doc.)
 
 ## Recently landed (since v0.1.0)
 
+- **v0.1.6** — cert auto-renewal + ACME drop (3 commits, ~620 LOC):
+  - **Dropped ACME** from §5 scope. Auto-renewing TLS across the
+    fleet is the only operational goal that justified ACME (~2000
+    LOC of RFC 8555 compliance); it's better served by a tiny
+    mTLS-authenticated `cert renew` endpoint that reuses the
+    existing `cert_minter` helpers.
+  - **CA**: `POST /v1/cert/renew` (NOT under `/v1/admin/` — cert IS
+    the credential, no admin-role bearer). Validates chain + CRL,
+    enforces 30-day renewable window + 7-day past-grace cutoff,
+    preserves CN/SANs/EKU/validity, optional `revoke_predecessor`.
+    Returns 200 with `status='too_early'` when out-of-window.
+  - **Admin CLI**: `mssh-admin cert renew --cert … --key … --out-cert
+    … --out-key … --threshold-days N --revoke-old --on-renew CMD`.
+    Skips silently if local cert is > threshold days from expiry
+    (cheap to run daily on every host). Atomic file writes; key
+    file mode 0600.
+  - **systemd**: `cert-renew@<service>.{service,timer}` template
+    drives daily renewal. `OnCalendar=daily`, `RandomizedDelaySec=30m`
+    so 1000 services don't all hit mssh-ca at 00:00.
+  - 19 new tests (12 CA handler + 7 CLI). 525 total green.
 - **v0.1.5** — passkey ecosystem (11 commits, ~7400 LOC):
   - [`mssh-passkey`](../python/packages/mssh-passkey/) broker module — public-facing WebAuthn ceremony broker (HTTPS for browsers; mTLS for back-end clients). Single SQLite ceremonies table; no key material; relay-only.
   - [admin-2FA flow](admin-2fa.md) — `mssh-admin user passkey {enroll,list,revoke}` + `policy add --require-2fa passkey --2fa-within-seconds N`. Per-admin 2FA cache. `webauthn` PyPI integration. AAGUID allowlist enforcement.
