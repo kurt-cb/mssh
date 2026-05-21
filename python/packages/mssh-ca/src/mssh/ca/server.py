@@ -184,6 +184,8 @@ def create_app(config: CAConfig) -> Flask:
         passkey_pending_registrations=pending_regs,
         passkey_pending_authentications=pending_auths,
         passkey_2fa_cache=cache_2fa,
+        admin_2fa_protected_actions=frozenset(config.admin_2fa_protected_actions),
+        admin_2fa_within_seconds=config.admin_2fa_within_seconds,
     )
 
     app.config['AUTH_CTX'] = auth_ctx

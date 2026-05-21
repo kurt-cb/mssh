@@ -18,7 +18,8 @@ from cryptography.x509 import oid
 from . import cert_minter
 from . import templates as _templates
 from .audit import AuditLog
-from .enrollment import Admin, Enrollment, EnrollmentError, KeyBinding
+from .enrollment import (Admin, Enrollment, EnrollmentError, KeyBinding,
+                          Policy)
 from ..identity import (CertIdentity, IdentityParseError, PubkeyIdentity,
                               parse_identity)
 from .render import TemplateError, validate_template
@@ -129,6 +130,13 @@ class AdminContext:
     passkey_pending_authentications: Any = None # dict[ceremony_id -> dict]
     # Per-admin 2FA cache: admin_name -> last_verified_at_iso
     passkey_2fa_cache: Any = None     # dict[str, str]
+
+    # Admin-2FA gating: set of action names (e.g. 'cert.revoke',
+    # 'admin.add') that require a fresh passkey ceremony — gates
+    # configured by the operator in ca-config.yaml. Empty set = no
+    # gating (default). See design/admin-2fa.md.
+    admin_2fa_protected_actions: frozenset[str] = frozenset()
+    admin_2fa_within_seconds: int = 300
 
 
 def _now_iso() -> str:
@@ -275,6 +283,8 @@ def user_add(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
 
 def user_remove(ctx: AdminContext, admin: Admin, username: str) -> tuple[int, dict]:
     if (err := _check('user.remove', admin)):
+        return err
+    if (err := admin_check_2fa(ctx, admin, 'user.remove')):
         return err
     try:
         ctx.enrollment.remove_user(username)
@@ -431,6 +441,8 @@ def policy_remove(ctx: AdminContext, admin: Admin, policy_id: str) -> tuple[int,
 def admin_add(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
     if (err := _check('admin.add', admin)):
         return err
+    if (err := admin_check_2fa(ctx, admin, 'admin.add')):
+        return err
     name = body.get('name')
     role = body.get('role')
     if not isinstance(name, str) or not name:
@@ -464,6 +476,8 @@ def admin_add(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
 
 def admin_remove(ctx: AdminContext, admin: Admin, name: str) -> tuple[int, dict]:
     if (err := _check('admin.remove', admin)):
+        return err
+    if (err := admin_check_2fa(ctx, admin, 'admin.remove')):
         return err
     try:
         ctx.enrollment.remove_admin(name)
@@ -795,6 +809,8 @@ def cert_revoke(ctx: AdminContext, admin: Admin,
     the missing CRLs and applies them to its authz cache).
     """
     if (err := _check('cert.revoke', admin)):
+        return err
+    if (err := admin_check_2fa(ctx, admin, 'cert.revoke')):
         return err
     if ctx.crl is None:
         return _err(500, 'internal', 'CRL store not configured')
@@ -1742,6 +1758,30 @@ def passkey_check_2fa(ctx: AdminContext, admin: Admin,
                 return None
     # Cache miss → issue a challenge.
     return passkey_admin_challenge(ctx, admin)
+
+
+def admin_check_2fa(ctx: AdminContext, admin: Admin,
+                    action: str) -> tuple[int, dict] | None:
+    """Gate `action` per the CA-config protected-action list.
+
+    Returns the same shape as `passkey_check_2fa`: a (status, body) tuple
+    when 2FA is required (typically 202 with a ceremony URL, or 403/503),
+    or None when the admin may proceed.
+
+    Callers chain this in front of the actual operation after role-check:
+
+        if (err := _check('cert.revoke', admin)): return err
+        if (err := admin_check_2fa(ctx, admin, 'cert.revoke')): return err
+        # ... actual work ...
+    """
+    if action not in ctx.admin_2fa_protected_actions:
+        return None
+    pseudo_policy = Policy(
+        id=f'admin-2fa:{action}',
+        require_2fa='passkey',
+        twofa_within_seconds=ctx.admin_2fa_within_seconds,
+    )
+    return passkey_check_2fa(ctx, admin, pseudo_policy)
 
 
 def passkey_poll_outcome(ctx: AdminContext,

@@ -64,8 +64,8 @@ Design docs:
 | Per-admin 2FA cache (in-memory, TTL) | ✅ | `AdminContext.passkey_2fa_cache`; revoke invalidates |
 | `mssh-admin user passkey {enroll,list,revoke}` CLI | ✅ | Plus `mssh-admin policy add --require-2fa passkey --2fa-within-seconds N` |
 | 2FA enforcement helper (`passkey_check_2fa`) | ✅ | Returns 202 challenge / None / 503 / 403 |
-| **Wire enforcement into protected handlers** (admin.add, user.remove, cert.revoke, …) | 🟡 | Helper exists; needs threading in front of each handler that should be gated. Currently NO handler is actually 2FA-gated end-to-end |
-| **mssh-admin CLI polling loop on 202 Accepted** | 🟡 | `CAClient.passkey_poll` exists. Operator-facing UI (print URL/QR, poll, retry) is the missing piece |
+| **Wire enforcement into protected handlers** (admin.add, user.remove, cert.revoke, …) | ✅ | Per-action gating via `admin_2fa.protected_actions` in ca-config.yaml. Four handlers wired in v0.1.8: admin.add, admin.remove, user.remove, cert.revoke. Operator widens the list to gate more actions. |
+| **mssh-admin CLI polling loop on 202 Accepted** | ✅ | `_handle_2fa_call` in mssh-admin/main.py prints the URL, polls `/v1/admin/passkey/ceremony/<id>`, retries on approval. Used by the 4 gated commands. QR rendering deferred to v1.x. |
 | Audit log entries for register-complete / 2fa-success / failed / rejected | ✅ | All flow → `ctx.audit.write` |
 
 ### External-tool RP flow (mssh-ca challenges users of separate apps)

@@ -508,6 +508,38 @@ matching commands skip the prompt.
 If a policy has `require_2fa: passkey` but ca-config.yaml has no
 `passkey:` block, mssh-ca refuses to start (fail closed).
 
+#### Gating specific admin operations (v0.1.8+)
+
+Policy-driven gating above is the future-direction model. For
+v1, the operative knob is a list in **ca-config.yaml** that names
+admin actions requiring a passkey:
+
+```yaml
+admin_2fa:
+  protected_actions:
+    - admin.add
+    - admin.remove
+    - user.remove
+    - cert.revoke
+  within_seconds: 300    # cache window per admin (default 300)
+```
+
+When an admin invokes a listed action, mssh-ca either accepts (the
+admin's 2FA cache is fresh) or responds **202 Accepted** with a
+ceremony URL. The `mssh-admin` CLI prints the URL, polls the
+ceremony, and retries the original command on approval — one
+seamless flow from the operator's perspective.
+
+Adding an action to this list with no broker configured causes
+those actions to respond **503 Unavailable** until the broker is
+wired. Empty list (the default) = no gating (current
+admin-cert-only model).
+
+Actions currently wired for gating: `admin.add`, `admin.remove`,
+`user.remove`, `cert.revoke`. Other actions in the list are
+parsed but not yet enforced; widening the wiring is a
+straightforward follow-up.
+
 #### What the operator sees
 
 ```

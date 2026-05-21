@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,50 @@ def _handle_call(fn, *args, **kwargs):
     except CAClientError as e:
         click.echo(f'error: HTTP {e.status}: {e.body}', err=True)
         raise SystemExit(1)
+
+
+# Poll interval + total timeout when waiting on a 2FA ceremony. The
+# broker's TTL sweeper is the authoritative deadline; we just need to
+# poll often enough to feel responsive without spamming.
+_PASSKEY_POLL_INTERVAL_SECONDS = 2.0
+_PASSKEY_POLL_TIMEOUT_SECONDS = 180.0
+
+
+def _handle_2fa_call(client, fn, *args, **kwargs):
+    """Like `_handle_call`, but recognises the 2FA challenge protocol.
+
+    Server returns ``{'status': 'pending_2fa', ...}`` when the
+    operation needs a passkey ceremony. We print the URL, poll the
+    ceremony, and on approval retry the original request — the second
+    call hits the 2FA cache and proceeds.
+    """
+    resp = _handle_call(fn, *args, **kwargs)
+    if not isinstance(resp, dict) or resp.get('status') != 'pending_2fa':
+        return resp
+    ceremony_id = resp.get('ceremony_id')
+    url = resp.get('url') or '(no URL)'
+    click.echo(f'2FA required — approve on your phone:\n    {url}',
+               err=True)
+    deadline = time.monotonic() + _PASSKEY_POLL_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(_PASSKEY_POLL_INTERVAL_SECONDS)
+        poll = _handle_call(client.passkey_poll, ceremony_id)
+        if poll.get('status') == 'pending':
+            continue
+        outcome = poll.get('outcome')
+        if outcome == 'approved':
+            click.echo('  ✓ approved — retrying operation', err=True)
+            return _handle_call(fn, *args, **kwargs)
+        if outcome == 'denied':
+            click.echo('error: 2FA denied by user', err=True)
+            raise SystemExit(2)
+        if outcome == 'expired':
+            click.echo('error: 2FA ceremony expired', err=True)
+            raise SystemExit(2)
+        click.echo(f'error: unexpected 2FA outcome: {outcome!r}', err=True)
+        raise SystemExit(2)
+    click.echo('error: 2FA timed out waiting for approval', err=True)
+    raise SystemExit(2)
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +384,7 @@ def user_add(ctx, username, key_path, cert_path):
 @click.pass_context
 def user_remove(ctx, username):
     c = _make_client(ctx)
-    _output(ctx, _handle_call(c.user_remove, username))
+    _output(ctx, _handle_2fa_call(c, c.user_remove, username))
 
 
 @user.command('remove-key')
@@ -513,7 +558,7 @@ def admin():
 @click.pass_context
 def admin_add(ctx, name, role, out_dir):
     c = _make_client(ctx)
-    resp = _handle_call(c.admin_add, name, role)
+    resp = _handle_2fa_call(c, c.admin_add, name, role)
     if out_dir:
         od = Path(out_dir)
         od.mkdir(parents=True, exist_ok=True)
@@ -529,7 +574,7 @@ def admin_add(ctx, name, role, out_dir):
 @click.pass_context
 def admin_remove(ctx, name):
     c = _make_client(ctx)
-    _output(ctx, _handle_call(c.admin_remove, name))
+    _output(ctx, _handle_2fa_call(c, c.admin_remove, name))
 
 
 @admin.command('list')
@@ -1140,7 +1185,7 @@ def cert_revoke_cmd(ctx, serials, reason):
         mssh-admin cert revoke deadbeef abcd1234 --reason 'key rotation'
     """
     c = _make_client(ctx)
-    out = _handle_call(c.cert_revoke, list(serials), reason=reason)
+    out = _handle_2fa_call(c, c.cert_revoke, list(serials), reason=reason)
     click.echo(f'revoked seq={out["seq"]} serials={out["serials"]}',
                err=True)
     _output(ctx, out)

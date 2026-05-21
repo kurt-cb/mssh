@@ -65,6 +65,15 @@ class CAConfig:
     passkey_expected_origin: str = ''  # https://<rp_id>
     passkey_aaguid_allowlist_path: str = ''
 
+    # Admin-2FA gating. Listed admin actions (e.g. 'cert.revoke',
+    # 'admin.add') require the calling admin to satisfy a passkey
+    # ceremony before the operation proceeds. Empty list (default) =
+    # nothing gated — current behavior. Requires the passkey broker
+    # to be configured; if listed when the broker is unset, requests
+    # to gated actions respond 503. See design/admin-2fa.md.
+    admin_2fa_protected_actions: list[str] = field(default_factory=list)
+    admin_2fa_within_seconds: int = 300
+
     @classmethod
     def load(cls, path: str | Path) -> 'CAConfig':
         with Path(path).open() as f:
@@ -115,5 +124,9 @@ class CAConfig:
                 (data.get('passkey') or {}).get('expected_origin') or ''),
             passkey_aaguid_allowlist_path=str(
                 (data.get('passkey') or {}).get('aaguid_allowlist_path') or ''),
+            admin_2fa_protected_actions=list(
+                (data.get('admin_2fa') or {}).get('protected_actions') or []),
+            admin_2fa_within_seconds=int(
+                (data.get('admin_2fa') or {}).get('within_seconds') or 300),
         )
         return c
