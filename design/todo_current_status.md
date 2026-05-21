@@ -1,8 +1,8 @@
 # mssh — todo status (quick reference)
 
-Snapshot of open work after v0.1.1 tag. Regenerate by re-scanning
+Snapshot of open work after v0.1.5 tag. Regenerate by re-scanning
 `design/future-ideas.md`, `design/openbugs/`, and in-code `TODO`
-markers. Last updated: 2026-05-20 (post-trust-model docs).
+markers. Last updated: 2026-05-21 (post-passkey ecosystem).
 
 For full context on any row, follow the link to its
 `design/future-ideas.md` section.
@@ -20,34 +20,67 @@ Status icons used throughout this doc, matching
 None. All historical bugs in [archive/closedbugs/](../archive/closedbugs/)
 (12 files, including 5 closed by v0.1.1's §21 typed framing).
 
-## mssh-passkey module (separate deployment target)
+---
 
-A **new module, not part of mssh or mssh-ca.** Public-facing
-WebAuthn relying party + transaction broker. mssh-ca consumes it
-via mTLS for 2FA on high-privilege operations; future consumers
-(§26 admin portal, kiosk login, internal apps) can share it.
+## Passkey ecosystem — v0.1.5 state
 
-Architectural decision in
-[passkey-design-document.md](passkey-design-document.md)
-(Option 2 — browser-native WebAuthn). Operator-facing CA-side
-consumer integration in
-[ca-integration.md § mssh-passkey integration](ca-integration.md#mssh-passkey-integration-for-2fa-on-ca-operations-).
+Three pieces, two flows. The broker module is its own deployment
+target; mssh-ca consumes it for both the admin-2FA flow (mssh-ca
+challenges its own admins) and the external-tool RP flow (mssh-ca
+acts as a WebAuthn RP for separate apps).
+
+Design docs:
+
+  - [mssh-passkey-module.md](mssh-passkey-module.md) — broker internals
+  - [admin-2fa.md](admin-2fa.md) — admin-2FA flow design
+  - [ca-integration.md § Passkey RP service for external tools](ca-integration.md#passkey-rp-service-for-external-tools-) — external-tool flow design
+  - [docs/operations.md § Require passkey 2FA](../docs/operations.md#require-passkey-2fa-for-high-privilege-admin-operations-) — operator playbook
+  - [passkey-design-document.md](passkey-design-document.md) — original 4-option evaluation
+
+### mssh-passkey broker module
 
 | Piece | Status | Notes |
 |---|---|---|
-| mssh-passkey HTTP service skeleton | 🚧 | New Python package, separate from mssh/mssh-ca. HTTPS-only, WebAuthn library (`webauthn` PyPI), small DB for users + credentials + transactions. |
-| Registration contract (mssh-ca → broker → user) | 🚧 | Open — proposed shape in ca-integration.md. AAGUID allowlist enforcement + multi-device + recovery flows all need to be pinned down. |
-| Public broker API (transaction push + callback) | 🚧 | Open — proposed shape in ca-integration.md. Push vs poll for the outcome, replay defense, denied/expired surfacing, audit-across-services all to be solidified. |
-| mTLS contract: mssh-ca ↔ mssh-passkey | 🚧 | Full cert validation both ways. Operator-managed trust hierarchy for both directions. Cert distribution at deploy time. |
-| WebAuthn RP implementation | 🚧 | Challenge generation + attestation verification + assertion verification + counter tracking. AAGUID allowlist applied at registration per [browser.md](browser.md#webauthn-with-hardware-only-authenticators--the-cleaner-path). |
-| Browser UI for registration + approval | 🚧 | Minimal HTML pages: registration ceremony (`navigator.credentials.create()`), approval ceremony (display transaction description + `navigator.credentials.get()`). |
-| mssh-ca client integration | 🚧 | Config block in `ca-config.yaml`; CLI: `mssh-admin user passkey enroll / list / revoke`; policy DSL: `--require-2fa passkey`. |
-| Layered (Option 4) upgrade path | 🚧 | Optional — adds an encrypted vault layer for high-security applications. Reserved per [passkey-design-document.md](passkey-design-document.md). |
+| Storage (SQLite ceremonies table) | ✅ | Single table; broker holds no keys + no per-user state |
+| Flask app + dual-listener (apache / dev) | ✅ | `front_end: apache` for prod (TLS at apache2); `front_end: dev` for in-process TLS in the lab |
+| Broker API (`POST/GET/DELETE /broker/ceremony[/<id>]`) | ✅ | mTLS-gated via `X-Client-CN` header |
+| Public browser pages (`/register/<id>`, `/approve/<id>`) | ✅ | Bootstrap 5 + vanilla JS WebAuthn driver |
+| Callback delivery worker | ✅ | Exponential retry: immediate, +5s, +30s, +2m, +10m |
+| TTL expiry sweeper | ✅ | 30s tick; marks expired ceremonies + schedules callback |
+| Adhoc-lab container provisioning | ✅ | `scripts/setup-adhoc-passkey.sh` mints lab PKI, installs, starts the broker |
+| Apache2 reverse-proxy production deployment | 🚧 | Config sketch in `mssh-passkey-module.md § 8`; not lab-tested |
+| Hardening v2 — defenses against compromised broker | 🚧 | Injection / DoS / bogus-callback handling on the mssh-ca callback receiver; **2FA fail-state** mode. Section in `mssh-passkey-module.md`; nothing implemented yet |
+| Real-phone smoke test in adhoc lab | 🚧 | Helper script runs; operator hasn't tapped a real authenticator against the lab broker yet |
 
-The whole thing lives in a separate repo / package, not in
-python/packages/. Deployment is independent; mssh-ca operators can
-opt in to passkey 2FA per policy without changing anything about
-mssh-ca itself if they're not using it.
+### mssh-admin 2FA flow (challenging mssh-ca's own admins)
+
+| Piece | Status | Notes |
+|---|---|---|
+| Enrollment schema (PasskeyCredential under Admin records) | ✅ | `enrollment.py` |
+| WebAuthn RP wrappers (`webauthn` PyPI lib integration) | ✅ | `passkey.py` — register/auth options + verification + AAGUID allowlist |
+| PasskeyBrokerClient (mTLS HTTPS client) | ✅ | `passkey_broker.py` |
+| Admin handlers: enroll-begin / list / revoke / callback / poll | ✅ | `admin.py` |
+| Policy DSL: `require_2fa: passkey` + `twofa_within_seconds` | ✅ | Validated at policy-add time; refuses unknown values |
+| Per-admin 2FA cache (in-memory, TTL) | ✅ | `AdminContext.passkey_2fa_cache`; revoke invalidates |
+| `mssh-admin user passkey {enroll,list,revoke}` CLI | ✅ | Plus `mssh-admin policy add --require-2fa passkey --2fa-within-seconds N` |
+| 2FA enforcement helper (`passkey_check_2fa`) | ✅ | Returns 202 challenge / None / 503 / 403 |
+| **Wire enforcement into protected handlers** (admin.add, user.remove, cert.revoke, …) | 🟡 | Helper exists; needs threading in front of each handler that should be gated. Currently NO handler is actually 2FA-gated end-to-end |
+| **mssh-admin CLI polling loop on 202 Accepted** | 🟡 | `CAClient.passkey_poll` exists. Operator-facing UI (print URL/QR, poll, retry) is the missing piece |
+| Audit log entries for register-complete / 2fa-success / failed / rejected | ✅ | All flow → `ctx.audit.write` |
+
+### External-tool RP flow (mssh-ca challenges users of separate apps)
+
+| Piece | Status | Notes |
+|---|---|---|
+| ExternalTool enrollment schema | ✅ | Per-tool `user_credentials` namespace |
+| Tool CRUD: `mssh-admin external-tool {add,list,remove}` | ✅ | `add` mints mTLS cert tool presents to `/v1/external/passkey/*` |
+| Tool-mTLS endpoints: enroll-begin / challenge / ceremony / revoke | ✅ | `/v1/external/passkey/*` — CN-gated to enrolled tools |
+| `outcome_url_prefix` enforcement | ✅ | Prevents compromised tool cert from delivering outcomes to arbitrary URLs |
+| Cross-tool isolation | ✅ | Tool A cannot poll Tool B's ceremonies |
+| Two-hop callback delivery (broker → ca → tool) | ✅ | `_maybe_post_external_outcome` with reuse of broker mTLS material |
+| Per-tool AAGUID allowlist (override CA-global) | 🚧 | v1 inherits CA-global; per-tool override is v2 |
+| Per-tool rate limits | 🚧 | Config flag at `external-tool add` time; v1 has no rate limiting |
+| Tool cert rotation runbook | 🚧 | Same shape as admin cert rotation; needs explicit operator doc |
 
 ---
 
@@ -61,20 +94,19 @@ explicitly not the production end-state.
 
 | Phase | Title | Status | Notes |
 |---|---|---|---|
-| [Commit 1](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Foundation: `Intermediate` dataclass + helpers | ✅ | Landed pre-v0.1.1. `cert_minter._self_signed_root`, `_issue_intermediate`, `compute_pubkey_fp16`, `load_intermediates`. `path_length=0` baked into the 4 internal intermediates. |
-| [Commit 2](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | `bootstrap_ca` refactor: Root + 4 intermediates on disk | 🚧 | Write the new ca_dir/intermediates/{user-mint,host-mint,auth,bypass-mint}/ layout. Keep legacy alias files as symlinks during the transition. |
-| [Commit 3](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Per-issuer CRL | 🚧 | `CRLStore` → `CRLRegistry` of per-issuer stores. `/v1/crl?issuer=X`. Authorize response carries `current_crl_seqs` map (one entry per intermediate). |
-| [Commit 4](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | msshd chain validation + per-issuer cache state | 🚧 | msshd loads Root + intermediates; `_handle_bypass_injection` validates chain to the pinned intermediate, not Root. `AuthzCache.last_crl_seqs: dict[str, int]`. |
-| [Commit 4b](security.md#chain-of-trust-v2-multi-intermediate-model) | **Validation pins to intermediate, not Root** (load-bearing rule) | 🚧 | Wire each validator's trust store to the SPECIFIC intermediate cert: msshd user-mTLS → `auth`, msshd authz → `user-mint`, mssh → `host-mint`, etc. Without this, §5 leaves can impersonate users. |
-| [Commit 5](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | `mssh-admin intermediate ...` CLI | 🚧 | `intermediate list / rotate <role>`; `cert revoke --issuer <id\|name>`. |
-| [Commit 5b](notes-pki-hierarchy.md#amendment-2026-05-20-validation-rule--external-intermediate-ca) | **External Intermediate CA tier** (per §25) | 🚧 | `mssh-admin pki external mint --name <entity> --path-length N`. Root signs; mssh trust stores actively EXCLUDE it. Revoke via CRL on the external-X cert itself. |
-| [Commit 6](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Backfill tests for prior commits | 🚧 | Unit tests for chain validation, strict-mode gate, prefetched-header tests. |
-| [Commit 7](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Doc consolidation | 🚧 | Fold CLAUDE.md amendments into security.md / architecture.md / api.md; docs/operations.md gets the rotation procedure. |
-| (separate) | Root key offline / HSM | 🚧 | Today Root sits on disk. Production wants it in an HSM or on an offline machine. Plumbing is v3+ per notes. |
+| [Commit 1](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Foundation: `Intermediate` dataclass + helpers | ✅ | Landed pre-v0.1.1 |
+| [Commit 2](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | `bootstrap_ca` refactor: Root + 4 intermediates on disk | 🚧 | New ca_dir/intermediates/{user-mint,host-mint,auth,bypass-mint}/ layout |
+| [Commit 3](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Per-issuer CRL | 🚧 | `CRLStore` → `CRLRegistry`; `/v1/crl?issuer=X` |
+| [Commit 4](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | msshd chain validation + per-issuer cache state | 🚧 | msshd loads Root + intermediates; `last_crl_seqs: dict[str, int]` |
+| [Commit 4b](security.md#chain-of-trust-v2-multi-intermediate-model) | **Validation pins to intermediate, not Root** (load-bearing rule) | 🚧 | Each validator's trust store contains the SPECIFIC intermediate cert. Without this, §5 leaves can impersonate users. |
+| [Commit 5](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | `mssh-admin intermediate ...` CLI | 🚧 | `intermediate list / rotate <role>`; `cert revoke --issuer <id\|name>` |
+| [Commit 5b](notes-pki-hierarchy.md#amendment-2026-05-20-validation-rule--external-intermediate-ca) | **External Intermediate CA tier** (per §25) | 🚧 | Root signs; mssh trust stores actively EXCLUDE it |
+| [Commit 6](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Backfill tests | 🚧 | Chain validation, strict-mode gate, prefetched-header tests |
+| [Commit 7](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Doc consolidation | 🚧 | CLAUDE.md amendments → security.md / architecture.md / api.md |
+| (separate) | Root key offline / HSM | 🚧 | Production wants HSM or offline machine. v3+ |
 
 The full v2 hierarchy is ~1500–2000 LOC across CA + msshd + admin
-+ tests. Phasing keeps tests green at each commit boundary; see
-notes-pki-hierarchy.md "Why we're shipping this in phases".
++ tests. Phasing keeps tests green at each commit boundary.
 
 ---
 
@@ -82,8 +114,8 @@ notes-pki-hierarchy.md "Why we're shipping this in phases".
 
 | ID | Title | Status | Depends on | Notes |
 |---|---|---|---|---|
-| [§24](future-ideas.md#24-multi-server-group-lab-coverage) | Multi-server group lab coverage | 🚧 | [pyinfra-adhoc Phase A](../python/tests/pyinfra-adhoc/adhoc-pyinfra-transition.md) | Becomes a 2-row matrix.py edit + policy assertions once Phase A lands |
-| [§25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony) | `mssh-admin pki` CLI (user-facing PKI + External CA tier) | 🚧 | (none) | Today the helper is [scripts/mint-user-pki.py](../scripts/mint-user-pki.py); promote to subcommand. External CA tier is a NEW scope per the 2026-05-20 trust-model amendment. ~120 LOC user-PKI + more for External CA |
+| [§24](future-ideas.md#24-multi-server-group-lab-coverage) | Multi-server group lab coverage | 🚧 | [pyinfra-adhoc Phase A](../python/tests/pyinfra-adhoc/adhoc-pyinfra-transition.md) | 2-row matrix.py edit + policy assertions once Phase A lands |
+| [§25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony) | `mssh-admin pki` CLI (user-facing PKI + External CA tier) | 🚧 | (none) | Today helper is [scripts/mint-user-pki.py](../scripts/mint-user-pki.py); promote to subcommand. External CA tier is new scope per the trust-model amendment. ~120 LOC user-PKI + more for External CA |
 | [§8](future-ideas.md#8-centralized-client-config--mssh-replaces-ssh) | Centralized client config (`~/.mssh/`) v2 | 🟡 | (none, if pull-only) | v1 file layout landed; v2 = msshd-mediated `--sync` writes CA-rendered config. ~200 LOC |
 | [§26](future-ideas.md#26-admin-web-portal-via-mssh-tunneled-localhost) | Admin web portal via mssh-tunneled localhost | 🟡 | mssh `-L` flag (~150 LOC) for the tunnel half | Server side at [mssh.admin.web](../python/packages/mssh-admin/src/mssh/admin/web/); read-only views + mTLS re-issue. Mutating CRUD and the `-L` client flag still open |
 | [§5 remainder](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) | CA mints credentials — ACME + PGP | 🟡 | (none) | X.509 + OpenVPN + WireGuard + CRLDP landed in v0.1.4. Still open: ACME (~2000+ LOC, deserves library-eval pass), PGP (~700 LOC, composes with §27) |
@@ -97,8 +129,10 @@ notes-pki-hierarchy.md "Why we're shipping this in phases".
 |---|---|---|---|
 | [§22](future-ideas.md#22-push-channel-for-revocation--live-session-kill) | Push channel for revocation + live-session kill | 🚧 | Design pending |
 | [§13](future-ideas.md#13-legacy-config-migration-with-dual-enforce--shadow-mode) | Legacy-config migration / dual-enforce / shadow mode | 🚧 | Composes with §20 |
-| [§6 2FA + mssh-passkey integration](ca-integration.md#mssh-passkey-integration-for-2fa-on-ca-operations-) | 2FA for high-privilege CA operations via separate mssh-passkey broker | 🚧 | Architecture chosen ([passkey-design-document.md](passkey-design-document.md) Option 2); CA-side consumer integration designed in [ca-integration.md](ca-integration.md#mssh-passkey-integration-for-2fa-on-ca-operations-). Two API contracts (registration + public broker) still open. **mssh-passkey module itself is a separate work item — see top of this doc.** TOTP / push factors still unspecified. |
 | [§4](future-ideas.md#4-wrapper-supports-protocols-beyond-ssh--https--tcp-proxy) | Protocols beyond SSH (HTTPS/TCP proxy) | 🚧 | Needs analysis |
+
+(§6 + §7 2FA / WebAuthn — **mostly landed in v0.1.5**. See the
+Passkey ecosystem section at the top of this doc.)
 
 ## Future-ideas — substantial / deferred
 
@@ -108,15 +142,13 @@ notes-pki-hierarchy.md "Why we're shipping this in phases".
 | [pyinfra-adhoc Phase A](../python/tests/pyinfra-adhoc/adhoc-pyinfra-transition.md) | Matrix-driven cross-distro spinup | 🚧 | Prereq for §20 and §24. Unblocks both |
 | [§19](future-ideas.md#19-bash-auto-completion-scripts-for-mssh-commands) | Bash auto-completion | 🚧 | Defer until v1 release |
 | [§16](future-ideas.md#16-distro-packaging-path-deb--rpm--apk) | Distro packaging (`.deb` / `.rpm` / `.apk`) | 🚧 | Roadmap item |
+| Full integration of mssh-passkey into the test_setup_only_msshd.py journey | 🚧 | Currently `scripts/setup-adhoc-passkey.sh` is a separate provisioning helper. Folding into the standard journey gives 6-container labs that include the broker from setup_adhoc.sh's first run |
 
 ## Future-ideas — capture-only (no commitment yet)
 
 🚧 [§2](future-ideas.md#2-smart-card-piv--pkcs11-support) PIV/PKCS#11 ·
 🚧 [§10](future-ideas.md#10-browser-based-ssh-terminal-xtermjs-over-https-mtls-authenticated) Browser SSH terminal ·
 🚧 [§18](future-ideas.md#18-self-service-why-was-i-denied-report) "Why was I denied?" self-service
-
-(§7 WebAuthn moved to "pending design" — now consolidated with §6 in
-[ca-integration.md § Passkey / WebAuthn at the CA](ca-integration.md#passkey--webauthn-at-the-ca-).)
 
 ## In-code TODOs
 
@@ -133,13 +165,16 @@ notes-pki-hierarchy.md "Why we're shipping this in phases".
 
 ## Recently landed (since v0.1.0)
 
-- [§5 WireGuard + CRLDP](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) — `mssh-admin wireguard server-init / issue / server-show / revoke`; Curve25519 keypair generation, sequential IP allocation, wg-quick config emission, persistent JSON catalog. CRL Distribution Point embedded in issued X.509 leaves; new `GET /v1/crl.pem` endpoint signs the JSON CRL log as a real X.509 CRL.
-- [§5 X.509 family](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) — `mssh-admin cert mint --type {tls-server, https-user, code-sign}` and `mssh-admin openvpn issue` first-class commands; new `/v1/admin/cert/mint` + `/v1/admin/openvpn/issue` endpoints; `.p12` packaging built into CLI for HTTPS user, `.ovpn` bundle assembly for OpenVPN
-- [§26 server-side portal v1](../python/packages/mssh-admin/src/mssh/admin/web/) — Flask + Bootstrap5 admin portal with sortable/expandable users/groups/hosts/audit views + mTLS re-issue per server. Console script `msshd-admin-web`. Client-side `-L` flag still open
-- [§21](future-ideas.md#21-protocol-v11--typed-framing-for-the-post-ack-stream) typed framing protocol — closed bugs #1, #2, #3, #4, #11
-- [§17](future-ideas.md#17-per-session-banner-with-variable-substitution) banner v1 + BANNER-frame delivery to mssh client (stretch per-session `{user}` substitution noted in-section but not blocking)
-- [bug #6](../archive/closedbugs/bug-06-no-connect-timeout.md) — 5s connect timeout in mssh client
-- [bug #7](../archive/closedbugs/bug-07-docs-cli-drift.md) — docs/CLI alignment
-- [TUTORIAL_USER_MANAGEMENT.md](../docs/TUTORIAL_USER_MANAGEMENT.md) + [TUTORIAL_MIGRATION.md](../docs/TUTORIAL_MIGRATION.md) end-to-end verified
+- **v0.1.5** — passkey ecosystem (11 commits, ~7400 LOC):
+  - [`mssh-passkey`](../python/packages/mssh-passkey/) broker module — public-facing WebAuthn ceremony broker (HTTPS for browsers; mTLS for back-end clients). Single SQLite ceremonies table; no key material; relay-only.
+  - [admin-2FA flow](admin-2fa.md) — `mssh-admin user passkey {enroll,list,revoke}` + `policy add --require-2fa passkey --2fa-within-seconds N`. Per-admin 2FA cache. `webauthn` PyPI integration. AAGUID allowlist enforcement.
+  - [External-tool RP service](ca-integration.md#passkey-rp-service-for-external-tools-) — `mssh-admin external-tool {add,list,remove}` + `/v1/external/passkey/*` tool-mTLS endpoints. Two-hop callback (broker → CA → tool). Cross-tool isolation. outcome_url_prefix enforcement.
+  - [`scripts/setup-adhoc-passkey.sh`](../scripts/setup-adhoc-passkey.sh) — provisions a passkey LXC container alongside a running lab; mints lab PKI; starts the broker.
+  - 59 new tests (storage, broker API, admin handlers, external-tool flow). 506 total green.
+- **v0.1.4** — §5 X.509 family + WireGuard + CRLDP — `mssh-admin {cert mint, openvpn issue, wireguard ...}`; X.509 CRL endpoint
+- **v0.1.3** — admin web portal `msshd-admin-web` (Flask + Bootstrap5; read-only views + mTLS re-issue)
+- **v0.1.1** — §21 typed framing protocol + §17 banner delivery + bugs #1-#11 closed
+- **v0.1.0** — 5-package wheel layout
 - [scripts/mint-user-pki.py](../scripts/mint-user-pki.py) helper for the user-facing PKI hierarchy
+- [TUTORIAL_USER_MANAGEMENT.md](../docs/TUTORIAL_USER_MANAGEMENT.md) + [TUTORIAL_MIGRATION.md](../docs/TUTORIAL_MIGRATION.md) end-to-end verified
 - [pyinfra-adhoc/](../python/tests/pyinfra-adhoc/) native-pyinfra inventory (precondition for §20 / §24)
