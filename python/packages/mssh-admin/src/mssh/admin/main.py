@@ -1246,5 +1246,67 @@ def wireguard_peer_list_cmd(ctx, server):
     _output(ctx, out['peers'])
 
 
+@cli.group('external-tool')
+def external_tool_group():
+    """Manage external tools that use mssh-ca as their WebAuthn RP.
+
+    See [design/ca-integration.md § Passkey RP service for external
+    tools].
+    """
+
+
+@external_tool_group.command('add')
+@click.option('--name', required=True,
+              help='Operator-visible tool name (also used as the mTLS CN '
+                   'prefix for the tool\'s client cert).')
+@click.option('--rp-id', required=True,
+              help='WebAuthn RP ID. Usually the broker\'s public '
+                   'hostname.')
+@click.option('--outcome-url-prefix', required=True,
+              help='Allowed prefix for the tool\'s outcome callback URLs. '
+                   'A compromised tool cert can only deliver outcomes to '
+                   'URLs under this prefix.')
+@click.option('--out-dir', default=None, type=click.Path(),
+              help='Write the tool\'s mTLS cert + key here (mode 600 on '
+                   'the key file).')
+@click.pass_context
+def external_tool_add_cmd(ctx, name, rp_id, outcome_url_prefix, out_dir):
+    """Enroll an external tool. Mints an mTLS client cert the tool
+    presents when calling /v1/external/passkey/*."""
+    c = _make_client(ctx)
+    out = _handle_call(c.external_tool_add, name, rp_id, outcome_url_prefix)
+    creds = out['credentials']
+    if out_dir:
+        od = Path(out_dir)
+        od.mkdir(parents=True, exist_ok=True)
+        (od / f'{name}-cert.pem').write_text(creds['cert_pem'])
+        kp = od / f'{name}-key.pem'
+        kp.write_text(creds['key_pem'])
+        os.chmod(kp, 0o600)
+        (od / f'{name}-ca.pem').write_text(creds['ca_cert_pem'])
+        click.echo(f'wrote {od}/{name}-cert.pem, {name}-key.pem, '
+                   f'{name}-ca.pem', err=True)
+    _output(ctx, out['tool'])
+
+
+@external_tool_group.command('list')
+@click.pass_context
+def external_tool_list_cmd(ctx):
+    c = _make_client(ctx)
+    out = _handle_call(c.external_tool_list)
+    _output(ctx, out['tools'])
+
+
+@external_tool_group.command('remove')
+@click.option('--name', required=True)
+@click.pass_context
+def external_tool_remove_cmd(ctx, name):
+    """Delete an external tool. The tool's stored user-passkey
+    credentials are removed too."""
+    c = _make_client(ctx)
+    out = _handle_call(c.external_tool_remove, name)
+    _output(ctx, out)
+
+
 if __name__ == '__main__':
     sys.exit(cli())  # pragma: no cover

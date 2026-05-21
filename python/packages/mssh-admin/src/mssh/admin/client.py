@@ -280,6 +280,20 @@ class CAClient:
     def passkey_poll(self, ceremony_id: str) -> dict[str, Any]:
         return self._request('GET', f'/v1/admin/passkey/ceremony/{ceremony_id}')
 
+    # ---- external-tool admin (RP-service flow) ----
+    def external_tool_add(self, name: str, rp_id: str,
+                            outcome_url_prefix: str) -> dict[str, Any]:
+        return self._request('POST', '/v1/admin/external-tool/add', json={
+            'name': name, 'rp_id': rp_id,
+            'outcome_url_prefix': outcome_url_prefix,
+        })
+
+    def external_tool_remove(self, name: str) -> dict[str, Any]:
+        return self._request('DELETE', f'/v1/admin/external-tool/{name}')
+
+    def external_tool_list(self) -> dict[str, Any]:
+        return self._request('GET', '/v1/admin/external-tool/list')
+
     # ---- CRL ----
     def cert_revoke(self, serials: list[str], *,
                     reason: str = '') -> dict[str, Any]:

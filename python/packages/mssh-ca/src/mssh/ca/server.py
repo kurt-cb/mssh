@@ -510,6 +510,81 @@ def register_routes(app: Flask) -> None:
             app.config['ADMIN_CTX'], ceremony_id)
         return jsonify(payload), status
 
+    # ---- external-tool CRUD (admin-mTLS) ----
+    @app.post('/v1/admin/external-tool/add')
+    def _external_tool_add():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.external_tool_add(
+            app.config['ADMIN_CTX'], adm, body)
+        return jsonify(payload), status
+
+    @app.delete('/v1/admin/external-tool/<name>')
+    def _external_tool_remove(name):
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        status, payload = admin_handlers.external_tool_remove(
+            app.config['ADMIN_CTX'], adm, name)
+        return jsonify(payload), status
+
+    @app.get('/v1/admin/external-tool/list')
+    def _external_tool_list():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        status, payload = admin_handlers.external_tool_list(
+            app.config['ADMIN_CTX'], adm)
+        return jsonify(payload), status
+
+    # ---- external-tool passkey endpoints (tool-mTLS) ----
+    # These authenticate the calling TOOL's mTLS subject, not an
+    # admin role. The Flask layer pulls subject from g.client_subject
+    # the same way admin endpoints do.
+    @app.post('/v1/external/passkey/enroll-begin')
+    def _ext_enroll_begin():
+        subj = g.client_subject
+        if not subj:
+            return jsonify({'status': 'error', 'reason': 'unauthorized',
+                            'detail': 'no mTLS client cert'}), 401
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.external_tool_passkey_enroll_begin(
+            app.config['ADMIN_CTX'], subj, body)
+        return jsonify(payload), status
+
+    @app.post('/v1/external/passkey/challenge')
+    def _ext_challenge():
+        subj = g.client_subject
+        if not subj:
+            return jsonify({'status': 'error', 'reason': 'unauthorized',
+                            'detail': 'no mTLS client cert'}), 401
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.external_tool_passkey_challenge(
+            app.config['ADMIN_CTX'], subj, body)
+        return jsonify(payload), status
+
+    @app.get('/v1/external/passkey/ceremony/<ceremony_id>')
+    def _ext_status(ceremony_id):
+        subj = g.client_subject
+        if not subj:
+            return jsonify({'status': 'error', 'reason': 'unauthorized',
+                            'detail': 'no mTLS client cert'}), 401
+        status, payload = admin_handlers.external_tool_passkey_status(
+            app.config['ADMIN_CTX'], subj, ceremony_id)
+        return jsonify(payload), status
+
+    @app.delete('/v1/external/passkey/credential/<user_id>/<path:credential_id>')
+    def _ext_revoke(user_id, credential_id):
+        subj = g.client_subject
+        if not subj:
+            return jsonify({'status': 'error', 'reason': 'unauthorized',
+                            'detail': 'no mTLS client cert'}), 401
+        status, payload = admin_handlers.external_tool_passkey_revoke(
+            app.config['ADMIN_CTX'], subj, user_id, credential_id)
+        return jsonify(payload), status
+
     # ---- §5 WireGuard catalog ----
     @app.post('/v1/admin/wireguard/server')
     def _wg_server_init():
