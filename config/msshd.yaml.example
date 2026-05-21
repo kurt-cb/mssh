@@ -44,6 +44,14 @@ ca:
   client_key:  /etc/mssh/msshd-mtls.key
   ca_pubkey:   /etc/mssh/server-mtls-ca.pub
   timeout_seconds: 5
+  # Authorization-signing trust root. Used to verify CA-bypass certs
+  # presented inline by `mssh --inject-bypass-cert`. Without this,
+  # bypass-cert injection refuses (fail-closed) because the marker
+  # alone is not authenticity proof. This file is the CA's
+  # signing-cert.pem; copy it from the CA host during enrollment.
+  # Distinct from `ca_pubkey` above, which trusts mssh-ca's mTLS
+  # server identity (different hierarchy — see CLAUDE.md).
+  auth_trust_root: /etc/mssh/auth-signing-ca.pem
   # Operator emergency-cert path. Only consumed by the legacy shim
   # path (akc_shim). msshd's break-glass story is "CA-bypass cert
   # presented by the operator at session time" — see design/security.md.

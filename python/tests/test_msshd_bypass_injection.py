@@ -39,12 +39,36 @@ from mssh.msshd.enforce_listener import EnforceListener
 # ---------------------------------------------------------------------------
 
 
-def _make_listener(cache: AuthzCache) -> EnforceListener:
+# Module-level signing pair: same key signs all bypass certs in the
+# module, and its pubkey is what the test listener trusts. Lets
+# existing tests (minting + injecting) still pass through the new
+# chain-to-trust-root check. Lazily initialized so importing this
+# module doesn't generate a keypair eagerly.
+_TEST_SIGNER = None
+
+
+def _test_signer():
+    global _TEST_SIGNER
+    if _TEST_SIGNER is None:
+        sk = cert_minter.generate_signing_key('ed25519')
+        sc = cert_minter._self_signed('test-signer', sk)
+        _TEST_SIGNER = (sk, sc)
+    return _TEST_SIGNER
+
+
+def _make_listener(cache: AuthzCache, *,
+                   auth_trust_root_pubkey=None,
+                   default_trust_root: bool = True) -> EnforceListener:
     """A real EnforceListener instance with everything except the
     authz cache stubbed out. _handle_bypass_injection only touches
-    self.authz_cache, so the rest is harmlessly None."""
-    # We need to construct without calling __init__ (which requires
-    # config + ssl context + etc.). Use object.__new__ to bypass.
+    self.authz_cache + self._auth_trust_root_pubkey, so the rest is
+    harmlessly None.
+
+    By default loads the module-level test signer's pubkey so the new
+    chain-to-trust-root check passes. Pass an explicit pubkey to test
+    wrong-trust-root, or default_trust_root=False to test the
+    not-configured failure mode.
+    """
     listener = object.__new__(EnforceListener)
     listener.authz_cache = cache
     listener.cfg = None
@@ -57,6 +81,13 @@ def _make_listener(cache: AuthzCache) -> EnforceListener:
     listener.inner_sshd_version = ''
     listener.msshd_version = '0.1.0'
     listener.protocol_version = '1.1'
+    if auth_trust_root_pubkey is not None:
+        listener._auth_trust_root_pubkey = auth_trust_root_pubkey
+    elif default_trust_root:
+        _, sc = _test_signer()
+        listener._auth_trust_root_pubkey = sc.public_key()
+    else:
+        listener._auth_trust_root_pubkey = None
     return listener
 
 
@@ -64,16 +95,21 @@ def _mint_bypass_cert(test_key, *, principal: str = 'alice',
                      valid_for: _dt.timedelta = _dt.timedelta(days=30),
                      ca_bypass: bool = True,
                      starts_in: _dt.timedelta = _dt.timedelta(0),
-                     ca_dir: Path | None = None) -> bytes:
+                     ca_dir: Path | None = None,
+                     fresh_signer: bool = False) -> bytes:
     """Mint a bypass-style authz cert. Returns base64 DER (wire form).
     If ``ca_dir`` is given, uses the signing key from that bootstrapped
-    CA; otherwise generates a fresh signer."""
+    CA; if ``fresh_signer`` is True, generates a one-off signer (for
+    wrong-trust-root tests); otherwise uses the module-level signer
+    that the default test listener trusts."""
     if ca_dir is not None:
         signing_key = cert_minter.load_private_key(ca_dir / 'signing-key.pem')
         signing_cert = cert_minter.load_certificate(ca_dir / 'signing-cert.pem')
-    else:
+    elif fresh_signer:
         signing_key = cert_minter.generate_signing_key('ed25519')
-        signing_cert = cert_minter._self_signed('test-signer', signing_key)
+        signing_cert = cert_minter._self_signed('rogue-signer', signing_key)
+    else:
+        signing_key, signing_cert = _test_signer()
 
     now = _dt.datetime.now(_dt.timezone.utc)
     not_before = now + starts_in
@@ -251,3 +287,100 @@ async def test_bypass_injection_overwrites_existing_ca_entry(test_key):
     entry = cache.get('alice')
     assert entry.source == SOURCE_BYPASS
     assert entry.grant.serial != 'old-ca-serial'    # replaced
+
+
+# ---------------------------------------------------------------------------
+# Chain-to-trust-root verification (v0.2.0+)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bypass_injection_refused_when_trust_root_unset(test_key):
+    """ca.auth_trust_root unset → bypass injection fail-closes.
+    Without a trust root, marker-only validation would let any forged
+    cert in."""
+    cache = AuthzCache()
+    listener = _make_listener(cache, default_trust_root=False)
+    cert_b64 = _mint_bypass_cert(test_key, principal='alice')
+
+    ok, reason = await listener._handle_bypass_injection(
+        conn_id='t', mtls_principal='alice', peer_der=b'',
+        bypass_cert_b64=cert_b64)
+    assert ok is False
+    assert reason == 'bypass_trust_root_not_configured'
+    assert cache.get('alice') is None
+
+
+@pytest.mark.asyncio
+async def test_bypass_injection_refused_on_wrong_trust_root(test_key):
+    """Cert signed by signer A; listener trusts signer B → reject.
+    Detects forged certs that carry the bypass marker but weren't
+    actually signed by mssh-ca."""
+    cache = AuthzCache()
+    # Listener trusts a DIFFERENT signing key than the one used to
+    # mint the cert.
+    wrong_sk = cert_minter.generate_signing_key('ed25519')
+    wrong_sc = cert_minter._self_signed('wrong-trust-root', wrong_sk)
+    listener = _make_listener(cache, auth_trust_root_pubkey=wrong_sc.public_key())
+    cert_b64 = _mint_bypass_cert(test_key, principal='alice')
+
+    ok, reason = await listener._handle_bypass_injection(
+        conn_id='t', mtls_principal='alice', peer_der=b'',
+        bypass_cert_b64=cert_b64)
+    assert ok is False
+    assert reason == 'bypass_signature_invalid'
+    assert cache.get('alice') is None
+
+
+@pytest.mark.asyncio
+async def test_bypass_injection_refused_on_fresh_rogue_signer(test_key):
+    """Cert minted with a one-off rogue signer carrying a real-looking
+    bypass marker. The default-trust-root listener should reject."""
+    cache = AuthzCache()
+    listener = _make_listener(cache)   # trusts the module signer
+    cert_b64 = _mint_bypass_cert(test_key, principal='alice',
+                                  fresh_signer=True)
+
+    ok, reason = await listener._handle_bypass_injection(
+        conn_id='t', mtls_principal='alice', peer_der=b'',
+        bypass_cert_b64=cert_b64)
+    assert ok is False
+    assert reason == 'bypass_signature_invalid'
+    assert cache.get('alice') is None
+
+
+# ---------------------------------------------------------------------------
+# _load_auth_trust_root helper
+# ---------------------------------------------------------------------------
+
+
+def test_load_auth_trust_root_returns_none_when_unset(tmp_path):
+    """Empty path → returns None (operator hasn't configured)."""
+    from mssh.msshd.enforce_listener import _load_auth_trust_root
+    from mssh.msshd.config import MsshdConfig, CAConfig, TLSConfig
+
+    cfg = MsshdConfig(mode='enforce', ca=CAConfig(auth_trust_root=''))
+    assert _load_auth_trust_root(cfg) is None
+
+
+def test_load_auth_trust_root_loads_pem(tmp_path):
+    """Loads the file and returns a usable public key."""
+    from mssh.msshd.enforce_listener import _load_auth_trust_root
+    from mssh.msshd.config import MsshdConfig, CAConfig
+
+    sk = cert_minter.generate_signing_key('ec')
+    sc = cert_minter._self_signed('test', sk)
+    pem_path = tmp_path / 'signing-cert.pem'
+    pem_path.write_bytes(sc.public_bytes(serialization.Encoding.PEM))
+
+    cfg = MsshdConfig(mode='enforce',
+                       ca=CAConfig(auth_trust_root=str(pem_path)))
+    pubkey = _load_auth_trust_root(cfg)
+    assert pubkey is not None
+    # Should match the cert's public key by serialization.
+    assert (pubkey.public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo)
+            == sc.public_key().public_bytes(
+                serialization.Encoding.PEM,
+                serialization.PublicFormat.SubjectPublicKeyInfo))

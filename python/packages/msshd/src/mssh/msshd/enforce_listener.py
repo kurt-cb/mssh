@@ -34,8 +34,9 @@ from typing import Optional
 import struct
 
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
 
 from .authz_cache import SOURCE_BYPASS, SOURCE_CA, AuthzCache
 from .ca import (AuthorizationDeny, AuthorizationError, AuthorizationGrant,
@@ -90,6 +91,10 @@ class EnforceListener:
         self.protocol_version = protocol_version
         self._server: Optional[asyncio.base_events.Server] = None
         self._ssl_ctx = _build_ssl_context(cfg)
+        # Authorization-signing trust root for inline bypass-cert
+        # verification. None when the operator hasn't configured one;
+        # bypass-cert injection then refuses with a clear error.
+        self._auth_trust_root_pubkey = _load_auth_trust_root(cfg)
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(
@@ -484,12 +489,29 @@ class EnforceListener:
                         'failed: %s', conn_id, e)
             return False, f'bypass_ext_invalid: {e}'
 
-        # TODO: chain-to-trust-root verification. The normal CA-call
-        # path implicitly trusts the CA endpoint (mTLS to a trusted
-        # CA host). For bypass certs presented inline, we should
-        # explicitly verify cert.signature against ca.ca_pubkey. This
-        # is tracked as a follow-up; v1 relies on the bypass marker
-        # being present (only CA-issued certs carry it).
+        # 3b. Chain-to-trust-root: the cert must be signed by the
+        # mssh-ca authorization signing key. Without this, a forged
+        # cert carrying the bypass marker would be honored on its
+        # marker alone — the marker is a structural hint, not an
+        # authenticity proof. Fail closed when no trust root is
+        # configured rather than fall back to marker-only.
+        if self._auth_trust_root_pubkey is None:
+            log.warning('[%s] bypass_cert: ca.auth_trust_root not '
+                        'configured — bypass injection refused. Set '
+                        'ca.auth_trust_root in msshd.yaml to the CA\'s '
+                        'signing-cert.pem', conn_id)
+            return False, 'bypass_trust_root_not_configured'
+        try:
+            _verify_signature(cert, self._auth_trust_root_pubkey)
+        except InvalidSignature:
+            log.warning('[%s] bypass_cert: signature does not verify '
+                        'against ca.auth_trust_root — forgery attempt '
+                        'or wrong trust root configured', conn_id)
+            return False, 'bypass_signature_invalid'
+        except Exception as e:
+            log.warning('[%s] bypass_cert: signature verification '
+                        'errored: %s', conn_id, e)
+            return False, f'bypass_signature_error: {e}'
 
         # 4. Principal match.
         try:
@@ -540,6 +562,44 @@ def _build_ssl_context(cfg: MsshdConfig) -> ssl.SSLContext:
     ctx.load_verify_locations(cafile=cfg.tls.user_ca_pubkey)
     ctx.verify_mode = ssl.CERT_REQUIRED
     return ctx
+
+
+def _load_auth_trust_root(cfg: MsshdConfig):
+    """Load the public key of mssh-ca's authorization signing cert.
+
+    Returns the public key object suitable for verify(), or None when
+    the operator hasn't configured a trust root. Raises ValueError if
+    the file is set but unreadable / unparseable — we want loud failure
+    at startup rather than silent degrade-to-marker-only.
+    """
+    path = cfg.ca.auth_trust_root
+    if not path:
+        return None
+    from pathlib import Path
+    pem = Path(path).read_bytes()
+    cert = x509.load_pem_x509_certificate(pem)
+    return cert.public_key()
+
+
+def _verify_signature(cert: x509.Certificate, trust_root_pubkey) -> None:
+    """Verify ``cert`` was signed by ``trust_root_pubkey``.
+
+    Raises InvalidSignature on a bad signature; raises ValueError on
+    unsupported key types. Callers chain after the marker check —
+    InvalidSignature here is fail-closed.
+    """
+    sig = cert.signature
+    tbs = cert.tbs_certificate_bytes
+    hash_algo = cert.signature_hash_algorithm
+    if isinstance(trust_root_pubkey, ec.EllipticCurvePublicKey):
+        trust_root_pubkey.verify(sig, tbs, ec.ECDSA(hash_algo))
+    elif isinstance(trust_root_pubkey, rsa.RSAPublicKey):
+        trust_root_pubkey.verify(sig, tbs, padding.PKCS1v15(), hash_algo)
+    elif isinstance(trust_root_pubkey, ed25519.Ed25519PublicKey):
+        trust_root_pubkey.verify(sig, tbs)
+    else:
+        raise ValueError(
+            f'unsupported trust-root key type: {type(trust_root_pubkey)}')
 
 
 def _extract_principal(peer_der: bytes) -> str:
