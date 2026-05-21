@@ -453,7 +453,7 @@ Response 200:
 ### GET /v1/crl
 
 msshd-facing CRL fetch endpoint. Same response shape as
-`/v1/admin/crl` but no admin RBAC — authenticated by the wrapper's
+`/v1/admin/crl` but no admin RBAC — authenticated by msshd's
 mTLS cert (same authentication as `/v1/authorize`). Used by
 msshd's CRL sync loop.
 

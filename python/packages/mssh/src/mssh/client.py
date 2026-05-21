@@ -51,7 +51,7 @@ from mssh import frame
 log = logging.getLogger('mssh')
 
 
-DEFAULT_WRAPPER_PORT = 2200
+DEFAULT_MSSHD_PORT = 2200
 DEFAULT_CONFIG_PATH = '~/.mssh/config'
 DEFAULT_CERT = '~/.mssh/cert.pem'
 DEFAULT_KEY = '~/.mssh/key.pem'
@@ -76,7 +76,7 @@ class Identity:
 
 
 # ---------------------------------------------------------------------------
-# Pure-data helpers (unit-tested in tests/test_wrapper_mssh.py)
+# Pure-data helpers (unit-tested in tests/test_mssh.py)
 # ---------------------------------------------------------------------------
 
 def _expand(p: str | Path) -> Path:
@@ -184,7 +184,7 @@ def build_header(target: Target, *,
         'cols': cols,
         'env': env,
         # Principal echo for audit visibility on the server side.
-        # The wrapper doesn't trust this — it derives the principal
+        # msshd doesn't trust this — it derives the principal
         # from the mTLS cert — but it's useful in audit logs.
         'principal_hint': target.user,
         # v1.1 negotiation: client offers framed post-ack. Server's
@@ -313,7 +313,7 @@ def run_session(target: Target, ident: Identity, *,
             print(f'mssh: {e}', file=sys.stderr)
             return 6
         if not ok:
-            print(f'mssh: wrapper rejected request: {reason}',
+            print(f'mssh: msshd rejected request: {reason}',
                   file=sys.stderr)
             return 7
 
@@ -581,7 +581,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('target',
                         help='user@host[:port] or host[:port]')
     parser.add_argument('-p', '--port', type=int, default=None,
-                        help=f'wrapper port (default {DEFAULT_WRAPPER_PORT} '
+                        help=f'msshd port (default {DEFAULT_MSSHD_PORT} '
                              f'or config.default_port)')
     parser.add_argument('-l', '--login-name',
                         help='login user (alternative to user@host syntax)')
@@ -623,7 +623,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     default_port = args.port or int(cfg.get('default_port',
-                                            DEFAULT_WRAPPER_PORT))
+                                            DEFAULT_MSSHD_PORT))
 
     try:
         target = parse_target(args.target,

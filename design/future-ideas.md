@@ -25,8 +25,8 @@ story:
 1. **CA admins.** The bootstrap-admin cert (and any subsequent
    superuser admins) are highest-value targets. Backing them with a
    YubiKey / PIV card eliminates exfiltration-by-file-system-access.
-2. **Wrapper's mTLS-to-CA key.** Today msshd holds this on disk
-   (mode 0600). A PIV card means a compromised wrapper host can use
+2. **msshd's mTLS-to-CA key.** Today msshd holds this on disk
+   (mode 0600). A PIV card means a compromised msshd host can use
    the key WHILE compromised but can't exfiltrate it to use later.
 3. **mssh client.** The user's mTLS cert is the most lateral-
    movement-relevant key in the system. PIV-backing it raises the
@@ -39,13 +39,13 @@ story:
   with a PKCS#11 engine for cert ops. Either is well-understood.
 - mssh: add `--pkcs11-uri` flag and use `ssl.SSLContext`'s engine
   support to load the private key from the card. Browser-style.
-- Wrapper: same approach for its mTLS-to-CA leg.
+- msshd: same approach for its mTLS-to-CA leg.
 - CA admin CLI: same approach for admin certs.
 
 ### Cons
 
 - Operator complexity. A PIV card lost is a key lost.
-- The wrapper as a daemon can't prompt for a PIN; the card must be
+- msshd as a daemon can't prompt for a PIN; the card must be
   pre-unlocked or use a slot configured for no-PIN-required.
 
 ### Out of scope
@@ -57,20 +57,20 @@ bottleneck at burst-login time. Worth measuring before committing.
 
 ---
 
-## 4. Wrapper supports protocols beyond SSH — HTTPS / TCP proxy
+## 4. msshd supports protocols beyond SSH — HTTPS / TCP proxy
 
 **Status:** Genuinely interesting; needs analysis.
 
 ### Idea
 
-The wrapper's authentication path (mTLS client cert → CA call →
+msshd's authentication path (mTLS client cert → CA call →
 policy decision) is **protocol-agnostic**. Today it dispatches to an
 inner SSH session, but it could just as easily dispatch to an inner
 HTTP proxy, TCP forward, or anything else.
 
 User-side experience: instead of `mssh alice@host -- whoami`, the
 user opens a browser. The browser already speaks mTLS and already
-stores the user's PIV-backed (or passkey-backed) cert. The wrapper
+stores the user's PIV-backed (or passkey-backed) cert. msshd
 authenticates the browser session, calls the CA, gets a policy decision
 for "access internal-tool.example.com", and proxies HTTPS to the
 internal target.
@@ -94,7 +94,7 @@ runtime-CA-mediated authorization model.
 ### Open design questions
 
 - **Outer protocol.** Browsers don't speak our v1 JSON-framed thing
-  — they speak HTTPS. The wrapper would need a separate listen path
+  — they speak HTTPS. msshd would need a separate listen path
   for HTTPS (port 443) where the outer protocol is HTTP/2, the
   client cert is presented in mTLS, and msshd's policy decision
   results in a proxied HTTP request to the inner target.
@@ -185,7 +185,7 @@ for everything, not just SSH-via-mssh.
 - **Code-signing certs.** Sign binaries with a cert traceable to a
   particular admin / build agent.
 - **SSH user certs.** Today the CA mints X.509 authz certs for the
-  shim/wrapper. It could also mint OpenSSH user certs directly,
+  shim/msshd. It could also mint OpenSSH user certs directly,
   bypassing msshd for shops that just want better SSH cert
   management.
 - **mTLS certs for service-to-service.** Each microservice gets a
@@ -308,7 +308,7 @@ CA-side policy DSL gains:
   2fa_within_seconds: 60   # how recently the user authenticated 2FA
 ```
 
-The wrapper's `POST /v1/authorize` request body grows a
+msshd's `POST /v1/authorize` request body grows a
 `2fa_evidence` field (already on the cert-extension side at OID
 `.1.7`, just not produced by clients today). mssh CLI grows a
 `--totp` flag (or auto-prompts).
@@ -437,7 +437,7 @@ The CA already knows:
 - Which servers exist (`server add`).
 - Which users are enrolled (`user add`).
 - Which (user, server) pairs are allowed by policy.
-- The wrapper's server cert and the user-mTLS root.
+- msshd's server cert and the user-mTLS root.
 
 So the CA can **mint a per-user client config** that mssh consumes:
 
@@ -445,9 +445,9 @@ So the CA can **mint a per-user client config** that mssh consumes:
 ~/.mssh/
 ├── cert.pem                  # user's mTLS cert (PIV-backed in v2)
 ├── key.pem                   # user's mTLS key (or PIV slot URI)
-├── ca.pem                    # trust root for wrapper server certs
-├── config                    # CA-rendered: alias → wrapper-host:port
-└── known-wrappers            # CA-rendered: list of allowed wrapper hosts
+├── ca.pem                    # trust root for msshd server certs
+├── config                    # CA-rendered: alias → msshd-host:port
+└── known-msshd-hosts            # CA-rendered: list of allowed msshd hosts
 ```
 
 `~/.mssh/config` is generated server-side and pulled by `mssh --sync`
@@ -464,7 +464,7 @@ by hand; the CA's enrollment DB IS the config.
   `mssh config`** on next sync. Today the user keeps the old
   `~/.ssh/config` entry forever; the SERVER denies them but the
   client doesn't know that until it tries.
-- **No `known_hosts` mystery.** The wrapper's TLS server cert is
+- **No `known_hosts` mystery.** msshd's TLS server cert is
   signed by a CA the user already trusts. No "host key has changed"
   prompts ever again.
 - **Restricts client behaviour.** `~/.mssh/` has only what mssh
@@ -481,7 +481,7 @@ Day 7:  Each user has done a few mssh sessions; they verify access
         works as expected.
 
 Day 30: Operator pushes a config that disables ssh access on the
-        wrapper hosts. mssh keeps working.
+        msshd hosts. mssh keeps working.
 
 Day 31: User notices ssh no longer works; rm -rf ~/.ssh/.
         That stuff was bit-rotting anyway.
@@ -653,7 +653,7 @@ sshd's terse DEBUG output.
 
   - In **fallback** mode, debug_sshd has no role (msshd is just a
     proxy).
-  - In **gated** mode (§6.5.1 of wrapper detailed design),
+  - In **gated** mode (§6.5.1 of architecture.md),
     debug_sshd could be enabled as an alternative inner server
     that calls the shim, so the operator can see CA decisions
     even before flipping to enforce.
@@ -895,7 +895,7 @@ shipping a real release becomes a priority.
 
 **Status:** **LANDED** for the operator-visible scope.
 - **v1 — landed:** operator-templated, startup substitution. Operators
-  customize via `banner.template_path` in `wrapper.yaml`; rendered at
+  customize via `banner.template_path` in `msshd.yaml`; rendered at
   msshd boot with `{server}`/`{group}`/operator-supplied tokens.
 - **Delivery to mssh client — landed** via [§21](#21-protocol-v11--typed-framing-for-the-post-ack-stream)
   v1.1 framing (BANNER frame). Closed
@@ -918,7 +918,7 @@ dynamic content would make this much more useful as an immediate
 
 ### What's done (v1)
 
-Operators can point `banner.template_path` in `wrapper.yaml` at a
+Operators can point `banner.template_path` in `msshd.yaml` at a
 text file and supply a `values` map; msshd substitutes `{key}`
 tokens at startup and writes the rendered file as the inner sshd's
 Banner. Missing tokens are left literal; missing or malformed
@@ -944,7 +944,7 @@ without changing the existing long-lived-inner-sshd architecture.
     rendered sshd_config. Implementing this is small and bounded
     once a per-server CA template is in place.
   - **CA-stored banner templates + admin CLI.** Templates live in
-    `wrapper.yaml` on each msshd today. Storing them centrally in
+    `msshd.yaml` on each msshd today. Storing them centrally in
     the CA's enrollment record (per-server or per-server-group)
     and exposing `mssh-admin server banner set/show` would make
     fleet-wide updates a one-command operation. Out of scope for
@@ -1494,7 +1494,7 @@ mssh's design intentionally separates **two CA hierarchies**
 (architecture.md / security.md):
   - **CA signing key** — authz certs + server mTLS + admin mTLS.
     Managed by `mssh-admin` (init, server add, user add, …).
-  - **User-facing CA** — signs the wrapper TLS cert msshd serves
+  - **User-facing CA** — signs msshd TLS cert msshd serves
     on `:2200` AND the per-user mTLS client certs.
 
 The CLI surface for the first hierarchy is complete. The second is
@@ -1503,7 +1503,7 @@ either (a) hand-wave "use your org PKI", (b) document an openssl
 ceremony inline, or (c) point at a side-script.
 
 We chose (c): [scripts/mint-user-pki.py](../scripts/mint-user-pki.py)
-mints user-CA + wrapper TLS + per-user mTLS in one shot, matching
+mints user-CA + msshd TLS + per-user mTLS in one shot, matching
 what the test framework's `_gen_user_ca_and_mtls_certs` produces.
 TUTORIAL_MIGRATION.md uses it. Functional, but a separate script is
 a documentation gap: operators have to remember to look outside the
@@ -1606,7 +1606,7 @@ intermediate pass.
 different threat profiles:
 
   - **User-facing PKI ceremony (the §25 v1 scope as originally
-    captured).** Local crypto: bootstrap a user-CA, mint wrapper
+    captured).** Local crypto: bootstrap a user-CA, mint msshd
     server certs, mint user mTLS certs. No network call, no
     interaction with the mssh-CA. This is the easyrsa-shaped
     workflow — formalize the current `scripts/mint-user-pki.py`.
@@ -1729,7 +1729,7 @@ Add a `mssh-admin pki` subcommand surface:
 
 ```bash
 mssh-admin pki bootstrap     --out-dir ./user-pki      # mints user-CA + key
-mssh-admin pki server mint   --server srv-acct --san IP[,IP]  # wrapper TLS pair
+mssh-admin pki server mint   --server srv-acct --san IP[,IP]  # msshd TLS pair
 mssh-admin pki user mint     --user alice              # mTLS pair + .pub
 ```
 
@@ -1807,7 +1807,7 @@ admin's browser  →  https://localhost:8443/
                   Flask admin app (on CA host)
 ```
 
-UX wrapper:
+Convenience command:
 
 ```bash
 mssh-admin web
@@ -1844,7 +1844,7 @@ that Chrome will warn about it.
 | msshd allows `direct-tcpip` to localhost-only on the CA host | Policy DSL already supports `--channels direct-tcpip` (visible in `mssh-admin policy add --help`); enforcement path needs verifying |
 | Inner sshd supports port forwarding | OpenSSH default; `AllowTcpForwarding yes` likely already on |
 | Flask admin app on CA host | **New** — implements current `mssh-admin` operations (status, server/user/policy CRUD, audit search, cert minting) as a web UI |
-| `mssh-admin web` UX wrapper | **New** — bundle "open tunnel + open browser at URL" into one command |
+| `mssh-admin web` UX command | **New** — bundle "open tunnel + open browser at URL" into one command |
 | Authentication inside the Flask app | **Open design question** — see below |
 
 ### Identity propagation — how Flask knows which admin is connecting
@@ -1875,7 +1875,7 @@ MVP picks (1). Per-admin attribution becomes a v2 (probably option
 
 ### Composition with other items
 
-- **[§4](#4-wrapper-supports-protocols-beyond-ssh--https--tcp-proxy)** (HTTPS / TCP proxy). §26 IS a special case of §4
+- **[§4](#4-msshd-supports-protocols-beyond-ssh--https--tcp-proxy)** (HTTPS / TCP proxy). §26 IS a special case of §4
   — local port forward to a specific destination. Implementing §26's
   `-L` flag gets §4's basic shape for free.
 - **[§5](#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel)** (CA mints other certs). The Flask app needs a TLS server
@@ -1899,7 +1899,7 @@ MVP picks (1). Per-admin attribution becomes a v2 (probably option
   Standard web-session timeout pattern.
 - **Multiple admins tunneling simultaneously.** Each opens their own
   `localhost:<port>` — collision-prone if multiple use 8443. The
-  `mssh-admin web` wrapper should grab the next free port and print
+  `mssh-admin web` command should grab the next free port and print
   it.
 - **Browser-side trust.** Easiest path: ship a self-signed cert for
   `localhost` signed by the user-facing CA (which the operator's
@@ -1916,7 +1916,7 @@ MVP picks (1). Per-admin attribution becomes a v2 (probably option
 - mssh client `-L` flag (direct-tcpip channel in v1.1 framing): ~150 LOC
 - msshd policy enforcement for `direct-tcpip`: ~50 LOC
 - Flask admin app (read-only views first; full CRUD as v2): ~500 LOC for v1, +800 for v2
-- `mssh-admin web` UX wrapper: ~80 LOC
+- `mssh-admin web` Convenience command: ~80 LOC
 - Total: **~780 LOC for v1** (read-only portal), ~1600 for full CRUD
 
 ---
@@ -2100,7 +2100,7 @@ internally.
 
 ```
                     ┌────────────────────────────────────┐
-                    │ 4. HTTPS / browser entry to wrapper │
+                    │ 4. HTTPS / browser entry to msshd │
                     └─────────────┬──────────────────────┘
                                   │
                   ┌───────────────┼─────────────────┐
@@ -2131,7 +2131,7 @@ internally.
    └──────────────────────┘   └──────────────────────┘
 ```
 
-Items 1 and 3 are **wrapper internal architecture** — independent of
+Items 1 and 3 are **msshd internal architecture** — independent of
 each other, both worth doing in Phase 2.
 
 Items 2, 5, 6, 7 are **identity / authentication enhancements** —

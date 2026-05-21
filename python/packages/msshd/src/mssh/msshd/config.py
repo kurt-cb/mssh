@@ -1,13 +1,13 @@
-"""wrapper.yaml loader and validator.
+"""msshd.yaml loader and validator.
 
-Mirrors the schema in ``config/wrapper.yaml.example``. The loader
+Mirrors the schema in ``config/msshd.yaml.example``. The loader
 is dataclass-based with explicit field types; ``validate()`` performs
 cross-field checks and on-disk-permission checks for cert/key paths.
 
-The wrapper YAML is intentionally small — see
-[detailed-wrapper.md § 11](../../design/mssh-detailed-wrapper.md).
+msshd YAML is intentionally small — see
+[architecture.md § 11](../../design/architecture.md).
 Operators do not edit the inner sshd config; that is rendered hermetically
-by the wrapper from a template that ships in the wrapper package.
+by msshd from a template that ships in msshd package.
 """
 from __future__ import annotations
 
@@ -89,7 +89,7 @@ class UsersConfig:
 class LoggingConfig:
     level: str = 'info'
     destination: str = 'stderr'
-    audit_destination: str = 'file:/var/log/mssh/wrapper-audit.jsonl'
+    audit_destination: str = 'file:/var/log/mssh/msshd-audit.jsonl'
 
 
 @dataclass
@@ -133,7 +133,7 @@ class BannerConfig:
 
 
 @dataclass
-class WrapperConfig:
+class MsshdConfig:
     mode: str = MODE_FALLBACK
     fallback: FallbackConfig = field(default_factory=FallbackConfig)
     listen: ListenConfig = field(default_factory=ListenConfig)
@@ -146,7 +146,7 @@ class WrapperConfig:
     banner: BannerConfig = field(default_factory=BannerConfig)
 
     @classmethod
-    def load(cls, path: str | Path) -> 'WrapperConfig':
+    def load(cls, path: str | Path) -> 'MsshdConfig':
         with Path(path).open() as f:
             data = yaml.safe_load(f) or {}
         fb = data.get('fallback') or {}
@@ -205,7 +205,7 @@ class WrapperConfig:
                 destination=str(log_.get('destination') or 'stderr'),
                 audit_destination=str(
                     log_.get('audit_destination')
-                    or 'file:/var/log/mssh/wrapper-audit.jsonl'),
+                    or 'file:/var/log/mssh/msshd-audit.jsonl'),
             ),
             performance=PerformanceConfig(
                 inner_cipher_none=bool(perf.get('inner_cipher_none')),

@@ -1,8 +1,8 @@
 # mssh — todo status (quick reference)
 
-Snapshot of open work after v0.1.6 tag. Regenerate by re-scanning
+Snapshot of open work after v0.1.7 tag. Regenerate by re-scanning
 `design/future-ideas.md`, `design/openbugs/`, and in-code `TODO`
-markers. Last updated: 2026-05-21 (post cert-renew / ACME drop).
+markers. Last updated: 2026-05-21 (post wrapper-rename).
 
 For full context on any row, follow the link to its
 `design/future-ideas.md` section.
@@ -57,7 +57,7 @@ Design docs:
 | Piece | Status | Notes |
 |---|---|---|
 | Enrollment schema (PasskeyCredential under Admin records) | ✅ | `enrollment.py` |
-| WebAuthn RP wrappers (`webauthn` PyPI lib integration) | ✅ | `passkey.py` — register/auth options + verification + AAGUID allowlist |
+| WebAuthn RP adapters (`webauthn` PyPI lib integration) | ✅ | `passkey.py` — register/auth options + verification + AAGUID allowlist |
 | PasskeyBrokerClient (mTLS HTTPS client) | ✅ | `passkey_broker.py` |
 | Admin handlers: enroll-begin / list / revoke / callback / poll | ✅ | `admin.py` |
 | Policy DSL: `require_2fa: passkey` + `twofa_within_seconds` | ✅ | Validated at policy-add time; refuses unknown values |
@@ -129,7 +129,7 @@ The full v2 hierarchy is ~1500–2000 LOC across CA + msshd + admin
 |---|---|---|---|
 | [§22](future-ideas.md#22-push-channel-for-revocation--live-session-kill) | Push channel for revocation + live-session kill | 🚧 | Design pending |
 | [§13](future-ideas.md#13-legacy-config-migration-with-dual-enforce--shadow-mode) | Legacy-config migration / dual-enforce / shadow mode | 🚧 | Composes with §20 |
-| [§4](future-ideas.md#4-wrapper-supports-protocols-beyond-ssh--https--tcp-proxy) | Protocols beyond SSH (HTTPS/TCP proxy) | 🚧 | Needs analysis |
+| [§4](future-ideas.md#4-msshd-supports-protocols-beyond-ssh--https--tcp-proxy) | Protocols beyond SSH (HTTPS/TCP proxy) | 🚧 | Needs analysis |
 
 (§6 + §7 2FA / WebAuthn — **mostly landed in v0.1.5**. See the
 Passkey ecosystem section at the top of this doc.)
@@ -165,6 +165,24 @@ Passkey ecosystem section at the top of this doc.)
 
 ## Recently landed (since v0.1.0)
 
+- **v0.1.7** — `wrapper` terminology fully eliminated from active
+  sources. Rename touches ~60 files, ~400 occurrences:
+  - File paths: `wrapper.yaml{,.example}` → `msshd.yaml{,.example}`;
+    `wrapper-{server,mtls,user-ca,audit}` → `msshd-*`; OS user
+    `_msshwrapper` → `_msshd`.
+  - Identifiers: `WrapperConfig`/`WrapperCAClient` →
+    `MsshdConfig`/`MsshdCAClient`; `DEFAULT_WRAPPER_PORT` →
+    `DEFAULT_MSSHD_PORT`; `SSH_RT_AUTH_WRAPPER_STATE_DIR` →
+    `MSSHD_STATE_DIR`; stale `ssh-rt-wrapper-admin` →
+    `msshd-admin`.
+  - Tests: 8 `test_wrapper_*.py` → `test_msshd_*.py` via `git mv`
+    (history preserved).
+  - Docs / installer / systemd / openssh-patches: all prose
+    "wrapper" → "msshd" / "gateway"; CLAUDE.md style rule updated.
+  - Archive (`archive/`) retains the old terminology by design
+    (frozen historical content).
+  - 525 tests still green; entry points (`mssh`, `msshd`,
+    `msshd-admin`, `mssh-admin`) re-verified.
 - **v0.1.6** — cert auto-renewal + ACME drop (3 commits, ~620 LOC):
   - **Dropped ACME** from §5 scope. Auto-renewing TLS across the
     fleet is the only operational goal that justified ACME (~2000

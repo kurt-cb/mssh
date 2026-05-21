@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from mssh.msshd.config import (
-    BannerConfig, MODE_ENFORCE, MODE_FALLBACK, WrapperConfig,
+    BannerConfig, MODE_ENFORCE, MODE_FALLBACK, MsshdConfig,
 )
 
 
@@ -19,7 +19,7 @@ def _write(tmp_path: Path, name: str, body: str) -> Path:
 
 def test_load_defaults_fallback(tmp_path):
     cfg_path = _write(tmp_path, 'w.yaml', 'mode: fallback\n')
-    cfg = WrapperConfig.load(cfg_path)
+    cfg = MsshdConfig.load(cfg_path)
     cfg.validate()
     assert cfg.mode == MODE_FALLBACK
     assert cfg.listen.external_port == 2200
@@ -32,7 +32,7 @@ def test_load_full_fallback(tmp_path):
         'mode: fallback\n'
         'fallback: {host: 10.0.0.1, port: 2022}\n'
         'listen: {external_address: 0.0.0.0, external_port: 2200}\n')
-    cfg = WrapperConfig.load(cfg_path)
+    cfg = MsshdConfig.load(cfg_path)
     cfg.validate()
     assert cfg.fallback.host == '10.0.0.1'
     assert cfg.fallback.port == 2022
@@ -40,7 +40,7 @@ def test_load_full_fallback(tmp_path):
 
 def test_invalid_mode(tmp_path):
     cfg_path = _write(tmp_path, 'w.yaml', 'mode: bogus\n')
-    cfg = WrapperConfig.load(cfg_path)
+    cfg = MsshdConfig.load(cfg_path)
     with pytest.raises(ValueError, match='mode must be'):
         cfg.validate()
 
@@ -49,7 +49,7 @@ def test_listen_port_out_of_range(tmp_path):
     cfg_path = _write(tmp_path, 'w.yaml',
         'mode: fallback\n'
         'listen: {external_port: 99999}\n')
-    cfg = WrapperConfig.load(cfg_path)
+    cfg = MsshdConfig.load(cfg_path)
     with pytest.raises(ValueError, match='external_port'):
         cfg.validate()
 
@@ -58,7 +58,7 @@ def test_enforce_missing_tls(tmp_path):
     cfg_path = _write(tmp_path, 'w.yaml',
         'mode: enforce\n'
         'users: {allowed: [alice]}\n')
-    cfg = WrapperConfig.load(cfg_path)
+    cfg = MsshdConfig.load(cfg_path)
     with pytest.raises(ValueError, match='tls.server_cert'):
         cfg.validate()
 
@@ -80,7 +80,7 @@ def test_enforce_full_valid(tmp_path):
         f'  client_key:  {tmp_path}/mtls.key\n'
         f'  ca_pubkey:   {tmp_path}/mtls-ca.pub\n'
         f'users: {{allowed: [alice]}}\n')
-    cfg = WrapperConfig.load(cfg_path)
+    cfg = MsshdConfig.load(cfg_path)
     cfg.validate()
     assert cfg.mode == MODE_ENFORCE
 
@@ -100,7 +100,7 @@ def test_enforce_empty_users(tmp_path):
         f'  client_cert: {tmp_path}/mtls.crt\n'
         f'  client_key:  {tmp_path}/mtls.key\n'
         f'  ca_pubkey:   {tmp_path}/mtls-ca.pub\n')
-    cfg = WrapperConfig.load(cfg_path)
+    cfg = MsshdConfig.load(cfg_path)
     with pytest.raises(ValueError, match='users.allowed is empty'):
         cfg.validate()
 
@@ -123,20 +123,20 @@ def test_check_permissions_world_readable_key(tmp_path):
         f'  client_key:  {tmp_path}/mtls.key\n'
         f'  ca_pubkey:   {tmp_path}/mtls-ca.pub\n'
         f'users: {{allowed: [alice]}}\n')
-    cfg = WrapperConfig.load(cfg_path)
+    cfg = MsshdConfig.load(cfg_path)
     cfg.validate()
     with pytest.raises(ValueError, match='insecure permissions'):
         cfg.check_permissions()
 
 
 def test_example_yaml_loads(tmp_path):
-    """The shipped config/wrapper.yaml.example must load cleanly.
+    """The shipped config/msshd.yaml.example must load cleanly.
     Catches drift between the example and the schema."""
     # Example is at the repo root, two parents up from python/tests/.
     example = (Path(__file__).resolve().parent.parent.parent
-               / 'config' / 'wrapper.yaml.example')
+               / 'config' / 'msshd.yaml.example')
     assert example.exists(), f'missing example at {example}'
-    cfg = WrapperConfig.load(example)
+    cfg = MsshdConfig.load(example)
     # Example is in fallback mode by design; validate without
     # check_permissions (the example's paths are placeholders).
     cfg.validate()
@@ -149,7 +149,7 @@ def test_example_yaml_loads(tmp_path):
 
 def test_banner_defaults_empty(tmp_path):
     cfg_path = _write(tmp_path, 'w.yaml', 'mode: fallback\n')
-    cfg = WrapperConfig.load(cfg_path)
+    cfg = MsshdConfig.load(cfg_path)
     assert cfg.banner.template_path == ''
     assert cfg.banner.values == {}
 
@@ -163,7 +163,7 @@ def test_banner_loaded_from_yaml(tmp_path):
         '    server: srv-acct-01\n'
         '    group: accounting\n'
         '    owner_email: ops@example.com\n')
-    cfg = WrapperConfig.load(cfg_path)
+    cfg = MsshdConfig.load(cfg_path)
     assert cfg.banner.template_path == '/etc/mssh/banner.txt'
     assert cfg.banner.values == {
         'server': 'srv-acct-01',
@@ -179,7 +179,7 @@ def test_banner_values_coerced_to_strings(tmp_path):
         'mode: fallback\n'
         'banner:\n'
         '  values: {port: 2200, enforced: true}\n')
-    cfg = WrapperConfig.load(cfg_path)
+    cfg = MsshdConfig.load(cfg_path)
     assert cfg.banner.values == {'port': '2200', 'enforced': 'True'}
 
 
@@ -190,14 +190,14 @@ def test_banner_values_coerced_to_strings(tmp_path):
 
 def test_inner_mode_defaults_to_long_lived(tmp_path):
     cfg_path = _write(tmp_path, 'w.yaml', 'mode: fallback\n')
-    cfg = WrapperConfig.load(cfg_path)
+    cfg = MsshdConfig.load(cfg_path)
     assert cfg.inner.mode == 'long-lived'
 
 
 def test_inner_mode_per_connection_loads(tmp_path):
     cfg_path = _write(tmp_path, 'w.yaml',
         'mode: fallback\ninner: {mode: per-connection}\n')
-    cfg = WrapperConfig.load(cfg_path)
+    cfg = MsshdConfig.load(cfg_path)
     assert cfg.inner.mode == 'per-connection'
     cfg.validate()                                # should pass
 
@@ -205,6 +205,6 @@ def test_inner_mode_per_connection_loads(tmp_path):
 def test_inner_mode_invalid_value_rejected(tmp_path):
     cfg_path = _write(tmp_path, 'w.yaml',
         'mode: fallback\ninner: {mode: bogus}\n')
-    cfg = WrapperConfig.load(cfg_path)
+    cfg = MsshdConfig.load(cfg_path)
     with pytest.raises(ValueError, match='inner.mode must be one of'):
         cfg.validate()

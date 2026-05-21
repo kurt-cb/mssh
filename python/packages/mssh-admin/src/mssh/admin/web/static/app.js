@@ -83,7 +83,7 @@
             const name = btn.dataset.server;
             if (!confirm(`Re-issue mTLS for ${name}?\n\n` +
                          `The old keypair stops working immediately. ` +
-                         `Push the new tarball to /etc/mssh/wrapper-mtls.* ` +
+                         `Push the new tarball to /etc/mssh/msshd-mtls.* ` +
                          `and restart msshd on that host.`)) return;
             btn.disabled = true;
             btn.textContent = 'Re-issuing…';

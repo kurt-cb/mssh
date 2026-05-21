@@ -1,7 +1,7 @@
 """Unit tests for mssh.mcp.tools.
 
 The MCP transport layer (server.py) is exercised by the protocol
-itself; the tool functions are plain wrappers over CAClient + the
+itself; the tool functions are plain adapters over CAClient + the
 state detector, which is what we test here. Faster than full
 end-to-end and covers the data-marshaling that the LLM client
 ultimately consumes.

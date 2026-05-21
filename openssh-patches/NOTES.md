@@ -3,15 +3,16 @@
 Detailed rationale + file-and-line targets for each patch in the series.
 
 > **Scope update (2026-05-14, revised):** per
-> [../ssh-rt-auth/design/ssh-rt-auth-server-strategy.md](../ssh-rt-auth/design/ssh-rt-auth-server-strategy.md)
-> and [../ssh-rt-auth/design/ssh-rt-auth-wrapper-research.md](../ssh-rt-auth/design/ssh-rt-auth-wrapper-research.md),
-> Tier 1 is now wrap-and-proxy (mTLS wrapper + hermetic inner OpenSSH),
+> [../archive/design/ssh-rt-auth-server-strategy.md](../archive/design/ssh-rt-auth-server-strategy.md)
+> and [../archive/design/ssh-rt-auth-wrapper-research.md](../archive/design/ssh-rt-auth-wrapper-research.md)
+> (filename frozen as historical content),
+> Tier 1 is now wrap-and-proxy (mTLS msshd + hermetic inner OpenSSH),
 > not a greenfield server. OpenSSH stays **Tier 3 — compatibility
 > mode**, supported with documented limitations. Active patches are
 > now **0002** and **0003** only — both close real security gaps in
 > Tier 3 and have independent upstream value for any AKC helper. The
 > previously-active **0002b** (rich JSON env var) is **dropped** —
-> subsumed by the wrapper, not worth the maintenance cost given the
+> subsumed by msshd, not worth the maintenance cost given the
 > Tier 3 cohort is small. The larger 0004–0007 series stays demoted to
 > design notes.
 
@@ -31,7 +32,7 @@ a patch fails to apply.
 | # | Patch | Status | LOC |
 |---|-------|--------|-----|
 | 0001 | Instrumentation | obsoleted | ~20 |
-| 0002b | `SSH_CONNECTION_CONTEXT` JSON env | **dropped (2026-05-14)** — subsumed by Tier 1 wrapper; small Tier 3 cohort doesn't justify maintenance cost | ~80 |
+| 0002b | `SSH_CONNECTION_CONTEXT` JSON env | **dropped (2026-05-14)** — subsumed by msshd; small Tier 3 cohort doesn't justify maintenance cost | ~80 |
 | 0004 | `AuthorizationModule` directive | deferred | ~500–800 |
 | 0005 | `mssh-channel-policy` enforcement | deferred | ~80 |
 | 0006 | `mssh-force-command` enforcement | deferred | ~50 |
@@ -181,7 +182,7 @@ context for helpers willing to parse JSON". Helpers can use either.
 ## 0002b — `SSH_CONNECTION_CONTEXT` env var (rich JSON blob) — DROPPED
 
 **Status: DROPPED 2026-05-14.** After the Tier 1 → wrap-and-proxy
-decision, this patch's value collapsed: the wrapper provides
+decision, this patch's value collapsed: msshd provides
 everything 0002b would have (richer connection context, kex/cipher
 visibility, etc.), and the Tier 3 cohort that would benefit from
 0002b in isolation is small. ~80 LOC + ongoing upstream-rebase

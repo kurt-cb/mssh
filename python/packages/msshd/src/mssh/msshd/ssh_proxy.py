@@ -11,7 +11,7 @@ module:
        - interactive → conn.create_session(..., term_type=...)
   4. Pumps bytes between the outer stream and the inner SSH session.
 
-Protocol: see design/mssh-detailed-wrapper.md §3.
+Protocol: see design/architecture.md §3.
 """
 from __future__ import annotations
 
@@ -212,7 +212,7 @@ async def proxy_to_inner_ssh(
     # ---- 2. connect to inner sshd ----
     # asyncssh's `known_hosts` parameter expects a file in
     # ``ssh_config(5) known_hosts`` format (host + key per line) or a
-    # 3-tuple. The wrapper has just generated the inner sshd's host
+    # 3-tuple. msshd has just generated the inner sshd's host
     # key itself, so trust it explicitly via the tuple form.
     try:
         host_pubkey_bytes = open(inner_host_key_path, 'rb').read()

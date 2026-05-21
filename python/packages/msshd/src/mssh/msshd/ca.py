@@ -1,6 +1,6 @@
-"""CA client adapter for the wrapper.
+"""CA client adapter for msshd.
 
-Thin wrapper around ``shim.ca_client.CAClient`` that:
+Thin adapter around ``shim.ca_client.CAClient`` that:
 
   - Builds the ``POST /v1/authorize`` request body in v1 schema
     (the v2 enrichments from
@@ -24,7 +24,7 @@ from typing import Any, Union
 
 from mssh.shim.ca_client import (AuthorizeResult, CAClient, CAClientFailedOver)
 
-from .config import WrapperConfig
+from .config import MsshdConfig
 
 
 log = logging.getLogger('msshd.ca')
@@ -66,19 +66,19 @@ class AuthorizationError:
 AuthorizationResult = Union[AuthorizationGrant, AuthorizationDeny, AuthorizationError]
 
 
-class WrapperCAClient:
+class MsshdCAClient:
     """Async-friendly CA-call adapter.
 
     Builds on top of the blocking ``shim.ca_client.CAClient`` (which is
     deliberately ``requests``-based — see issue 2.1 in
     [tests/issues.md](../../tests/issues.md)). We run the blocking call
-    in the default executor so the wrapper's asyncio loop stays
+    in the default executor so msshd's asyncio loop stays
     responsive.
     """
 
-    def __init__(self, cfg: WrapperConfig):
+    def __init__(self, cfg: MsshdConfig):
         if not cfg.ca.endpoints:
-            raise ValueError('WrapperCAClient requires cfg.ca.endpoints')
+            raise ValueError('MsshdCAClient requires cfg.ca.endpoints')
         self._client = CAClient(
             endpoints=cfg.ca.endpoints,
             mtls_cert=cfg.ca.client_cert,

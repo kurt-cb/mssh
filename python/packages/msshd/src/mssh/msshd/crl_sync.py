@@ -28,7 +28,7 @@ import logging
 from typing import Optional
 
 from .authz_cache import AuthzCache
-from .ca import WrapperCAClient
+from .ca import MsshdCAClient
 
 
 log = logging.getLogger('msshd.crl_sync')
@@ -43,7 +43,7 @@ class CRLSync:
     if a sync is needed.
     """
 
-    def __init__(self, cache: AuthzCache, ca_client: WrapperCAClient, *,
+    def __init__(self, cache: AuthzCache, ca_client: MsshdCAClient, *,
                  fetch_limit: int = 100):
         self._cache = cache
         self._ca = ca_client

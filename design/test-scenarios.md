@@ -447,7 +447,7 @@ write paths. These typically require admin-grade mTLS creds.
 
 | | |
 |---|---|
-| **Description** | wrapper.yaml has invalid YAML; restart msshd |
+| **Description** | msshd.yaml has invalid YAML; restart msshd |
 | **Expected** | msshd refuses to start, logs the parse error; no half-started state |
 | **Source** | operations.md § msshd won't start |
 | **Status** | untested |

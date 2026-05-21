@@ -33,7 +33,7 @@ def test_ovpn_bundle_layout():
     assert 'proto udp\n' in out
     assert 'remote vpn.example.com 1194\n' in out
     assert 'remote-cert-tls server\n' in out
-    # Inline PEM blocks in <ca>/<cert>/<key> wrappers.
+    # Inline inline PEM blocks for ca / cert / key.
     assert '<ca>\n-----BEGIN CERTIFICATE-----' in out
     assert '</ca>\n' in out
     assert '<cert>\n-----BEGIN CERTIFICATE-----' in out

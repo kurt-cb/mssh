@@ -1,12 +1,12 @@
 """Inner sshd subprocess lifecycle.
 
-The wrapper owns a private OpenSSH ``sshd`` instance bound to a
+msshd owns a private OpenSSH ``sshd`` instance bound to a
 high-port on 127.0.0.1. Its config is **hermetic** — rendered from a
-template that ships with the wrapper, hash-validated against an
+template that ships with msshd, hash-validated against an
 embedded known-good per OpenSSH version, and never edited by
 operators.
 
-See [detailed-wrapper.md §5](../../design/mssh-detailed-wrapper.md).
+See [architecture.md §5](../../design/architecture.md).
 
 Lifecycle:
   - ``InnerSshd.start()`` — render config, generate host key if absent,
@@ -33,7 +33,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import WrapperConfig
+from .config import MsshdConfig
 
 
 log = logging.getLogger('msshd.inner')
@@ -47,7 +47,7 @@ _DEFAULT_BANNER = """\
   logged centrally.
 
   To customize this banner, set banner.template_path in
-  wrapper.yaml; see docs/operations.md § per-server banner.
+  msshd.yaml; see docs/operations.md § per-server banner.
 ─────────────────────────────────────────────────────────────
 """
 
@@ -134,14 +134,14 @@ class InnerSshdError(RuntimeError):
 
 
 class InnerSshd:
-    def __init__(self, cfg: WrapperConfig, *,
+    def __init__(self, cfg: MsshdConfig, *,
                  state_dir: str | Path = '/var/lib/mssh/inner-sshd',
                  user_ca_pubkey_path: str | Path | None = None):
         self.cfg = cfg
         self.state_dir = Path(state_dir)
         self.user_ca_pubkey_path = (
             Path(user_ca_pubkey_path) if user_ca_pubkey_path
-            else self.state_dir / 'wrapper-user-ca.pub')
+            else self.state_dir / 'msshd-user-ca.pub')
         self._port: int | None = None
         self._proc: asyncio.subprocess.Process | None = None
         self._sshd_binary = cfg.inner.sshd_binary
@@ -179,24 +179,24 @@ class InnerSshd:
             Path('/run/sshd').mkdir(mode=0o0755, exist_ok=True)
         except PermissionError:
             log.warning('cannot create /run/sshd — inner sshd may fail '
-                        'to start. Run wrapper as root or use a sshd '
+                        'to start. Run msshd as root or use a sshd '
                         'binary built with a custom --with-privsep-path.')
 
         # 1. Ensure a host key exists. Per-host, generated on first
         #    start, not rotated routinely (it's behind the outer mTLS;
-        #    only matters between wrapper and inner sshd on localhost).
+        #    only matters between msshd and inner sshd on localhost).
         host_key = self.state_dir / 'ssh_host_ed25519_key'
         if not host_key.exists():
             await _gen_host_key(host_key)
             log.info('generated inner sshd host key at %s', host_key)
 
-        # 2. Ensure the user-CA pubkey file exists; the wrapper writes
+        # 2. Ensure the user-CA pubkey file exists; msshd writes
         #    it via UserCA.write_public_to() in admin init. We don't
-        #    write it here — that's a wrapperd-startup concern.
+        #    write it here — that's a msshd-startup concern.
         if not self.user_ca_pubkey_path.exists():
             raise InnerSshdError(
                 f'user-CA pubkey not at {self.user_ca_pubkey_path} '
-                '(run ssh-rt-wrapper-admin init)')
+                '(run msshd-admin init)')
 
         # 3. Allocate a port in the configured range.
         lo, hi = self.cfg.inner.port_range
@@ -204,7 +204,7 @@ class InnerSshd:
         log.info('inner sshd will bind 127.0.0.1:%d', self._port)
 
         # 4. Render and write the pre-auth banner file. Operators can
-        #    point banner.template_path at a custom file in wrapper.yaml
+        #    point banner.template_path at a custom file in msshd.yaml
         #    with {server}/{group}/operator-supplied {key} tokens; we
         #    substitute once at startup. Per-user substitution requires
         #    per-connection inner sshd (future-ideas.md §1).
@@ -291,7 +291,7 @@ class _SessionProc:
 class PerConnectionInnerSshd:
     """Spawn a fresh sshd-D-on-loopback per session.
 
-    Used when ``wrapper.yaml`` has ``inner.mode: per-connection``. Each
+    Used when ``msshd.yaml`` has ``inner.mode: per-connection``. Each
     session gets its own port, tempdir, sshd_config (rendered by the CA
     with this session's policy + msshd's local paths substituted), and
     sshd process. Per-session policy is enforced natively by OpenSSH
@@ -316,14 +316,14 @@ class PerConnectionInnerSshd:
     client as a clean denial.
     """
 
-    def __init__(self, cfg: WrapperConfig, *,
+    def __init__(self, cfg: MsshdConfig, *,
                  state_dir: str | Path = '/var/lib/mssh/inner-sshd',
                  user_ca_pubkey_path: str | Path | None = None):
         self.cfg = cfg
         self.state_dir = Path(state_dir)
         self.user_ca_pubkey_path = (
             Path(user_ca_pubkey_path) if user_ca_pubkey_path
-            else self.state_dir / 'wrapper-user-ca.pub')
+            else self.state_dir / 'msshd-user-ca.pub')
         self._sshd_binary = cfg.inner.sshd_binary
         self._host_key: Path = self.state_dir / 'ssh_host_ed25519_key'
         self._sessions: dict[str, _SessionProc] = {}
@@ -497,7 +497,7 @@ def _allocate_port(lo: int, hi: int) -> int:
     first that ``bind()``s successfully. We don't hold the bind --
     sshd will re-bind when it starts. There's a small TOCTOU window
     where another process could grab the port between us closing and
-    sshd binding, but it's negligible on a host the wrapper owns.
+    sshd binding, but it's negligible on a host msshd owns.
     """
     candidates = random.sample(range(lo, hi + 1), k=min(100, hi - lo + 1))
     for port in candidates:

@@ -5,7 +5,7 @@ mssh-admin manages the *CA-internal* hierarchy (authz certs, server mTLS,
 admin mTLS). It does NOT manage the user-facing hierarchy:
 
   - user-CA cert + signing key
-  - per-container wrapper TLS server cert (the cert msshd serves on
+  - per-container msshd TLS server cert (the cert msshd serves on
     port 2200)
   - per-user mTLS client cert (presented by the mssh client)
 
@@ -25,7 +25,7 @@ Usage:
 Produces under --out-dir:
   user-ca.crt                  # trust anchor (push to every msshd as user-ca.pub)
   user-ca.key                  # KEEP SAFE — signs everything else
-  wrapper-<server>.crt/.key    # per-server TLS material (push to that server)
+  msshd-<server>.crt/.key    # per-server TLS material (push to that server)
   <user>.crt/.key              # per-user mTLS material (give to that user)
   <user>.pub                   # ssh-ed25519 pubkey (feed to `mssh-admin user add --key`)
 """
@@ -118,14 +118,14 @@ def mint(out: Path, *, servers: dict[str, str],
                            critical=True)
             .add_extension(san, critical=False)
             .sign(ca_key, None))
-        cp, kp = out / f'wrapper-{name}.crt', out / f'wrapper-{name}.key'
+        cp, kp = out / f'msshd-{name}.crt', out / f'msshd-{name}.key'
         cp.write_bytes(ws_cert.public_bytes(serialization.Encoding.PEM))
         kp.write_bytes(ws_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption()))
         os.chmod(kp, 0o600)
-        print(f'  wrapper TLS for {name} ({ip}) → wrapper-{name}.{{crt,key}}')
+        print(f'  msshd TLS for {name} ({ip}) → msshd-{name}.{{crt,key}}')
 
     for u in users:
         ck = ed25519.Ed25519PrivateKey.generate()

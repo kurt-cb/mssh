@@ -173,7 +173,7 @@ a config it controls, with these invariants:
   - logs to msshd's stderr (no syslog, no separate log files)
 
 The inner sshd has **two lifecycle modes**, selected by
-`wrapper.yaml`'s `inner.mode`:
+`msshd.yaml`'s `inner.mode`:
 
   - **long-lived** (default) — one inner sshd at msshd boot,
     rendered once from a fixed template, serving every session

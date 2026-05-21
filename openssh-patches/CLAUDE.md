@@ -113,7 +113,7 @@ When a future Claude session is invoked in this directory:
 3. If CHANGES_REQUESTED:
    - Re-read the relevant patch file in `patches/`.
    - Re-read the related design docs:
-     `../design/ssh-rt-auth-detailed-wrapper.md`,
+     `../design/ssh-rt-auth-architecture.md`,
      `../INSTALLATION.md`, this file.
    - Propose the patch revision to the user before editing.
    - Once the user approves, edit the source in
@@ -247,7 +247,7 @@ proposed upstream:
   authorization hook returning an X.509 cert that sshd parses and
   enforces. ~500-800 LOC. Architecturally bigger; would have needed
   RFC-style discussion first, and the parent ssh-rt-auth project no
-  longer needs it (the wrapper does this work). Kept as historical
+  longer needs it (msshd does this work). Kept as historical
   design in `NOTES.md` only.
 - **0005-0007 cert-extension enforcement patches** — channel-policy,
   force-command, CheckExpireCommand. All depend on 0004; deprecated

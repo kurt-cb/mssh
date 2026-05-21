@@ -33,7 +33,7 @@ tests/
 │   ├── conftest.py                   # provisioned_env, scenario,
 │   │                                 #   --keep-containers, --install-snoopy,
 │   │                                 #   --seed pytest options
-│   ├── lxc_helpers.py                # subprocess wrappers, snoopy installer
+│   ├── lxc_helpers.py                # subprocess helpers, snoopy installer
 │   ├── log_helpers.py                # OpsLog, banner, render_table
 │   ├── randomized.py                 # seed-reproducible scenario builder
 │   ├── test_deployment_validation.py # 4 tests (Phase 1 smoke)

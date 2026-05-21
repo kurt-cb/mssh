@@ -1,25 +1,25 @@
 """Local user-CA: key custody + per-connection OpenSSH cert minting.
 
-The wrapper holds an Ed25519 user-CA private key in memory after
+msshd holds an Ed25519 user-CA private key in memory after
 startup. The matching public key is installed at the inner sshd's
 ``TrustedUserCAKeys`` path so that any cert signed by this CA is
 accepted by the inner sshd as proof of the user's identity.
 
 Per-connection flow:
   1. CA returns an X.509 authorization cert with policy extensions.
-  2. Wrapper generates an ephemeral Ed25519 user keypair.
-  3. Wrapper calls ``mint_user_cert()`` to produce a short-lived
+  2. msshd generates an ephemeral Ed25519 user keypair.
+  3. msshd calls ``mint_user_cert()`` to produce a short-lived
      OpenSSH user cert signed by the user-CA, carrying:
        - the validated unix principal
        - critical options translated from X.509 extensions (see
          policy.py)
        - validity = min(authz_cert.notAfter, now + DEFAULT_TTL)
-  4. Wrapper hands ``(user_priv_key, cert_blob)`` to its asyncssh
+  4. msshd hands ``(user_priv_key, cert_blob)`` to its asyncssh
      client and connects to the inner sshd. Inner sshd validates the
      cert against TrustedUserCAKeys, accepts, spawns the shell.
 
 Design refs:
-- [detailed-wrapper.md §6 + §7](../../design/mssh-detailed-wrapper.md)
+- [architecture.md §6 + §7](../../design/architecture.md)
 - OpenSSH cert format: PROTOCOL.certkeys
 """
 from __future__ import annotations
@@ -47,7 +47,7 @@ DEFAULT_USER_CERT_TTL_SECONDS = 30
 class MintedUserCert:
     """Output of ``mint_user_cert``."""
     user_private_key: asyncssh.SSHKey
-    """Ephemeral private key. Used by the wrapper's asyncssh client."""
+    """Ephemeral private key. Used by msshd's asyncssh client."""
 
     cert: asyncssh.SSHCertificate
     """The OpenSSH user cert signed by the user-CA."""
@@ -73,7 +73,7 @@ class UserCA:
 
     @property
     def public_key_openssh(self) -> bytes:
-        """Wrapper-side accessor for the user-CA pubkey in OpenSSH
+        """msshd-side accessor for the user-CA pubkey in OpenSSH
         authorized_keys format (one line, e.g.
         ``ssh-ed25519 AAAA... mssh-user-ca``)."""
         return self._ca_key.export_public_key('openssh')
@@ -81,7 +81,7 @@ class UserCA:
     @classmethod
     def generate(cls) -> 'UserCA':
         """Generate a fresh Ed25519 user-CA keypair. Used by
-        ``ssh-rt-wrapper-admin init``."""
+        ``msshd-admin init``."""
         ca_key = asyncssh.generate_private_key('ssh-ed25519',
                                                 comment='mssh-user-ca')
         return cls(ca_key)
@@ -105,7 +105,7 @@ class UserCA:
 
     def write_private_to(self, path: str | Path) -> None:
         """Atomically write the private key to ``path`` with mode 0600.
-        Used by ``ssh-rt-wrapper-admin init``."""
+        Used by ``msshd-admin init``."""
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_name(p.name + '.tmp')
@@ -140,7 +140,7 @@ class UserCA:
         """Mint a short-lived OpenSSH user cert for ``principal``.
 
         Returns ``(user_private_key, cert)``. The cert is signed by
-        the wrapper's user-CA key and is accepted by the inner sshd
+        msshd's user-CA key and is accepted by the inner sshd
         (which pins our user-CA pubkey via TrustedUserCAKeys).
 
         Caller normally derives ``valid_before`` from the CA-issued
@@ -167,7 +167,7 @@ class UserCA:
             key_id = f'mssh/{principal}/{cert_serial:x}'
 
         # Slight backdate on valid_after to defend against modest
-        # clock drift between wrapper and inner sshd.
+        # clock drift between msshd and inner sshd.
         valid_after = now - _dt.timedelta(seconds=5)
 
         cert = self._ca_key.generate_user_certificate(

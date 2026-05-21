@@ -727,7 +727,7 @@ def register_routes(app: Flask) -> None:
         return (pem, 200, {'Content-Type': 'application/x-pem-file'})
 
     # /v1/crl is the msshd hot-path fetch. Authenticated by the same
-    # mTLS chain as /v1/authorize (the wrapper presents its mTLS cert
+    # mTLS chain as /v1/authorize (msshd presents its mTLS cert
     # — no admin role gate). Pure read; never mutates state.
     @app.get('/v1/crl')
     def _crl_msshd_fetch():

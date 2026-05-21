@@ -4,7 +4,7 @@
 stabilize.
 
 When implemented this tree will hold a **full Go port** of the
-project — CA + admin CLI + shim + Tier 1 wrapper (msshd) + Tier 1
+project — CA + admin CLI + shim + msshd + Tier 1
 client (mssh). No mixing with the Python implementation: a Go
 deployment uses only this tree's binaries.
 
@@ -15,7 +15,7 @@ go/
 ├── go.mod
 ├── cmd/
 │   ├── mssh/                # Tier 1 client
-│   ├── msshd/               # Tier 1 wrapper daemon
+│   ├── msshd/               # msshd daemon
 │   ├── ca/                  # CA server
 │   └── admin/               # ssh-rt-admin
 ├── internal/
@@ -33,7 +33,7 @@ schema, and CA contract** — they must remain interoperable. A single
 integration test suite (LXC) should drive both via the same external
 interfaces.
 
-See [../design/ssh-rt-auth-detailed-wrapper.md](../design/ssh-rt-auth-detailed-wrapper.md)
+See [../design/ssh-rt-auth-architecture.md](../design/ssh-rt-auth-architecture.md)
 for the implementation blueprint and
 [../design/ssh-rt-auth-phase2-ideas.md](../design/ssh-rt-auth-phase2-ideas.md)
 for the sequencing decision (Python features first, then Go port).

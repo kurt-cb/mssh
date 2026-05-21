@@ -55,7 +55,7 @@ mssh, mssh-ca, mssh-admin, msshd, msshd-admin, mssh-debug-sshd
 
 ## Three msshd operating modes
 
-In `wrapper.yaml`, `mode:` selects one of:
+In `msshd.yaml`, `mode:` selects one of:
 
 | Mode | Status | Outer auth | Inner auth |
 |---|---|---|---|
@@ -82,13 +82,13 @@ The adoption journey is fallback → gated → enforce, reversible.
    - `python/tests/lxc/conftest.py`
    - `python/tests/lxc/test_setup_only_msshd.py`
    - `python/tests/lxc/msshd_helpers.py`
-   - `python/tests/lxc/test_wrapper_enforce.py`
+   - `python/tests/lxc/test_msshd_enforce.py`
    - `python/tests/lxc/test_zzz_emergency_cert.py`
    - Several other test files
    - `systemd/msshd.service`
    - `scripts/install_mssh.sh` (already uses `/etc/mssh/` — good)
 
-2. **`SSH_RT_AUTH_WRAPPER_STATE_DIR` env var.** Used by
+2. **`MSSHD_STATE_DIR` env var.** Used by
    `python/src/mssh/msshd/msshd.py` to locate state dir. Rename to
    `MSSHD_STATE_DIR` for consistency. Touches the test fixtures
    that set it.
@@ -126,15 +126,16 @@ These have full design sections; pick one up when ready to implement:
 16. Distro packaging path (.deb/.rpm/.apk) + Go+musl caveat
 17. Per-session banner with variable substitution
 
-Section 6.5.1 of `archive/design/ssh-rt-auth-detailed-wrapper.md`
+Section 6.5.1 of `archive/design/ssh-rt-auth-architecture.md`
 also captures **gated mode** (the missing third operating mode);
 the canonical pointer for that is now `design/architecture.md` +
 `design/future-ideas.md`.
 
 ### Open style/naming questions
 
-- **Word "wrapper" is retired** in favor of "gateway" for msshd.
-  If you see "wrapper" outside archive/, fix it.
+- **Word "wrapper" is fully eliminated** from active sources as of
+  v0.1.7 — use "msshd" or "gateway". Only `archive/` retains the
+  old terminology (deliberately, as historical content).
 - **Phase / Tier / PoC framing is retired** in the clean-room docs.
   Reference architecture.md for the canonical view.
 - **GitHub repo URL is still `kurt-cb/ssh-rt-auth`.** Don't rename
@@ -180,7 +181,7 @@ the canonical pointer for that is now `design/architecture.md` +
 - `python/.swp`, `python/1`, `python/t` are stray editor/scratch
   files that got committed in 4ef9818. Probably want to delete
   and add to .gitignore.
-- `archive/design/ssh-rt-auth-detailed-wrapper.md §6.5.1` (gated
+- `archive/design/ssh-rt-auth-architecture.md §6.5.1` (gated
   mode) is the most-detailed deferred design and probably the
   highest-value near-term implementation. Worth promoting to
   `design/gated-mode.md` if the project commits to building it.

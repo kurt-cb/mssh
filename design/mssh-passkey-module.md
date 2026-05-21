@@ -15,7 +15,7 @@ the surrounding decisions:
     ca-config, CLI surface.
 
 > **Status:** initial implementation in progress (v0.1.5+). Storage,
-> WebAuthn RP wrappers, and the broker API land first; browser
+> WebAuthn RP adapters, and the broker API land first; browser
 > pages and adhoc-lab integration follow. Each decision below is
 > the choice we're making for v1; "Decision needed:" markers flag
 > places the operator may want to revisit later.
@@ -1149,7 +1149,7 @@ For convenience, the open decisions marked above:
 | Piece | LOC |
 |---|---|
 | Storage (SQLite + schema migrations) | 250 |
-| WebAuthn RP wrappers (around `webauthn` lib) | 200 |
+| WebAuthn RP adapters (around `webauthn` lib) | 200 |
 | Broker API endpoints (mTLS) | 200 |
 | Browser pages (Flask + Bootstrap 5 templates + small JS) | 200 |
 | Dual-listener wiring + config | 100 |

@@ -7,7 +7,7 @@ Phase 1B: enforce mode. TLS-terminating listener + CA call + cert mint
 + inner-sshd-managed handoff via asyncssh.
 
 Invocation:
-    python -m mssh.msshd --config /etc/mssh/wrapper.yaml
+    python -m mssh.msshd --config /etc/mssh/msshd.yaml
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ import signal
 import sys
 from pathlib import Path
 
-from .config import MODE_ENFORCE, MODE_FALLBACK, WrapperConfig
+from .config import MODE_ENFORCE, MODE_FALLBACK, MsshdConfig
 from .listener import FallbackListener
 
 
@@ -33,7 +33,7 @@ _LEVELS = {
 }
 
 
-def _setup_logging(cfg: WrapperConfig) -> None:
+def _setup_logging(cfg: MsshdConfig) -> None:
     level = _LEVELS.get(cfg.logging_.level.lower(), logging.INFO)
     logging.basicConfig(
         level=level,
@@ -42,7 +42,7 @@ def _setup_logging(cfg: WrapperConfig) -> None:
     )
 
 
-async def _run(cfg: WrapperConfig) -> int:
+async def _run(cfg: MsshdConfig) -> int:
     if cfg.mode == MODE_FALLBACK:
         listener = FallbackListener(cfg)
         await listener.start()
@@ -72,13 +72,13 @@ async def _run(cfg: WrapperConfig) -> int:
     return 2
 
 
-async def _run_enforce(cfg: WrapperConfig) -> int:
+async def _run_enforce(cfg: MsshdConfig) -> int:
     # Lazy imports — enforce mode pulls in asyncssh + cryptography
     # heavy paths only when needed.
     from mssh._protocol import PROTOCOL_VERSION
     from mssh._version import __version__ as MSSHD_VERSION
     from .authz_cache import AuthzCache
-    from .ca import WrapperCAClient
+    from .ca import MsshdCAClient
     from .config import INNER_MODE_PER_CONNECTION
     from .crl_sync import CRLSync
     from .enforce_listener import EnforceListener
@@ -87,16 +87,16 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
     from .userca import UserCA
 
     state_dir = os.environ.get(
-        'SSH_RT_AUTH_WRAPPER_STATE_DIR',
+        'MSSHD_STATE_DIR',
         '/var/lib/mssh')
 
     # 1. Load the user-CA private key (in memory only after this).
-    user_ca_priv_path = os.path.join(state_dir, 'wrapper-user-ca')
+    user_ca_priv_path = os.path.join(state_dir, 'msshd-user-ca')
     try:
         user_ca = UserCA.load(user_ca_priv_path)
     except (FileNotFoundError, ValueError) as e:
-        log.error('cannot load wrapper-user-ca from %s: %s. '
-                  'Run: ssh-rt-wrapper-admin init',
+        log.error('cannot load msshd-user-ca from %s: %s. '
+                  'Run: msshd-admin init',
                   user_ca_priv_path, e)
         return 2
 
@@ -107,14 +107,14 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
         inner = PerConnectionInnerSshd(
             cfg, state_dir=os.path.join(state_dir, 'inner-sshd'),
             user_ca_pubkey_path=os.path.join(
-                state_dir, 'inner-sshd', 'wrapper-user-ca.pub'),
+                state_dir, 'inner-sshd', 'msshd-user-ca.pub'),
         )
     else:
         log.info('inner sshd mode: long-lived')
         inner = InnerSshd(
             cfg, state_dir=os.path.join(state_dir, 'inner-sshd'),
             user_ca_pubkey_path=os.path.join(
-                state_dir, 'inner-sshd', 'wrapper-user-ca.pub'),
+                state_dir, 'inner-sshd', 'msshd-user-ca.pub'),
         )
     try:
         await inner.start()
@@ -125,7 +125,7 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
     try:
         # 3. CA client.
         try:
-            ca_client = WrapperCAClient(cfg)
+            ca_client = MsshdCAClient(cfg)
         except Exception as e:
             log.error('CA client init failed: %s', e)
             await inner.stop()
@@ -140,7 +140,7 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
         # 3b. Authz cache (persistent on-disk, loaded at startup).
         # Stores the same grants the CA would return; operator can
         # also inject bypass-cert entries that survive CA outages.
-        # Eviction caps configurable via wrapper.yaml's
+        # Eviction caps configurable via msshd.yaml's
         # performance.authz_cache_max_per_principal +
         # performance.authz_cache_max_total.
         authz_cache = AuthzCache(
@@ -193,12 +193,12 @@ async def _run_enforce(cfg: WrapperConfig) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog='msshd')
-    ap.add_argument('--config', default='/etc/mssh/wrapper.yaml',
-                    help='path to wrapper.yaml')
+    ap.add_argument('--config', default='/etc/mssh/msshd.yaml',
+                    help='path to msshd.yaml')
     args = ap.parse_args(argv)
 
     try:
-        cfg = WrapperConfig.load(args.config)
+        cfg = MsshdConfig.load(args.config)
         cfg.validate()
         cfg.check_permissions()
     except (FileNotFoundError, ValueError) as e:

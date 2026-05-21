@@ -1,14 +1,14 @@
 [Unit]
-Description=msshd — mssh wrapper (mTLS-authenticated SSH frontend)
+Description=msshd — msshd (mTLS-authenticated SSH frontend)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=notify
-User=_msshwrapper
-Group=_msshwrapper
+User=_msshd
+Group=_msshd
 AmbientCapabilities=CAP_NET_BIND_SERVICE
-ExecStart=/usr/local/bin/msshd --config /etc/mssh/wrapper.yaml
+ExecStart=/usr/local/bin/msshd --config /etc/mssh/msshd.yaml
 Restart=on-failure
 RestartSec=5
 

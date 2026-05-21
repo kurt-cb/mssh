@@ -1,27 +1,27 @@
-# mssh wrapper — operator configuration
+# msshd — operator configuration
 #
-# This is the ENTIRE operator-facing config for the wrapper. The inner
+# This is the ENTIRE operator-facing config for msshd. The inner
 # sshd config is derived from this and hash-validated at startup;
 # operators do NOT edit the inner sshd_config directly. See
-# design/mssh-detailed-wrapper.md §11.
+# design/architecture.md §11.
 
-# SAFE-ROLLOUT MODE. See design/mssh-detailed-wrapper.md §6.5.
-# Default at install time is "fallback" — wrapper transparently forwards
+# SAFE-ROLLOUT MODE. See design/architecture.md §6.5.
+# Default at install time is "fallback" — msshd transparently forwards
 # to fallback.host:fallback.port without calling the CA. Use this to
-# verify the wrapper is wired in correctly without changing your
+# verify msshd is wired in correctly without changing your
 # existing auth surface. Flip to "enforce" only after verifying CA
-# reachability and inner-sshd config with `ssh-rt-wrapper-admin verify`.
+# reachability and inner-sshd config with `msshd-admin verify`.
 mode: fallback   # fallback | enforce
 
 fallback:
   # Where to forward connections when mode == fallback. Typically the
-  # system sshd on localhost:22. The wrapper does NOT verify auth in
+  # system sshd on localhost:22. msshd does NOT verify auth in
   # this mode; the downstream sshd does.
   host: 127.0.0.1
   port: 22
 
 listen:
-  # External address(es) the wrapper binds for incoming mssh client traffic.
+  # External address(es) msshd binds for incoming mssh client traffic.
   external_address: 0.0.0.0
   external_port: 2200            # change to 22 after migrating clients
   # Optional: restrict to specific named interfaces (split-domain hosts).
@@ -29,19 +29,19 @@ listen:
 
 tls:
   # Server identity presented in the outer mTLS handshake.
-  server_cert: /etc/mssh/wrapper-server.crt
-  server_key:  /etc/mssh/wrapper-server.key
+  server_cert: /etc/mssh/msshd-server.crt
+  server_key:  /etc/mssh/msshd-server.key
   # Trust root for verifying client mTLS certs.
   user_ca_pubkey: /etc/mssh/user-ca.pub
   # TLS 1.3 only; cipher suites are hardcoded. Not tunable here.
 
 ca:
-  # mssh CA endpoints. Wrapper tries them in order on every call.
+  # mssh CA endpoints. msshd tries them in order on every call.
   endpoints:
     - https://ca-1.internal:8443
     - https://ca-2.internal:8443
-  client_cert: /etc/mssh/wrapper-mtls.crt
-  client_key:  /etc/mssh/wrapper-mtls.key
+  client_cert: /etc/mssh/msshd-mtls.crt
+  client_key:  /etc/mssh/msshd-mtls.key
   ca_pubkey:   /etc/mssh/server-mtls-ca.pub
   timeout_seconds: 5
   # Operator emergency-cert path. Only consumed by the legacy shim
@@ -53,7 +53,7 @@ inner:
   # The OpenSSH binary used as the inner sshd. Default: distro package.
   # Override to pin a specific version.
   sshd_binary: /usr/sbin/sshd
-  # Wrapper allocates the inner sshd's port dynamically in this range.
+  # msshd allocates the inner sshd's port dynamically in this range.
   # In per-connection mode each session takes a port from this pool;
   # max concurrent sessions is min(port-range-size,
   # performance.max_concurrent_sessions).
@@ -74,8 +74,8 @@ inner:
   # template store (mssh-admin template …).
 
 users:
-  # Which Unix users the wrapper will drop into. Connections requesting
-  # a username not in this list are denied at the wrapper before
+  # Which Unix users msshd will drop into. Connections requesting
+  # a username not in this list are denied at msshd before
   # touching the inner sshd. Use ["*"] to allow any (NOT recommended).
   allowed:
     - alice
@@ -85,7 +85,7 @@ users:
 logging:
   level: info                    # debug | info | warn | error
   destination: syslog            # syslog | stderr | file:/path
-  audit_destination: file:/var/log/mssh/wrapper-audit.jsonl
+  audit_destination: file:/var/log/mssh/msshd-audit.jsonl
 
 # Optional: per-Unix-user overrides. Rare — most policy lives in the
 # CA, not here.
@@ -96,7 +96,7 @@ performance:
   # Run inner SSH with Ciphers none. The outer mTLS already provides
   # confidentiality; setting this true skips a redundant encryption
   # pass on the inner leg. Useful for high-throughput SFTP/SCP
-  # workloads only. See design/mssh-detailed-wrapper.md §4.
+  # workloads only. See design/architecture.md §4.
   inner_cipher_none: false
   max_concurrent_sessions: 200
 

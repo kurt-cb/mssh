@@ -25,7 +25,7 @@ stock OpenSSH, but exposed three structural limits:
 and 0002 `%R/%r/%L/%l` tokens (provides the remote-IP and split-domain
 information). The third (cert-extension enforcement) was the original
 0004-0007 series; that's **dropped** now that ssh-rt-auth's Tier 1
-wrapper handles it natively. See `../design/ssh-rt-auth-dropped-ideas.md`.
+msshd handles it natively. See `../design/ssh-rt-auth-dropped-ideas.md`.
 
 The two surviving patches target upstream OpenSSH-portable; intended
 for eventual upstream submission. See `openssh_submission_email_*.md`

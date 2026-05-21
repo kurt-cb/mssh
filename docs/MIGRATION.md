@@ -178,7 +178,7 @@ chmod 600 /etc/mssh/srv-acct-01-key.pem
 ### 2.2 Configure msshd in fallback mode
 
 ```yaml
-# /etc/mssh/wrapper.yaml — Phase 2 starting config (fallback only)
+# /etc/mssh/msshd.yaml — Phase 2 starting config (fallback only)
 mode: fallback
 fallback:
   host: 127.0.0.1
@@ -281,7 +281,7 @@ mssh -p 2200 alice@srv-acct-01 -- whoami
 
 This is the actual security cutover. Pick one server group and one
 user group at a time. Each flip is reversible by changing one line
-in `wrapper.yaml` and restarting msshd.
+in `msshd.yaml` and restarting msshd.
 
 ### 4.1 Pre-flight checks
 
@@ -297,7 +297,7 @@ banner the user sees on connect will reflect the server's status.
 
 ```bash
 # On the chosen server:
-sed -i 's/^mode: fallback/mode: enforce/' /etc/mssh/wrapper.yaml
+sed -i 's/^mode: fallback/mode: enforce/' /etc/mssh/msshd.yaml
 systemctl restart msshd
 journalctl -u msshd --since '1 minute ago'
 # Look for: "running in enforce mode", "inner sshd up on 127.0.0.1:…"
@@ -324,7 +324,7 @@ mssh-admin audit --decision denied --limit 50  # NB: --since is future work
 The flip is reversible:
 
 ```bash
-sed -i 's/^mode: enforce/mode: fallback/' /etc/mssh/wrapper.yaml
+sed -i 's/^mode: enforce/mode: fallback/' /etc/mssh/msshd.yaml
 systemctl restart msshd
 ```
 
@@ -359,7 +359,7 @@ mssh:
 ```bash
 # On each server, swap msshd to port 22 (sshd has to move or stop):
 systemctl stop ssh
-sed -i 's/external_port: 2200/external_port: 22/' /etc/mssh/wrapper.yaml
+sed -i 's/external_port: 2200/external_port: 22/' /etc/mssh/msshd.yaml
 systemctl restart msshd
 ss -ltnp | grep ':22 '   # confirm msshd is on port 22
 systemctl disable ssh    # belt and braces
@@ -416,7 +416,7 @@ will surface the connection error.
 
 If msshd is bound but proxying fails:
 
-  - `fallback.host` / `fallback.port` in wrapper.yaml may not match
+  - `fallback.host` / `fallback.port` in msshd.yaml may not match
     where the existing sshd is listening.
   - Existing sshd may be down: `systemctl status ssh`.
 
@@ -439,15 +439,15 @@ Common denied reasons:
   - **`time_window`** — outside policy's allowed hours. Wait or
     widen.
 
-### "msshd refuses to start after a wrapper.yaml edit"
+### "msshd refuses to start after a msshd.yaml edit"
 
 ```bash
 journalctl -u msshd -n 50
 # Typically reports the specific config error.
 ```
 
-Roll back: `git diff wrapper.yaml` if your config is under git; or
-re-derive from `config/wrapper.yaml.example` and your CA enrollment.
+Roll back: `git diff msshd.yaml` if your config is under git; or
+re-derive from `config/msshd.yaml.example` and your CA enrollment.
 
 ### Rollback any single server
 
@@ -475,7 +475,7 @@ To return that server to mssh, restart msshd: `systemctl start msshd`.
     enrollment YAML. Until that lands, Phase 3 is manual: one
     `user add` + `policy add` per user.
   - **Multi-CA / failover deployments.** This doc assumes one CA.
-    Multi-CA is supported (`ca.endpoints` is a list in `wrapper.yaml`)
+    Multi-CA is supported (`ca.endpoints` is a list in `msshd.yaml`)
     but operationally complex; see
     [operations.md § bounce the CA without dropping sessions](operations.md#bounce-the-ca-without-dropping-sessions).
   - **Distro-native packaging.** Today's install is `install_mssh.sh`
@@ -501,7 +501,7 @@ mssh-admin server add --name <name> --groups <g1,g2> --out-dir ./creds/<name>
 scp -r ./creds/<name>          root@<name>:/tmp/mssh-creds/
 scp mssh-<ver>.tar.gz          root@<name>:/tmp/
 ssh root@<name> ./install_mssh.sh /tmp/mssh-<ver>.tar.gz
-ssh root@<name> '/etc/mssh/{cp creds, write wrapper.yaml fallback, systemctl enable --now msshd}'
+ssh root@<name> '/etc/mssh/{cp creds, write msshd.yaml fallback, systemctl enable --now msshd}'
 
 # Phase 3 — per user:
 mssh-admin user add    --user <u> --key /path/to/<u>.pub
@@ -510,11 +510,11 @@ mssh-admin user cert mint --user <u> --out-dir ./creds/<u>
 # (deliver creds/<u> to user; they place under ~/.mssh/)
 
 # Phase 4 — flip each server:
-ssh root@<name> "sed -i 's/^mode: fallback/mode: enforce/' /etc/mssh/wrapper.yaml; systemctl restart msshd"
+ssh root@<name> "sed -i 's/^mode: fallback/mode: enforce/' /etc/mssh/msshd.yaml; systemctl restart msshd"
 mssh-admin audit --decision denied --limit 50   # confirm clean
 
 # Phase 5 — decommission:
-ssh root@<name> "systemctl stop ssh; sed -i 's/external_port: 2200/external_port: 22/' /etc/mssh/wrapper.yaml; systemctl restart msshd"
+ssh root@<name> "systemctl stop ssh; sed -i 's/external_port: 2200/external_port: 22/' /etc/mssh/msshd.yaml; systemctl restart msshd"
 ```
 
 For an auto-generated playbook (every command + actual output)

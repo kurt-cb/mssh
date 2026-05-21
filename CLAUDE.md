@@ -25,14 +25,16 @@ Canonical names:
   — not a production tier
 - **shim** (library) — shared "call the CA" code (`python/src/mssh/shim/`)
 
-Avoid the word "wrapper" — historical, ambiguous. Use "gateway"
-for msshd. The previous "Tier 1 / 2 / 3" framing is also retired;
-mssh has a single production server (msshd) plus the optional AKC
-shim (`python/src/mssh/akc_shim/`) for unmodified-OpenSSH compat.
+"wrapper" has been fully eliminated from active sources (v0.1.7):
+use "msshd" or "gateway" instead. The word survives only in
+`archive/` (frozen historical docs). The previous "Tier 1 / 2 / 3"
+framing is also retired; mssh has a single production server
+(msshd) plus the optional AKC shim (`python/src/mssh/akc_shim/`)
+for unmodified-OpenSSH compat.
 
 ## Three operating modes
 
-msshd selects between three modes via `wrapper.yaml`:
+msshd selects between three modes via `msshd.yaml`:
 
 - `fallback` — pure TCP proxy to operator's existing sshd. No CA
   call. Implemented.
@@ -104,7 +106,7 @@ policy, source tags) and the resolutions Kurt agreed to.
 
 This supersedes the earlier "emergency template" scaffolding
 (emergency.py + sshd_config.emergency.template), which has been
-ripped. The old emergency_cert field in wrapper.yaml is preserved
+ripped. The old emergency_cert field in msshd.yaml is preserved
 for the akc_shim legacy path only.
 
 **Known open design hole, unrelated to bypass:** the authz cache has
@@ -163,7 +165,7 @@ See [archive/design/notes-bypass-cache.md](archive/design/notes-bypass-cache.md)
 ### Amendment 2026-05-18 (c) — eviction-on-capacity
 
 Closes the prior amendment's open hole. Two configurable caps in
-`wrapper.yaml`:
+`msshd.yaml`:
 
 ```yaml
 performance:
@@ -267,6 +269,6 @@ requests>=2.31
 - Comments explain why, not what
 - Error messages should be specific and actionable
 - All network errors fail-closed (deny access)
-- Avoid the word "wrapper" — use "gateway" for msshd
+- "wrapper" is banned from active sources — use "msshd" or "gateway" (survives only in `archive/`)
 - Avoid Phase / Tier / PoC framing in new docs — those were
   intermediate; reference architecture.md for the canonical view

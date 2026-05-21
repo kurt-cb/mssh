@@ -453,12 +453,12 @@ def msshd_env(provisioned_env, tmp_path_factory):
     Reuses provisioned_env's CA + user enrollment + per-server mTLS creds.
     Adds:
       - A locally-generated user-CA + per-user X.509 mTLS client cert
-      - A locally-generated wrapper user-CA (signs ephemeral inner certs)
+      - A locally-generated msshd local user-CA (signs ephemeral inner certs)
       - Each user's mTLS-derived ed25519 pubkey blob enrolled at the CA
         alongside their existing SSH pubkey
-      - Wrapper TLS server cert + wrapper-user-CA pushed to each container
+      - msshd TLS server cert + msshd-user-CA pushed to each container
       - msshd running in enforce mode on every SSH container
-      - /usr/local/bin/mssh wrapper script + per-user ~/.mssh/{cert,key,ca}.pem
+      - /usr/local/bin/msshd script + per-user ~/.mssh/{cert,key,ca}.pem
         on every container
 
     Yields the provisioned_env dict augmented with:
@@ -486,12 +486,12 @@ def msshd_env(provisioned_env, tmp_path_factory):
                      for h in scenario.hosts}
     pki = M.gen_user_ca_and_mtls_certs(
         pki_dir,
-        wrapper_host_sans=container_ips,
+        msshd_host_sans=container_ips,
         user_principals=usernames)
 
-    # 2. Generate the wrapper user-CA (signs ephemeral inner OpenSSH certs).
-    w_ca_dir = tmp_path_factory.mktemp('msshd-wrapper-user-ca')
-    w_ca_priv, w_ca_pub = M.gen_wrapper_user_ca(w_ca_dir)
+    # 2. Generate msshd user-CA (signs ephemeral inner OpenSSH certs).
+    w_ca_dir = tmp_path_factory.mktemp('msshd-msshd-user-ca')
+    w_ca_priv, w_ca_pub = M.gen_msshd_user_ca(w_ca_dir)
 
     # 3. Enrol each user's mTLS-cert ed25519 pubkey at the CA, alongside
     #    their existing SSH pubkey.
@@ -500,7 +500,7 @@ def msshd_env(provisioned_env, tmp_path_factory):
             admin, u.username,
             pki['clients'][u.username]['ssh_pubkey_blob'])
 
-    # 4. Push wrapper cert material + start msshd on each SSH container.
+    # 4. Push msshd cert material + start msshd on each SSH container.
     server_creds = provisioned_env['server_creds']
     for host in scenario.hosts:
         c = host.container_name
@@ -512,23 +512,23 @@ def msshd_env(provisioned_env, tmp_path_factory):
         # msshd-expected paths.
         from pathlib import Path
         creds_tmp = tmp_path_factory.mktemp(f'mtls-{canon}')
-        wrapper_mtls_cert = creds_tmp / 'cert.pem'
-        wrapper_mtls_key  = creds_tmp / 'key.pem'
-        wrapper_mtls_cert.write_text(creds['cert_pem'])
-        wrapper_mtls_key.write_text(creds['key_pem'])
+        msshd_mtls_cert = creds_tmp / 'cert.pem'
+        msshd_mtls_key  = creds_tmp / 'key.pem'
+        msshd_mtls_cert.write_text(creds['cert_pem'])
+        msshd_mtls_key.write_text(creds['key_pem'])
         import os as _os
-        _os.chmod(wrapper_mtls_key, 0o600)
+        _os.chmod(msshd_mtls_key, 0o600)
 
         M.push_msshd_cert_material(
             c, alpine=is_alp,
-            wrapper_cert=pki['wrapper_certs'][c]['cert'],
-            wrapper_key=pki['wrapper_certs'][c]['key'],
+            msshd_cert=pki['msshd_certs'][c]['cert'],
+            msshd_key=pki['msshd_certs'][c]['key'],
             user_ca_pub=pki['user_ca_path'],
-            wrapper_mtls_cert=wrapper_mtls_cert,
-            wrapper_mtls_key=wrapper_mtls_key,
+            msshd_mtls_cert=msshd_mtls_cert,
+            msshd_mtls_key=msshd_mtls_key,
             ca_tls_root=provisioned_env['ca_cert'],
-            wrapper_user_ca_priv=w_ca_priv,
-            wrapper_user_ca_pub=w_ca_pub)
+            msshd_user_ca_priv=w_ca_priv,
+            msshd_user_ca_pub=w_ca_pub)
 
         # provisioned_env creates user accounts via `adduser -D` (Alpine)
         # or `useradd -m` (Ubuntu). Both leave the account locked
@@ -542,8 +542,8 @@ def msshd_env(provisioned_env, tmp_path_factory):
 
         M.start_msshd_enforce(c, ca_ip=ips[CA_HOST], alpine=is_alp)
 
-        # /usr/local/bin/mssh wrapper + per-user .mssh material.
-        M.install_mssh_wrapper_script(c)
+        # /usr/local/bin/msshd + per-user .mssh material.
+        M.install_mssh_script(c)
         for u in scenario.users:
             M.push_mssh_per_user(
                 c, username=u.username,

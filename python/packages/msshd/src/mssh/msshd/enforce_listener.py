@@ -39,8 +39,8 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from .authz_cache import SOURCE_BYPASS, SOURCE_CA, AuthzCache
 from .ca import (AuthorizationDeny, AuthorizationError, AuthorizationGrant,
-                  WrapperCAClient)
-from .config import WrapperConfig
+                  MsshdCAClient)
+from .config import MsshdConfig
 from .inner import InnerSshd
 from .policy import (KNOWN_CRITICAL, parse_cert_policy,
                      translate_to_inner_cert_kwargs)
@@ -61,9 +61,9 @@ class EnforceListener:
     directly.
     """
 
-    def __init__(self, cfg: WrapperConfig, *,
+    def __init__(self, cfg: MsshdConfig, *,
                  user_ca: UserCA,
-                 ca_client: WrapperCAClient,
+                 ca_client: MsshdCAClient,
                  inner_sshd,                       # InnerSshd | PerConnectionInnerSshd
                  authz_cache: AuthzCache,
                  crl_sync=None,                    # CRLSync | None
@@ -307,10 +307,10 @@ class EnforceListener:
         cert_policy = parse_cert_policy(result.cert_der)
         if (cert_policy.server_bind
                 and cert_policy.server_bind != self.cfg.tls.server_cert):
-            # The wrapper's own canonical name is encoded in its mTLS
+            # msshd's own canonical name is encoded in its mTLS
             # cert; pre-Phase-1B we don't have the explicit "this is
             # my canonical server name" yet — just log + accept for now.
-            log.debug('[%s] cert server_bind=%s (wrapper local-check '
+            log.debug('[%s] cert server_bind=%s (msshd local-check '
                       'deferred)', conn_id, cert_policy.server_bind)
 
         kwargs = translate_to_inner_cert_kwargs(cert_policy)
@@ -532,7 +532,7 @@ class EnforceListener:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _build_ssl_context(cfg: WrapperConfig) -> ssl.SSLContext:
+def _build_ssl_context(cfg: MsshdConfig) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_3
     ctx.load_cert_chain(certfile=cfg.tls.server_cert,
@@ -586,7 +586,7 @@ def _ssh_pubkey_blob_from_cert(peer_der: bytes) -> bytes:
         f'Phase 1B (use Ed25519 for now; v2 will support other types).')
 
 
-def _user_allowed(cfg: WrapperConfig, principal: str) -> bool:
+def _user_allowed(cfg: MsshdConfig, principal: str) -> bool:
     allowed = cfg.users.allowed
     if not allowed:
         return False

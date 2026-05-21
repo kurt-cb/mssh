@@ -33,7 +33,7 @@ def _mint_ed25519_cert() -> bytes:
 
 
 def test_ssh_pubkey_blob_ed25519_round_trip():
-    """The blob the wrapper derives from a cert must be parseable by
+    """The blob msshd derives from a cert must be parseable by
     the CA's identity_parser with the same fingerprint. If this drifts
     the CA will fail to look up enrolled users."""
     der = _mint_ed25519_cert()

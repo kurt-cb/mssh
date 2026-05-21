@@ -1,16 +1,16 @@
-"""End-to-end Tier-1-wrapper integration test (enforce mode).
+"""End-to-end msshd integration test (enforce mode).
 
 Provisions:
 
   - One CA container — runs ``ca.server`` over mTLS.
-  - One wrapper-target container — runs ``msshd`` in
-    ``enforce`` mode, with a hermetic inner sshd that the wrapper
+  - One msshd-target container — runs ``msshd`` in
+    ``enforce`` mode, with a hermetic inner sshd that msshd
     spawns and owns.
 
 Drives one ``mssh alice@<target> -- whoami`` call through the
-wrapper, verifies the auth path end-to-end:
+msshd, verifies the auth path end-to-end:
 
-  mssh (TLS+mTLS) ─► wrapper ─► CA (mTLS authorize) ─► wrapper
+  mssh (TLS+mTLS) ─► msshd ─► CA (mTLS authorize) ─► msshd
        │                              │
        │  (cert minted, JSON ack)     │  ← inner OpenSSH cert
        │                              │
@@ -18,7 +18,7 @@ wrapper, verifies the auth path end-to-end:
        ▼
    prints "alice"
 
-Opt-in marker: ``-m wrapper_enforce``.
+Opt-in marker: ``-m msshd_enforce``.
 """
 from __future__ import annotations
 
@@ -49,18 +49,18 @@ from lxc_helpers import (
 from log_helpers import banner, section
 
 
-pytestmark = [pytest.mark.lxc, pytest.mark.wrapper_enforce]
+pytestmark = [pytest.mark.lxc, pytest.mark.msshd_enforce]
 
 
-CA_NAME     = 'mssh-wrapper-ca'
-TARGET_NAME = 'mssh-wrapper-target'
+CA_NAME     = 'mssh-ca'
+TARGET_NAME = 'msshd-target'
 CA_PORT     = 8443
-WRAPPER_PORT = 2200
+MSSHD_PORT = 2200
 
 
 # ---------------------------------------------------------------------------
 # Crypto helpers — generate alice's mTLS material + the user-CA that
-# signs her mTLS cert AND the wrapper's TLS server cert.
+# signs her mTLS cert AND msshd's TLS server cert.
 # ---------------------------------------------------------------------------
 
 def _ssh_pubkey_blob_from_ed25519(pubkey) -> bytes:
@@ -78,11 +78,11 @@ def _ssh_pubkey_blob_from_ed25519(pubkey) -> bytes:
 
 
 def _gen_user_ca_and_mtls_certs(out_dir: Path, *,
-                                wrapper_host_san: str,
+                                msshd_host_san: str,
                                 user_principals: list[str]):
     """Generate:
       - a fresh Ed25519 user-CA (signs the mTLS client + server certs)
-      - a wrapper TLS server cert (signed by user-CA, CN=wrapper-host)
+      - a msshd TLS server cert (signed by user-CA, CN=msshd-host)
       - one Ed25519 mTLS client cert per principal in user_principals
 
     Returns a dict with all the paths + the user-CA-signed-ed25519
@@ -115,14 +115,14 @@ def _gen_user_ca_and_mtls_certs(out_dir: Path, *,
     (out_dir / 'user-ca.crt').write_bytes(
         user_ca_cert.public_bytes(serialization.Encoding.PEM))
 
-    # Wrapper TLS server cert — Ed25519, signed by user_ca.
-    wrapper_server_key = ed25519.Ed25519PrivateKey.generate()
-    wrapper_server_cert = (
+    # msshd TLS server cert — Ed25519, signed by user_ca.
+    msshd_server_key = ed25519.Ed25519PrivateKey.generate()
+    msshd_server_cert = (
         x509.CertificateBuilder()
         .subject_name(x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, wrapper_host_san)]))
+            x509.NameAttribute(NameOID.COMMON_NAME, msshd_host_san)]))
         .issuer_name(user_ca_name)
-        .public_key(wrapper_server_key.public_key())
+        .public_key(msshd_server_key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(_dt.datetime.utcnow() - _dt.timedelta(minutes=5))
         .not_valid_after(_dt.datetime.utcnow() + _dt.timedelta(days=30))
@@ -130,19 +130,19 @@ def _gen_user_ca_and_mtls_certs(out_dir: Path, *,
                        critical=True)
         .add_extension(
             x509.SubjectAlternativeName(
-                [x509.DNSName(wrapper_host_san),
+                [x509.DNSName(msshd_host_san),
                  x509.DNSName('localhost')]),
             critical=False)
         .sign(user_ca_key, None)
     )
-    (out_dir / 'wrapper-server.crt').write_bytes(
-        wrapper_server_cert.public_bytes(serialization.Encoding.PEM))
-    (out_dir / 'wrapper-server.key').write_bytes(
-        wrapper_server_key.private_bytes(
+    (out_dir / 'msshd-server.crt').write_bytes(
+        msshd_server_cert.public_bytes(serialization.Encoding.PEM))
+    (out_dir / 'msshd-server.key').write_bytes(
+        msshd_server_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption()))
-    os.chmod(out_dir / 'wrapper-server.key', 0o600)
+    os.chmod(out_dir / 'msshd-server.key', 0o600)
 
     # mTLS client certs, one per principal.
     client_certs = {}
@@ -181,36 +181,36 @@ def _gen_user_ca_and_mtls_certs(out_dir: Path, *,
 
     return {
         'user_ca_path': str(out_dir / 'user-ca.crt'),
-        'wrapper_server_cert_path': str(out_dir / 'wrapper-server.crt'),
-        'wrapper_server_key_path': str(out_dir / 'wrapper-server.key'),
+        'msshd_server_cert_path': str(out_dir / 'msshd-server.crt'),
+        'msshd_server_key_path': str(out_dir / 'msshd-server.key'),
         'clients': client_certs,
     }
 
 
-def _gen_wrapper_user_ca(out_dir: Path) -> tuple[Path, Path]:
-    """Generate the wrapper's *local* user-CA keypair (signs ephemeral
+def _gen_msshd_user_ca(out_dir: Path) -> tuple[Path, Path]:
+    """Generate msshd's *local* user-CA keypair (signs ephemeral
     OpenSSH user certs handed to inner sshd). Returns (priv, pub)
     paths in OpenSSH key format."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    priv = out_dir / 'wrapper-user-ca'
+    priv = out_dir / 'msshd-user-ca'
     if priv.exists():
         priv.unlink()
-    if (out_dir / 'wrapper-user-ca.pub').exists():
-        (out_dir / 'wrapper-user-ca.pub').unlink()
+    if (out_dir / 'msshd-user-ca.pub').exists():
+        (out_dir / 'msshd-user-ca.pub').unlink()
     subprocess.run(['ssh-keygen', '-t', 'ed25519', '-N', '',
                     '-f', str(priv), '-q'],
                    check=True, capture_output=True)
-    return priv, out_dir / 'wrapper-user-ca.pub'
+    return priv, out_dir / 'msshd-user-ca.pub'
 
 
 # ---------------------------------------------------------------------------
 # The test
 # ---------------------------------------------------------------------------
 
-def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
+def test_msshd_enforce_end_to_end(request, tmp_path_factory):
     keep = request.config.getoption('--keep-containers', default=False)
 
-    banner('wrapper enforce mode — end-to-end')
+    banner('msshd enforce mode — end-to-end')
 
     section('Tearing down any pre-existing containers')
     for c in (CA_NAME, TARGET_NAME):
@@ -239,7 +239,7 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
         lxc_exec(c, 'apt-get', 'update', '-q', timeout=180)
         # --no-install-recommends skips doc packages (python-asyncssh-doc,
         # libjs-sphinxdoc, etc.) that we never use; saves ~200MB per
-        # container. Important when test_wrapper_enforce runs late in
+        # container. Important when test_msshd_enforce runs late in
         # the suite and the LXC storage pool is already crowded with
         # the session-scoped lxc_env containers.
         lxc_exec(c, 'apt-get', 'install', '-y', '-q',
@@ -310,20 +310,20 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
         ca_cert=str(creds_dir / 'tls-ca-cert.pem'),
     )
 
-    section('Enrolling wrapper-target at the CA')
-    resp = admin.server_add('srv-wrapper', groups=['poc'])
+    section('Enrolling msshd-target at the CA')
+    resp = admin.server_add('srv-msshd', groups=['poc'])
     server_creds = resp['credentials']
-    wrapper_mtls_cert = creds_dir / 'srv-mtls.crt'
-    wrapper_mtls_key  = creds_dir / 'srv-mtls.key'
-    wrapper_mtls_cert.write_text(server_creds['cert_pem'])
-    wrapper_mtls_key.write_text(server_creds['key_pem'])
-    os.chmod(wrapper_mtls_key, 0o600)
+    msshd_mtls_cert = creds_dir / 'srv-mtls.crt'
+    msshd_mtls_key  = creds_dir / 'srv-mtls.key'
+    msshd_mtls_cert.write_text(server_creds['cert_pem'])
+    msshd_mtls_key.write_text(server_creds['key_pem'])
+    os.chmod(msshd_mtls_key, 0o600)
 
-    # ---- 3. Generate mssh / wrapper-server certs locally ------------------
-    section('Generating user-CA, wrapper TLS server cert, alice mTLS cert')
+    # ---- 3. Generate mssh / msshd-server certs locally ------------------
+    section('Generating user-CA, msshd TLS server cert, alice mTLS cert')
     pki_dir = tmp_path_factory.mktemp('pki')
     pki = _gen_user_ca_and_mtls_certs(
-        pki_dir, wrapper_host_san=target_ip,
+        pki_dir, msshd_host_san=target_ip,
         user_principals=['alice'])
 
     # ---- 4. Enroll alice at the CA with her ed25519 pubkey ----------------
@@ -333,14 +333,14 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
                            pki['clients']['alice']['ssh_pubkey_blob']
                        ).decode('ascii'))
     admin.policy_add('alice', {
-        'servers': ['srv-wrapper'],
+        'servers': ['srv-msshd'],
         'channels': ['session'],
         'source_cidrs': ['0.0.0.0/0'],
         'max_cert_validity_seconds': 600,
     })
 
-    # ---- 5. Provision the wrapper-target ----------------------------------
-    section('Provisioning wrapper-target: unix user, wrapper config, cert material')
+    # ---- 5. Provision msshd-target ----------------------------------
+    section('Provisioning msshd-target: unix user, msshd config, cert material')
     # Unix user the inner sshd will spawn shells as. usermod -p '*'
     # marks the account as having a disabled-but-not-locked password,
     # which sshd treats as "publickey-only login allowed". useradd
@@ -350,10 +350,10 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
              check=False)
     lxc_exec(TARGET_NAME, 'usermod', '-p', '*', 'alice')
 
-    # Generate the wrapper's local user-CA (signs ephemeral inner certs).
-    wrapper_user_ca_dir = tmp_path_factory.mktemp('wrapper-user-ca')
-    wrapper_user_ca_priv, wrapper_user_ca_pub = _gen_wrapper_user_ca(
-        wrapper_user_ca_dir)
+    # Generate msshd's local user-CA (signs ephemeral inner certs).
+    msshd_user_ca_dir = tmp_path_factory.mktemp('msshd-user-ca')
+    msshd_user_ca_priv, msshd_user_ca_pub = _gen_msshd_user_ca(
+        msshd_user_ca_dir)
 
     # Push everything into the target.
     lxc_exec(TARGET_NAME, 'mkdir', '-p',
@@ -362,43 +362,43 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
              '/var/lib/mssh/inner-sshd',
              '/var/log/mssh')
 
-    # Wrapper's TLS server cert + key (presented to mssh clients).
-    push_file(TARGET_NAME, pki['wrapper_server_cert_path'],
-              '/etc/mssh/wrapper-server.crt', mode='644')
-    push_file(TARGET_NAME, pki['wrapper_server_key_path'],
-              '/etc/mssh/wrapper-server.key', mode='600')
+    # msshd's TLS server cert + key (presented to mssh clients).
+    push_file(TARGET_NAME, pki['msshd_server_cert_path'],
+              '/etc/mssh/msshd-server.crt', mode='644')
+    push_file(TARGET_NAME, pki['msshd_server_key_path'],
+              '/etc/mssh/msshd-server.key', mode='600')
     # User-CA trust root (verifies mssh client certs).
     push_file(TARGET_NAME, pki['user_ca_path'],
               '/etc/mssh/user-ca.pub', mode='644')
-    # Wrapper's CA mTLS material (presented when calling the CA).
-    push_file(TARGET_NAME, wrapper_mtls_cert,
-              '/etc/mssh/wrapper-mtls.crt', mode='644')
-    push_file(TARGET_NAME, wrapper_mtls_key,
-              '/etc/mssh/wrapper-mtls.key', mode='600')
+    # msshd's CA mTLS material (presented when calling the CA).
+    push_file(TARGET_NAME, msshd_mtls_cert,
+              '/etc/mssh/msshd-mtls.crt', mode='644')
+    push_file(TARGET_NAME, msshd_mtls_key,
+              '/etc/mssh/msshd-mtls.key', mode='600')
     push_file(TARGET_NAME, creds_dir / 'tls-ca-cert.pem',
               '/etc/mssh/server-mtls-ca.pub', mode='644')
-    # Wrapper's local user-CA (signs inner OpenSSH certs).
-    push_file(TARGET_NAME, str(wrapper_user_ca_priv),
-              '/var/lib/mssh/wrapper-user-ca', mode='600')
-    push_file(TARGET_NAME, str(wrapper_user_ca_pub),
-              '/var/lib/mssh/inner-sshd/wrapper-user-ca.pub',
+    # msshd's local user-CA (signs inner OpenSSH certs).
+    push_file(TARGET_NAME, str(msshd_user_ca_priv),
+              '/var/lib/mssh/msshd-user-ca', mode='600')
+    push_file(TARGET_NAME, str(msshd_user_ca_pub),
+              '/var/lib/mssh/inner-sshd/msshd-user-ca.pub',
               mode='644')
 
-    # wrapper.yaml (enforce mode).
+    # msshd.yaml (enforce mode).
     push_text(TARGET_NAME,
               f'mode: enforce\n'
               f'listen:\n'
               f'  external_address: 0.0.0.0\n'
-              f'  external_port: {WRAPPER_PORT}\n'
+              f'  external_port: {MSSHD_PORT}\n'
               f'  interfaces: []\n'
               f'tls:\n'
-              f'  server_cert: /etc/mssh/wrapper-server.crt\n'
-              f'  server_key:  /etc/mssh/wrapper-server.key\n'
+              f'  server_cert: /etc/mssh/msshd-server.crt\n'
+              f'  server_key:  /etc/mssh/msshd-server.key\n'
               f'  user_ca_pubkey: /etc/mssh/user-ca.pub\n'
               f'ca:\n'
               f'  endpoints: [https://{ca_ip}:{CA_PORT}]\n'
-              f'  client_cert: /etc/mssh/wrapper-mtls.crt\n'
-              f'  client_key:  /etc/mssh/wrapper-mtls.key\n'
+              f'  client_cert: /etc/mssh/msshd-mtls.crt\n'
+              f'  client_key:  /etc/mssh/msshd-mtls.key\n'
               f'  ca_pubkey:   /etc/mssh/server-mtls-ca.pub\n'
               f'  timeout_seconds: 5\n'
               f'inner:\n'
@@ -409,34 +409,34 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
               f'logging:\n'
               f'  level: info\n'
               f'  destination: stderr\n'
-              f'  audit_destination: file:/var/log/mssh/wrapper-audit.jsonl\n',
-              '/etc/mssh/wrapper.yaml')
+              f'  audit_destination: file:/var/log/mssh/msshd-audit.jsonl\n',
+              '/etc/mssh/msshd.yaml')
 
     # systemd unit.
     push_text(TARGET_NAME,
-              '[Unit]\nDescription=mssh wrapper\n'
+              '[Unit]\nDescription=msshd\n'
               'After=network-online.target\n'
               '[Service]\nWorkingDirectory=/app\n'
               'Environment="PYTHONPATH=/app/src"\n'
-              'Environment="SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh"\n'
+              'Environment="MSSHD_STATE_DIR=/var/lib/mssh"\n'
               'ExecStart=/usr/bin/python3 -m mssh.msshd '
-              '--config /etc/mssh/wrapper.yaml\n'
+              '--config /etc/mssh/msshd.yaml\n'
               'Restart=on-failure\n'
               'StandardError=journal\n'
               '[Install]\nWantedBy=multi-user.target\n',
               '/etc/systemd/system/msshd.service')
 
-    # ---- 6. Start the wrapper ---------------------------------------------
-    section('Starting wrapper')
+    # ---- 6. Start msshd ---------------------------------------------
+    section('Starting msshd')
     lxc_exec(TARGET_NAME, 'systemctl', 'daemon-reload')
     lxc_exec(TARGET_NAME, 'systemctl', 'start', 'msshd')
     try:
-        wait_for_port(TARGET_NAME, WRAPPER_PORT, max_wait=30)
+        wait_for_port(TARGET_NAME, MSSHD_PORT, max_wait=30)
     except Exception:
         # Dump the journal so we can see why startup failed.
         rj = lxc_exec(TARGET_NAME, 'journalctl', '-u', 'msshd',
                       '--no-pager', '-n', '100', check=False)
-        print('--- wrapper journal ---', file=sys.stderr)
+        print('--- msshd journal ---', file=sys.stderr)
         print(rj.stdout or '', file=sys.stderr)
         print(rj.stderr or '', file=sys.stderr)
         raise
@@ -454,16 +454,16 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
     section('Running mssh alice@target -- whoami')
     r = lxc_exec(TARGET_NAME, 'sh', '-c',
                  f'cd /app && PYTHONPATH=/app/src python3 -m mssh.client '
-                 f'alice@{target_ip}:{WRAPPER_PORT} -- whoami',
+                 f'alice@{target_ip}:{MSSHD_PORT} -- whoami',
                  check=False, timeout=30)
     print(f'mssh stdout: {r.stdout!r}', file=sys.stderr)
     print(f'mssh stderr: {r.stderr!r}', file=sys.stderr)
 
     if r.returncode != 0 or 'alice' not in (r.stdout or ''):
-        # Dump the wrapper journal to help debug.
+        # Dump msshd journal to help debug.
         rj = lxc_exec(TARGET_NAME, 'journalctl', '-u', 'msshd',
                       '--no-pager', '-n', '200', check=False)
-        print('--- wrapper journal ---', file=sys.stderr)
+        print('--- msshd journal ---', file=sys.stderr)
         print(rj.stdout or '', file=sys.stderr)
         # Dump the CA audit log to help debug.
         ra = lxc_exec(CA_NAME, 'cat', '/var/log/mssh/audit.jsonl',
@@ -480,7 +480,7 @@ def test_wrapper_enforce_end_to_end(request, tmp_path_factory):
     assert 'granted' in (ra.stdout or ''), \
         f'no granted entries in CA audit log:\n{ra.stdout}'
 
-    section('SUCCESS: mssh → wrapper → CA → inner sshd → "alice"')
+    section('SUCCESS: mssh → msshd → CA → inner sshd → "alice"')
 
     if not keep:
         section('Tearing down containers')

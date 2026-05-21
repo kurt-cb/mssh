@@ -16,7 +16,7 @@ import logging
 import uuid
 from typing import Awaitable, Callable
 
-from .config import WrapperConfig
+from .config import MsshdConfig
 from .proxy import bidirectional_proxy
 
 
@@ -30,7 +30,7 @@ class FallbackListener:
     others. The server runs until ``stop()`` is called.
     """
 
-    def __init__(self, cfg: WrapperConfig):
+    def __init__(self, cfg: MsshdConfig):
         self.cfg = cfg
         self._server: asyncio.base_events.Server | None = None
         self._active: set[asyncio.Task] = set()

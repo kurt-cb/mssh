@@ -82,10 +82,10 @@ through `install_mssh.sh`) and provision them:
 /etc/mssh/ca-tls-root.pem   (the CA's TLS root, for verifying CA replies)
 ```
 
-Drop a `wrapper.yaml` and start msshd:
+Drop a `msshd.yaml` and start msshd:
 
 ```yaml
-# /etc/mssh/wrapper.yaml (starting in fallback mode — Phase 1
+# /etc/mssh/msshd.yaml (starting in fallback mode — Phase 1
 # of the adoption journey, see below)
 mode: fallback
 fallback:
@@ -128,7 +128,7 @@ for the full schema (source CIDRs, time windows, max cert validity,
 mssh deliberately supports three operating modes so the cutover from
 "vanilla sshd" to "CA-mediated auth" can be done **per-server, on
 your schedule, reversibly**. Each mode is a single line in
-`wrapper.yaml`; restart msshd to flip.
+`msshd.yaml`; restart msshd to flip.
 
 ### Phase 0 — no mssh
 
@@ -153,7 +153,7 @@ port, has a sane systemd lifecycle. **No security change yet.**
 ### Phase 2 — `mode: gated` (deferred)
 
 Not yet implemented. See [future-ideas.md § gated mode](../design/future-ideas.md)
-and [archive/design/ssh-rt-auth-detailed-wrapper.md §6.5.1](../archive/design/ssh-rt-auth-detailed-wrapper.md).
+and [archive/design/ssh-rt-auth-architecture.md §6.5.1](../archive/design/ssh-rt-auth-architecture.md).
 
 When available: msshd does the full mTLS + CA call (so unauthorized
 clients can't even attempt auth) but forwards to your existing
@@ -174,8 +174,8 @@ listen:
   external_address: 0.0.0.0
   external_port: 2200
 tls:
-  server_cert: /etc/mssh/wrapper-server.crt
-  server_key:  /etc/mssh/wrapper-server.key
+  server_cert: /etc/mssh/msshd-server.crt
+  server_key:  /etc/mssh/msshd-server.key
   user_ca_pubkey: /etc/mssh/user-ca.pub
 ca:
   endpoints: [https://mssh-ca.internal:8443]
@@ -271,11 +271,11 @@ and rolling-restart them.
 
 Each msshd shows a banner before the user authenticates. Default is
 a generic "mediated by mssh" message. Customize by pointing
-`banner.template_path` in `wrapper.yaml` at a text file and listing
+`banner.template_path` in `msshd.yaml` at a text file and listing
 substitution values:
 
 ```yaml
-# /etc/mssh/wrapper.yaml
+# /etc/mssh/msshd.yaml
 banner:
   template_path: /etc/mssh/banner.txt
   values:
@@ -375,8 +375,8 @@ Clicking **Re-issue mTLS…** on the Hosts page runs:
    the new server cert, and the new server key.
 
 **Important:** the old keypair stops working immediately. Push the
-new tarball to `/etc/mssh/wrapper-mtls.{crt,key}` on the host
-(matching paths in [wrapper.yaml] `ca.client_cert` / `ca.client_key`)
+new tarball to `/etc/mssh/msshd-mtls.{crt,key}` on the host
+(matching paths in [msshd.yaml] `ca.client_cert` / `ca.client_key`)
 and `systemctl restart msshd` to pick it up. While the host is
 between old and new key, msshd's authorize calls will fail closed
 — that's a few seconds of denied sessions.
@@ -675,7 +675,7 @@ extras dependency is opt-in for exactly this reason.
 Check the systemd journal: `journalctl -u msshd -n 100`.
 Common causes:
 
-  - `wrapper.yaml` syntax error → msshd refuses to start, logs
+  - `msshd.yaml` syntax error → msshd refuses to start, logs
     the parse failure.
   - mTLS cert files missing or wrong permissions (`server-mtls.key`
     must be mode 600).

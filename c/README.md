@@ -8,7 +8,7 @@ Constrained-deployment target (Alpine, embedded, single-board hardware).
 ```
 c/
 ├── mssh/                    # Tier 1 client (C + Mbed TLS or wolfSSL)
-├── msshd/                   # Tier 1 wrapper daemon (C + Mbed TLS or wolfSSL)
+├── msshd/                   # msshd daemon (C + Mbed TLS or wolfSSL)
 ├── micro-ca/                # pre-configured tiny CA — one or two users
 │                            # plus an admin/root, hard-coded enrollment.
 │                            # Users wanting more deploy a python/ or go/ CA elsewhere.
@@ -31,5 +31,5 @@ Design constraints:
 
 See [../design/ssh-rt-auth-phase2-ideas.md](../design/ssh-rt-auth-phase2-ideas.md)
 for sequencing context and
-[../design/ssh-rt-auth-detailed-wrapper.md](../design/ssh-rt-auth-detailed-wrapper.md)
+[../design/ssh-rt-auth-architecture.md](../design/ssh-rt-auth-architecture.md)
 for the protocol contract that this implementation must honor.

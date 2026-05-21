@@ -1,12 +1,12 @@
-"""ssh-rt-wrapper-admin — operator CLI for the Python wrapper.
+"""msshd-admin — operator CLI for msshd.
 
 Phase 1A commands:
-  lint              Validate wrapper.yaml and on-disk file permissions.
+  lint              Validate msshd.yaml and on-disk file permissions.
   status            Print mode and the listen / fallback config.
 
 Phase 1B will add:
   init              Generate local user-CA keypair + initial state dirs.
-  rotate-ca         Generate a new local user-CA keypair; SIGHUP wrapper.
+  rotate-ca         Generate a new local user-CA keypair; SIGHUP msshd.
   verify            Health-check (CA reachability, inner sshd config hash, …).
 """
 from __future__ import annotations
@@ -15,13 +15,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from .config import WrapperConfig
+from .config import MsshdConfig
 
 
 def cmd_lint(args: argparse.Namespace) -> int:
     path = args.config
     try:
-        cfg = WrapperConfig.load(path)
+        cfg = MsshdConfig.load(path)
     except FileNotFoundError:
         print(f'config not found: {path}', file=sys.stderr)
         return 2
@@ -40,7 +40,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     try:
-        cfg = WrapperConfig.load(args.config)
+        cfg = MsshdConfig.load(args.config)
     except FileNotFoundError:
         print(f'config not found: {args.config}', file=sys.stderr)
         return 2
@@ -76,12 +76,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog='ssh-rt-wrapper-admin')
-    ap.add_argument('--config', default='/etc/mssh/wrapper.yaml',
-                    help='path to wrapper.yaml')
+    ap = argparse.ArgumentParser(prog='msshd-admin')
+    ap.add_argument('--config', default='/etc/mssh/msshd.yaml',
+                    help='path to msshd.yaml')
     sub = ap.add_subparsers(dest='cmd', required=True)
-    sub.add_parser('lint',      help='validate wrapper.yaml').set_defaults(fn=cmd_lint)
-    sub.add_parser('status',    help='print wrapper state').set_defaults(fn=cmd_status)
+    sub.add_parser('lint',      help='validate msshd.yaml').set_defaults(fn=cmd_lint)
+    sub.add_parser('status',    help='print msshd state').set_defaults(fn=cmd_status)
     sub.add_parser('init',      help='generate state dirs + local user-CA').set_defaults(fn=cmd_init)
     sub.add_parser('rotate-ca', help='rotate the local user-CA key').set_defaults(fn=cmd_rotate_ca)
     sub.add_parser('verify',    help='health-check').set_defaults(fn=cmd_verify)

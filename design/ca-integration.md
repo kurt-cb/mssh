@@ -34,7 +34,7 @@ separate lifecycle. Keep them straight before you start minting:
 |---|---|---|---|
 | **CA signing key** | Authorization X.509 certs, server mTLS, admin mTLS | `<ca-dir>/signing-key.pem` (CA host only) | `mssh-admin init`, `server add`, `admin add` |
 | **User-facing CA** | mssh client mTLS certs, msshd's TLS server cert on `:2200` | Operator's PKI — *not* the mssh-CA process | `scripts/mint-user-pki.py` (or any org PKI); future `mssh-admin pki` ([§25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony)) |
-| **msshd local user-CA** | Ephemeral OpenSSH user certs handed to the hermetic inner sshd | Per-msshd, under `/var/lib/mssh/wrapper-user-ca` (never leaves the host) | `ssh-keygen` at host provisioning time |
+| **msshd local user-CA** | Ephemeral OpenSSH user certs handed to the hermetic inner sshd | Per-msshd, under `/var/lib/mssh/msshd-user-ca` (never leaves the host) | `ssh-keygen` at host provisioning time |
 
 The §5 expansion (OpenVPN, WireGuard, PGP, generic TLS) adds **new
 per-protocol hierarchies under the CA signing key**, with their
@@ -92,13 +92,13 @@ for the operator-facing playbook including custody guidance.
 ```
 Operator workstation:                  CA host:                      Each msshd host:
 ~/.mssh-admin/                         /etc/mssh-ca/                 /etc/mssh/
-├── config (URL + cert paths)          ├── signing-key.pem           ├── wrapper.yaml
-├── bootstrap-admin-cert.pem    <──    ├── signing-cert.pem          ├── wrapper-mtls.crt   <── mssh-admin server add
+├── config (URL + cert paths)          ├── signing-key.pem           ├── msshd.yaml
+├── bootstrap-admin-cert.pem    <──    ├── signing-cert.pem          ├── msshd-mtls.crt   <── mssh-admin server add
 ├── bootstrap-admin-key.pem     <──    ├── tls-ca-cert.pem      ──>  ├── server-mtls-ca.pub
 └── tls-ca-cert.pem             <──    ├── tls-ca-key.pem            ├── user-ca.pub        <── user-facing CA
-                                       ├── tls-server-cert.pem       └── wrapper-server.crt <── user-facing CA
+                                       ├── tls-server-cert.pem       └── msshd-server.crt <── user-facing CA
                                        └── tls-server-key.pem        /var/lib/mssh/
-                                                                     └── wrapper-user-ca    <── ssh-keygen, local
+                                                                     └── msshd-user-ca    <── ssh-keygen, local
 ```
 
 The arrows show "where this file came from" — copy them at install
@@ -122,7 +122,7 @@ Produces in `./srv-acct-creds/`:
   - `srv-acct-cert.pem` — the server's mTLS client cert (signed by `tls-ca-key.pem`).
   - `srv-acct-key.pem` — the matching private key (mode 600).
 
-Push to `/etc/mssh/wrapper-mtls.{crt,key}` on the server; restart
+Push to `/etc/mssh/msshd-mtls.{crt,key}` on the server; restart
 msshd. The cert validity defaults to 30 days; rotation is
 `mssh-admin server remove && mssh-admin server add` (the web portal's
 **Re-issue mTLS** button automates this — see
@@ -142,7 +142,7 @@ Same signing key as server mTLS; the CA recognises them by checking
 the subject CN against the admin enrollment set + the role
 (`superuser` vs `auditor`).
 
-### User-facing PKI — wrapper TLS cert + per-user mTLS
+### User-facing PKI — msshd TLS cert + per-user mTLS
 
 This is the **user-facing CA hierarchy**, separate from the CA
 signing key. Today it's minted by a standalone helper:
@@ -157,7 +157,7 @@ python scripts/mint-user-pki.py \
 Produces:
 
   - `user-ca.crt` / `user-ca.key` — the user-facing CA root + signing key.
-  - `wrapper-<server>.crt` / `.key` — the cert msshd serves on
+  - `msshd-<server>.crt` / `.key` — the cert msshd serves on
     port 2200 (signed by user-ca).
   - `<user>.crt` / `<user>.key` — per-user mTLS client cert
     (signed by user-ca), what the `mssh` CLI presents.
@@ -165,8 +165,8 @@ Produces:
     key, ready for `mssh-admin user add --key`.
 
 Distribution: `user-ca.crt` becomes `/etc/mssh/user-ca.pub` on
-every msshd host; `wrapper-<server>.{crt,key}` lands on that
-server as `/etc/mssh/wrapper-server.{crt,key}`; `<user>.{crt,key}`
+every msshd host; `msshd-<server>.{crt,key}` lands on that
+server as `/etc/mssh/msshd-server.{crt,key}`; `<user>.{crt,key}`
 goes to that user's workstation as `~/.mssh/cert.pem` /
 `~/.mssh/key.pem`.
 
@@ -182,11 +182,11 @@ Generated **on each msshd host**, never visible to the CA:
 ```bash
 # As part of msshd install on each server:
 mkdir -p /var/lib/mssh /var/lib/mssh/inner-sshd
-ssh-keygen -t ed25519 -N '' -f /var/lib/mssh/wrapper-user-ca \
-           -C "wrapper-user-ca-$(hostname)"
-chmod 600 /var/lib/mssh/wrapper-user-ca
-cp /var/lib/mssh/wrapper-user-ca.pub \
-   /var/lib/mssh/inner-sshd/wrapper-user-ca.pub
+ssh-keygen -t ed25519 -N '' -f /var/lib/mssh/msshd-user-ca \
+           -C "msshd-user-ca-$(hostname)"
+chmod 600 /var/lib/mssh/msshd-user-ca
+cp /var/lib/mssh/msshd-user-ca.pub \
+   /var/lib/mssh/inner-sshd/msshd-user-ca.pub
 ```
 
 msshd uses this to mint **ephemeral** OpenSSH user certs (typically
@@ -912,7 +912,7 @@ migration paths for the common cases:
 | `mssh-admin init` — CA bootstrap | ✅ | [operations.md](../docs/operations.md#bootstrap-a-ca) |
 | Server mTLS cert (for msshd → CA) | ✅ | `mssh-admin server add` |
 | Admin mTLS cert | ✅ | `mssh-admin admin add` |
-| User-facing mTLS + wrapper TLS | 🟡 | `scripts/mint-user-pki.py`; `mssh-admin pki` ([§25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony)) pending |
+| User-facing mTLS + msshd TLS | 🟡 | `scripts/mint-user-pki.py`; `mssh-admin pki` ([§25](future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony)) pending |
 | msshd local user-CA (per-host) | ✅ | `ssh-keygen` at install time |
 | TLS server certs (generic, internal services) | ✅ | `mssh-admin cert mint --type tls-server` |
 | HTTPS user mTLS certs | ✅ | `mssh-admin cert mint --type https-user [--p12-password ...]` |

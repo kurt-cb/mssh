@@ -274,11 +274,11 @@ def _ssh_pubkey_blob_from_ed25519(pubkey) -> bytes:
 
 
 def _gen_user_ca_and_mtls_certs(out_dir: Path, *,
-                                wrapper_host_sans: dict[str, str],
+                                msshd_host_sans: dict[str, str],
                                 user_principals: list[str]) -> dict:
     """Generate a fresh Ed25519 user-CA and use it to sign:
 
-      - one wrapper TLS server cert per container (CN/SAN = container IP)
+      - one msshd TLS server cert per container (CN/SAN = container IP)
       - one mTLS client cert per principal in ``user_principals``
 
     Returns paths + the ssh-ed25519 pubkey blob for each user (needed
@@ -306,9 +306,9 @@ def _gen_user_ca_and_mtls_certs(out_dir: Path, *,
     (out_dir / 'user-ca.crt').write_bytes(
         user_ca_cert.public_bytes(serialization.Encoding.PEM))
 
-    # Wrapper TLS server cert per container (SAN = container's IP).
-    wrapper_certs = {}
-    for container, ip in wrapper_host_sans.items():
+    # msshd TLS server cert per container (SAN = container's IP).
+    msshd_certs = {}
+    for container, ip in msshd_host_sans.items():
         ws_key = ed25519.Ed25519PrivateKey.generate()
         ws_cert = (
             x509.CertificateBuilder()
@@ -327,15 +327,15 @@ def _gen_user_ca_and_mtls_certs(out_dir: Path, *,
                      x509.DNSName('localhost')]),
                 critical=False)
             .sign(user_ca_key, None))
-        cp = out_dir / f'wrapper-{container}.crt'
-        kp = out_dir / f'wrapper-{container}.key'
+        cp = out_dir / f'msshd-{container}.crt'
+        kp = out_dir / f'msshd-{container}.key'
         cp.write_bytes(ws_cert.public_bytes(serialization.Encoding.PEM))
         kp.write_bytes(ws_key.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption()))
         os.chmod(kp, 0o600)
-        wrapper_certs[container] = {'cert': str(cp), 'key': str(kp)}
+        msshd_certs[container] = {'cert': str(cp), 'key': str(kp)}
 
     # Per-user mTLS client certs.
     clients = {}
@@ -366,7 +366,7 @@ def _gen_user_ca_and_mtls_certs(out_dir: Path, *,
             'ssh_pubkey_blob': _ssh_pubkey_blob_from_ed25519(ck.public_key()),
         }
     return {'user_ca_path': str(out_dir / 'user-ca.crt'),
-            'wrapper_certs': wrapper_certs, 'clients': clients}
+            'msshd_certs': msshd_certs, 'clients': clients}
 
 
 def _ipaddr(s):
@@ -374,12 +374,12 @@ def _ipaddr(s):
     return ipaddress.ip_address(s)
 
 
-def _gen_wrapper_user_ca(out_dir: Path) -> tuple[Path, Path]:
-    """Local wrapper user-CA — signs the ephemeral OpenSSH user certs
+def _gen_msshd_user_ca(out_dir: Path) -> tuple[Path, Path]:
+    """Local msshd local user-CA — signs the ephemeral OpenSSH user certs
     that msshd hands to the inner sshd."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    priv = out_dir / 'wrapper-user-ca'
-    pub  = out_dir / 'wrapper-user-ca.pub'
+    priv = out_dir / 'msshd-user-ca'
+    pub  = out_dir / 'msshd-user-ca.pub'
     for p in (priv, pub):
         if p.exists():
             p.unlink()
@@ -389,9 +389,9 @@ def _gen_wrapper_user_ca(out_dir: Path) -> tuple[Path, Path]:
     return priv, pub
 
 
-# ---- wrapper.yaml renderers -------------------------------------------------
+# ---- msshd.yaml renderers -------------------------------------------------
 
-def _wrapper_yaml_fallback() -> str:
+def _msshd_yaml_fallback() -> str:
     return (
         'mode: fallback\n'
         f'fallback:\n'
@@ -404,11 +404,11 @@ def _wrapper_yaml_fallback() -> str:
         f'logging:\n'
         f'  level: info\n'
         f'  destination: stderr\n'
-        f'  audit_destination: file:/var/log/mssh/wrapper-audit.jsonl\n'
+        f'  audit_destination: file:/var/log/mssh/msshd-audit.jsonl\n'
     )
 
 
-def _wrapper_yaml_enforce(ca_ip: str, *, inner_mode: str = 'long-lived') -> str:
+def _msshd_yaml_enforce(ca_ip: str, *, inner_mode: str = 'long-lived') -> str:
     return (
         'mode: enforce\n'
         f'listen:\n'
@@ -416,13 +416,13 @@ def _wrapper_yaml_enforce(ca_ip: str, *, inner_mode: str = 'long-lived') -> str:
         f'  external_port: {MSSHD_PORT}\n'
         f'  interfaces: []\n'
         f'tls:\n'
-        f'  server_cert: /etc/mssh/wrapper-server.crt\n'
-        f'  server_key:  /etc/mssh/wrapper-server.key\n'
+        f'  server_cert: /etc/mssh/msshd-server.crt\n'
+        f'  server_key:  /etc/mssh/msshd-server.key\n'
         f'  user_ca_pubkey: /etc/mssh/user-ca.pub\n'
         f'ca:\n'
         f'  endpoints: [https://{ca_ip}:{CA_PORT}]\n'
-        f'  client_cert: /etc/mssh/wrapper-mtls.crt\n'
-        f'  client_key:  /etc/mssh/wrapper-mtls.key\n'
+        f'  client_cert: /etc/mssh/msshd-mtls.crt\n'
+        f'  client_key:  /etc/mssh/msshd-mtls.key\n'
         f'  ca_pubkey:   /etc/mssh/server-mtls-ca.pub\n'
         f'  timeout_seconds: 5\n'
         f'inner:\n'
@@ -434,22 +434,22 @@ def _wrapper_yaml_enforce(ca_ip: str, *, inner_mode: str = 'long-lived') -> str:
         f'logging:\n'
         f'  level: info\n'
         f'  destination: stderr\n'
-        f'  audit_destination: file:/var/log/mssh/wrapper-audit.jsonl\n'
+        f'  audit_destination: file:/var/log/mssh/msshd-audit.jsonl\n'
     )
 
 
 def _systemd_msshd_unit() -> str:
     return (
-        '[Unit]\nDescription=mssh wrapper (msshd)\n'
+        '[Unit]\nDescription=msshd (msshd)\n'
         'After=network-online.target\n'
         '[Service]\nWorkingDirectory=/app\n'
-        'Environment="SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh"\n'
+        'Environment="MSSHD_STATE_DIR=/var/lib/mssh"\n'
         # msshd is the pip-installed entry point from the msshd wheel.
         # Use the bare name (relying on PATH) because pip's install dir
         # differs across distros (/usr/local/bin on Ubuntu vs /usr/bin
         # on Alpine).
         'ExecStart=msshd '
-        '--config /etc/mssh/wrapper.yaml\n'
+        '--config /etc/mssh/msshd.yaml\n'
         'Restart=on-failure\nStandardError=journal\n'
         '[Install]\nWantedBy=multi-user.target\n'
     )
@@ -461,14 +461,14 @@ def _install_msshd(c: str, *, mode: str,
     {'fallback', 'enforce'}. On Alpine we use a nohup-style spawn
     because openrc init scripts for arbitrary Python daemons are messy.
     """
-    yaml = (_wrapper_yaml_fallback() if mode == 'fallback'
-            else _wrapper_yaml_enforce(ca_ip))
+    yaml = (_msshd_yaml_fallback() if mode == 'fallback'
+            else _msshd_yaml_enforce(ca_ip))
     lxc_exec(c, 'mkdir', '-p',
              '/etc/mssh',
              '/var/lib/mssh',
              '/var/lib/mssh/inner-sshd',
              '/var/log/mssh')
-    push_text(c, yaml, '/etc/mssh/wrapper.yaml', mode='644')
+    push_text(c, yaml, '/etc/mssh/msshd.yaml', mode='644')
 
     if _is_alpine(c):
         # Kill any prior instance, then nohup.
@@ -477,9 +477,9 @@ def _install_msshd(c: str, *, mode: str,
                  check=False)
         lxc_exec(c, 'sh', '-c',
                  'cd /app && '
-                 'SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh '
+                 'MSSHD_STATE_DIR=/var/lib/mssh '
                  'nohup msshd '
-                 '--config /etc/mssh/wrapper.yaml '
+                 '--config /etc/mssh/msshd.yaml '
                  '> /var/log/mssh/msshd.log 2>&1 & '
                  'echo $! > /run/msshd.pid')
     else:
@@ -505,12 +505,12 @@ def _install_msshd(c: str, *, mode: str,
 
 
 def _push_msshd_cert_material(server: _Server, *,
-                              wrapper_cert: str, wrapper_key: str,
+                              msshd_cert: str, msshd_key: str,
                               user_ca_pub: str,
-                              wrapper_mtls_cert: Path, wrapper_mtls_key: Path,
+                              msshd_mtls_cert: Path, msshd_mtls_key: Path,
                               ca_tls_root: Path,
-                              wrapper_user_ca_priv: Path,
-                              wrapper_user_ca_pub: Path) -> None:
+                              msshd_user_ca_priv: Path,
+                              msshd_user_ca_pub: Path) -> None:
     """Push the cert material needed by enforce mode. Safe to push
     even when in fallback mode (msshd ignores it)."""
     c = server.container
@@ -518,24 +518,24 @@ def _push_msshd_cert_material(server: _Server, *,
              '/etc/mssh',
              '/var/lib/mssh',
              '/var/lib/mssh/inner-sshd')
-    push_file(c, wrapper_cert, '/etc/mssh/wrapper-server.crt', mode='644')
-    push_file(c, wrapper_key,  '/etc/mssh/wrapper-server.key', mode='600')
+    push_file(c, msshd_cert, '/etc/mssh/msshd-server.crt', mode='644')
+    push_file(c, msshd_key,  '/etc/mssh/msshd-server.key', mode='600')
     push_file(c, user_ca_pub,  '/etc/mssh/user-ca.pub', mode='644')
-    push_file(c, wrapper_mtls_cert, '/etc/mssh/wrapper-mtls.crt', mode='644')
-    push_file(c, wrapper_mtls_key,  '/etc/mssh/wrapper-mtls.key', mode='600')
+    push_file(c, msshd_mtls_cert, '/etc/mssh/msshd-mtls.crt', mode='644')
+    push_file(c, msshd_mtls_key,  '/etc/mssh/msshd-mtls.key', mode='600')
     push_file(c, ca_tls_root, '/etc/mssh/server-mtls-ca.pub', mode='644')
-    push_file(c, str(wrapper_user_ca_priv),
-              '/var/lib/mssh/wrapper-user-ca', mode='600')
-    push_file(c, str(wrapper_user_ca_pub),
-              '/var/lib/mssh/inner-sshd/wrapper-user-ca.pub', mode='644')
+    push_file(c, str(msshd_user_ca_priv),
+              '/var/lib/mssh/msshd-user-ca', mode='600')
+    push_file(c, str(msshd_user_ca_pub),
+              '/var/lib/mssh/inner-sshd/msshd-user-ca.pub', mode='644')
 
 
 # ---------------------------------------------------------------------------
-# In-container mssh shim — a 3-line shell wrapper around `python3 -m mssh.client`
+# In-container mssh shim — a 3-line shell shim around `python3 -m mssh.client`
 # ---------------------------------------------------------------------------
 
-_MSSH_WRAPPER_SCRIPT = '''#!/bin/sh
-# /usr/local/bin/mssh-with-env — convenience wrapper that supplies
+_MSSH_SHIM_SCRIPT = '''#!/bin/sh
+# /usr/local/bin/mssh-with-env — convenience shim that supplies
 # default cert paths from $HOME/.mssh/ and delegates to the real
 # pip-installed mssh binary (on PATH).
 #
@@ -568,10 +568,10 @@ def _push_mssh_per_user(server: _Server, user: _User, pki: dict) -> None:
               owner=f'{user.username}:{user.username}')
 
 
-def _install_mssh_wrapper(c: str) -> None:
+def _install_mssh_shim(c: str) -> None:
     # NB: lands at /usr/local/bin/mssh-with-env so it doesn't shadow
     # the real pip-installed `mssh` binary at /usr/local/bin/mssh.
-    push_text(c, _MSSH_WRAPPER_SCRIPT, '/usr/local/bin/mssh-with-env',
+    push_text(c, _MSSH_SHIM_SCRIPT, '/usr/local/bin/mssh-with-env',
               mode='755')
 
 
@@ -651,9 +651,9 @@ def _msshd_restart_cmd(server: _Server) -> str:
         return (
             f'fuser -k -9 {MSSHD_PORT}/tcp 2>/dev/null; sleep 1; '
             f'cd /app && '
-            f'SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh '
+            f'MSSHD_STATE_DIR=/var/lib/mssh '
             f'nohup msshd '
-            f'--config /etc/mssh/wrapper.yaml '
+            f'--config /etc/mssh/msshd.yaml '
             f'> /var/log/mssh/msshd.log 2>&1 & '
             f'echo $! > /run/msshd.pid'
         )
@@ -694,7 +694,7 @@ def _flip_script(target_mode: str, yaml: str, ips: dict,
 # /home/root-admin/flip-to-{script_label}.sh
 #
 # Operator-grade flip script. Runs on the CA container as root-admin.
-# For each server: backs up the current wrapper.yaml, pushes the
+# For each server: backs up the current msshd.yaml, pushes the
 # {script_label} config, restarts msshd, verifies via
 # {verify_desc}, and reverts on failure.
 #
@@ -719,7 +719,7 @@ export MSSH_CA=/home/root-admin/.mssh/ca.pem
 
 # Heredoc would interfere with shell substitution; write the YAML to
 # a temp file and scp/cat it across.
-WRAPPER_YAML=$(cat <<'YAML'
+MSSHD_YAML=$(cat <<'YAML'
 {yaml}YAML
 )
 
@@ -729,13 +729,13 @@ flip_one() {{
 
     # Backup, push new, restart.
     if ! ssh $SSH_N root@$ip \\
-            'cp /etc/mssh/wrapper.yaml /tmp/wrapper.yaml.bak' \\
+            'cp /etc/mssh/msshd.yaml /tmp/msshd.yaml.bak' \\
             2>/dev/null; then
         echo "SSH UNREACHABLE — skipped"
         return 1
     fi
-    printf '%s' "$WRAPPER_YAML" | ssh $SSH_OPTS root@$ip \\
-        'cat > /etc/mssh/wrapper.yaml'
+    printf '%s' "$MSSHD_YAML" | ssh $SSH_OPTS root@$ip \\
+        'cat > /etc/mssh/msshd.yaml'
     ssh $SSH_N root@$ip "$restart" >/dev/null 2>&1
     sleep 3
 
@@ -747,7 +747,7 @@ flip_one() {{
     # Verify failed: revert.
     echo "FAILED — reverting"
     ssh $SSH_N root@$ip \\
-        'cp /tmp/wrapper.yaml.bak /etc/mssh/wrapper.yaml' \\
+        'cp /tmp/msshd.yaml.bak /etc/mssh/msshd.yaml' \\
         2>/dev/null
     ssh $SSH_N root@$ip "$restart" >/dev/null 2>&1
     return 1
@@ -778,10 +778,10 @@ def _push_flip_scripts_to_ca(ips: dict, ca_ip: str) -> None:
       - flip-to-per-connection.sh — enforce + per-connection inner (Phase 2)
       - flip-to-fallback.sh      — pure TCP proxy to system sshd
     """
-    enforce_yaml         = _wrapper_yaml_enforce(ca_ip)
-    enforce_perconn_yaml = _wrapper_yaml_enforce(ca_ip,
+    enforce_yaml         = _msshd_yaml_enforce(ca_ip)
+    enforce_perconn_yaml = _msshd_yaml_enforce(ca_ip,
                                                   inner_mode='per-connection')
-    fallback_yaml        = _wrapper_yaml_fallback()
+    fallback_yaml        = _msshd_yaml_fallback()
     targets = (
         ('enforce',         enforce_yaml,         'enforce'),
         ('per-connection',  enforce_perconn_yaml, 'enforce'),
@@ -1011,7 +1011,7 @@ def _write_root_readme(container: str, ca_ip: str, stop_at_phase: int) -> None:
             'sshd: `ssh -p 2200 user@host` is transparently proxied to '
             'sshd on port 22, so the legacy access path keeps working. '
             'No CA call, no mTLS. Next: enrol this server + users at '
-            'the CA, push wrapper mTLS material, flip msshd to enforce.'),
+            'the CA, push msshd mTLS material, flip msshd to enforce.'),
         2: ('Fully configured: msshd is in enforce mode and `mssh '
             'user@host:2200` works through the CA-mediated path. '
             'Flip scripts live on the CA for switching between modes: '
@@ -1211,7 +1211,7 @@ flip_to_enforce                      # back to Phase 2
 `flip_to_enforce`, `flip_to_per_connection`, and `flip_to_fallback`
 are shell functions that ssh to the CA as `root-admin` and run the
 actual flip scripts (`/home/root-admin/flip-to-*.sh` on the CA).
-The scripts loop over every server, push the new `wrapper.yaml`,
+The scripts loop over every server, push the new `msshd.yaml`,
 restart msshd, verify via the post-flip transport (mssh for the
 enforce variants, ssh -p 2200 for fallback), and revert that
 server's config if verification fails.
@@ -1708,15 +1708,15 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
     # =====================================================================
     # Final setup — gen mTLS, enroll, flip msshd to enforce
     # =====================================================================
-    section('PHASE 2: generating wrapper user-CA + per-user mTLS certs')
+    section('PHASE 2: generating msshd local user-CA + per-user mTLS certs')
     pki_dir = tmp_path_factory.mktemp('msshd-pki')
     pki = _gen_user_ca_and_mtls_certs(
         pki_dir,
-        wrapper_host_sans={s.container: ips[s.container] for s in SERVERS},
+        msshd_host_sans={s.container: ips[s.container] for s in SERVERS},
         user_principals=[u.username for u in USERS])
-    # Wrapper user-CA (signs ephemeral OpenSSH inner certs).
-    wrapper_user_ca_dir = tmp_path_factory.mktemp('wrapper-user-ca')
-    w_ca_priv, w_ca_pub = _gen_wrapper_user_ca(wrapper_user_ca_dir)
+    # msshd local user-CA (signs ephemeral OpenSSH inner certs).
+    msshd_user_ca_dir = tmp_path_factory.mktemp('msshd-user-ca')
+    w_ca_priv, w_ca_pub = _gen_msshd_user_ca(msshd_user_ca_dir)
 
     # Copy mTLS material into the host adhoc-keys/ dir for operator use.
     for u in USERS:
@@ -1726,7 +1726,7 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
         os.chmod(artifacts_dir / f'{u.username}.key', 0o600)
     shutil.copy(pki_dir / 'user-ca.crt', artifacts_dir / 'user-ca.crt')
 
-    section('PHASE 2: enrolling servers at the CA (mTLS creds for wrapper)')
+    section('PHASE 2: enrolling servers at the CA (mTLS creds for msshd)')
     server_creds = {}
     for s in SERVERS:
         resp = admin.server_add(s.canonical, groups=[s.group])
@@ -1750,18 +1750,18 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
             'max_cert_validity_seconds': 600,
         })
 
-    section('PHASE 2: pushing wrapper cert material + flipping to enforce')
+    section('PHASE 2: pushing msshd cert material + flipping to enforce')
     for s in SERVERS:
         _push_msshd_cert_material(
             s,
-            wrapper_cert=pki['wrapper_certs'][s.container]['cert'],
-            wrapper_key=pki['wrapper_certs'][s.container]['key'],
+            msshd_cert=pki['msshd_certs'][s.container]['cert'],
+            msshd_key=pki['msshd_certs'][s.container]['key'],
             user_ca_pub=pki['user_ca_path'],
-            wrapper_mtls_cert=ca_creds_dir / f'{s.canonical}-mtls.crt',
-            wrapper_mtls_key=ca_creds_dir / f'{s.canonical}-mtls.key',
+            msshd_mtls_cert=ca_creds_dir / f'{s.canonical}-mtls.crt',
+            msshd_mtls_key=ca_creds_dir / f'{s.canonical}-mtls.key',
             ca_tls_root=ca_creds_dir / 'tls-ca-cert.pem',
-            wrapper_user_ca_priv=w_ca_priv,
-            wrapper_user_ca_pub=w_ca_pub)
+            msshd_user_ca_priv=w_ca_priv,
+            msshd_user_ca_pub=w_ca_pub)
         _install_msshd(s.container, mode='enforce', ca_ip=ips[CA_NAME])
 
     # CA host needs sshd + root-admin's authorized_keys so the host's
@@ -1778,15 +1778,15 @@ def test_setup_adhoc_msshd_journey(request, tmp_path_factory):
               f'/home/{SUPERUSER.username}/.ssh/authorized_keys', mode='600',
               owner=f'{SUPERUSER.username}:{SUPERUSER.username}')
 
-    section('PHASE 2: per-user mssh material + /usr/local/bin/mssh wrapper')
+    section('PHASE 2: per-user mssh material + /usr/local/bin/msshd')
     for s in SERVERS:
         if not _is_alpine(s.container):
-            _install_mssh_wrapper(s.container)
+            _install_mssh_shim(s.container)
             for u in USERS:
                 if s.group in u.allowed_groups:
                     _push_mssh_per_user(s, u, pki)
     # Also drop the superuser's material onto the CA host (their primary).
-    _install_mssh_wrapper(CA_NAME)
+    _install_mssh_shim(CA_NAME)
     _push_mssh_per_user(SERVERS[0], SUPERUSER, pki)  # ensure account exists
     _ensure_unix_account(CA_NAME, SUPERUSER.username)
     home_mssh = f'/home/{SUPERUSER.username}/.mssh'

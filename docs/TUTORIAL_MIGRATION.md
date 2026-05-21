@@ -19,14 +19,14 @@ the same sequence into ~10 minutes.
 1. Bring up a Phase-1 lab (msshd in fallback on every server, no
    CA-mediated auth yet).
 2. Enroll each server at the CA with `mssh-admin server add`.
-3. Mint the user-facing PKI (user-CA + per-server wrapper TLS
+3. Mint the user-facing PKI (user-CA + per-server msshd TLS
    cert + per-user mTLS cert) with `scripts/mint-user-pki.py`.
-4. Generate a wrapper-user-CA signing key on each server
+4. Generate a msshd-user-CA signing key on each server
    (`ssh-keygen`).
 5. Enroll each user + add policies with `mssh-admin user add` /
    `policy add`.
-6. Push the wrapper cert material to each server, write the
-   enforce-mode `wrapper.yaml`, restart msshd.
+6. Push msshd cert material to each server, write the
+   enforce-mode `msshd.yaml`, restart msshd.
 7. Verify with `mssh user@server:2200`.
 8. Roll one server back to fallback to see per-server reversibility.
 
@@ -125,7 +125,7 @@ mssh-admin server list
 The CA you bootstrapped manages **server mTLS + authz certs**. It does
 **not** mint:
   - the TLS server cert msshd serves on port 2200,
-  - the user-CA that signs that wrapper TLS cert,
+  - the user-CA that signs that msshd TLS cert,
   - per-user mTLS client certs (presented by `mssh`).
 
 In production this is your **org's existing PKI** (Vault, AWS PCA,
@@ -143,7 +143,7 @@ Produces under `./user-pki/`:
   - `user-ca.crt` + `user-ca.key` — trust anchor + signing key
     (**keep `user-ca.key` safe**; the lab leaves it on disk for
     convenience, production should put it in a key store).
-  - `wrapper-<server>.crt` + `wrapper-<server>.key` — TLS material
+  - `msshd-<server>.crt` + `msshd-<server>.key` — TLS material
     each server's msshd will serve on `:2200`.
   - `<user>.crt` + `<user>.key` — mTLS material to give to each
     user's workstation.
@@ -157,7 +157,7 @@ Produces under `./user-pki/`:
 
 ---
 
-## 3. Generate a wrapper-user-CA signing key per server
+## 3. Generate a msshd-user-CA signing key per server
 
 msshd in enforce mode mints **ephemeral OpenSSH user certs** for
 each session and hands them to a hermetic inner sshd. The signing
@@ -166,8 +166,8 @@ the host:
 
 ```bash
 for s in srv-acct srv-sales srv-hr srv-eng; do
-    ssh-keygen -t ed25519 -N '' -f ./wrapper-user-ca-${s} -q -C "wrapper-user-ca-${s}"
-    chmod 600 ./wrapper-user-ca-${s}
+    ssh-keygen -t ed25519 -N '' -f ./msshd-user-ca-${s} -q -C "msshd-user-ca-${s}"
+    chmod 600 ./msshd-user-ca-${s}
 done
 ```
 
@@ -200,9 +200,9 @@ connection once you flip.
 
 ## 5. Push the cert material to each server
 
-For each container, push five files (the wrapper TLS pair, the
+For each container, push five files (msshd TLS pair, the
 trust anchor, the server's mTLS-to-CA pair, the CA's TLS root, the
-wrapper-user-CA signing key + pub):
+msshd-user-CA signing key + pub):
 
 ```bash
 # Done once per server. In production this is scp / Ansible / config
@@ -213,20 +213,20 @@ for pair in srv-acct:acct srv-sales:sales srv-hr:hr srv-eng:eng; do
 
     lxc exec "$cn" -- mkdir -p /etc/mssh /var/lib/mssh /var/lib/mssh/inner-sshd /var/log/mssh
 
-    lxc file push ./user-pki/wrapper-${name}.crt "$cn/etc/mssh/wrapper-server.crt"
-    lxc file push ./user-pki/wrapper-${name}.key "$cn/etc/mssh/wrapper-server.key"
+    lxc file push ./user-pki/msshd-${name}.crt "$cn/etc/mssh/msshd-server.crt"
+    lxc file push ./user-pki/msshd-${name}.key "$cn/etc/mssh/msshd-server.key"
     lxc file push ./user-pki/user-ca.crt         "$cn/etc/mssh/user-ca.pub"
 
-    lxc file push ./${name}-creds/${name}-cert.pem "$cn/etc/mssh/wrapper-mtls.crt"
-    lxc file push ./${name}-creds/${name}-key.pem  "$cn/etc/mssh/wrapper-mtls.key"
+    lxc file push ./${name}-creds/${name}-cert.pem "$cn/etc/mssh/msshd-mtls.crt"
+    lxc file push ./${name}-creds/${name}-key.pem  "$cn/etc/mssh/msshd-mtls.key"
     lxc file push /path/to/mssh/python/adhoc-ca-creds/tls-ca-cert.pem \
                   "$cn/etc/mssh/server-mtls-ca.pub"
 
-    lxc file push ./wrapper-user-ca-${name}     "$cn/var/lib/mssh/wrapper-user-ca"
-    lxc file push ./wrapper-user-ca-${name}.pub "$cn/var/lib/mssh/inner-sshd/wrapper-user-ca.pub"
+    lxc file push ./msshd-user-ca-${name}     "$cn/var/lib/mssh/msshd-user-ca"
+    lxc file push ./msshd-user-ca-${name}.pub "$cn/var/lib/mssh/inner-sshd/msshd-user-ca.pub"
 
-    lxc exec "$cn" -- chmod 600 /etc/mssh/wrapper-server.key /etc/mssh/wrapper-mtls.key \
-                                 /var/lib/mssh/wrapper-user-ca
+    lxc exec "$cn" -- chmod 600 /etc/mssh/msshd-server.key /etc/mssh/msshd-mtls.key \
+                                 /var/lib/mssh/msshd-user-ca
 done
 ```
 
@@ -235,9 +235,9 @@ fallback mode ignores them.
 
 ---
 
-## 6. Flip wrapper.yaml to enforce and restart
+## 6. Flip msshd.yaml to enforce and restart
 
-Write `/etc/mssh/wrapper.yaml` on each server:
+Write `/etc/mssh/msshd.yaml` on each server:
 
 ```yaml
 mode: enforce
@@ -245,13 +245,13 @@ listen:
   external_address: 0.0.0.0
   external_port: 2200
 tls:
-  server_cert: /etc/mssh/wrapper-server.crt
-  server_key:  /etc/mssh/wrapper-server.key
+  server_cert: /etc/mssh/msshd-server.crt
+  server_key:  /etc/mssh/msshd-server.key
   user_ca_pubkey: /etc/mssh/user-ca.pub
 ca:
   endpoints: [https://CA_IP:8443]
-  client_cert: /etc/mssh/wrapper-mtls.crt
-  client_key:  /etc/mssh/wrapper-mtls.key
+  client_cert: /etc/mssh/msshd-mtls.crt
+  client_key:  /etc/mssh/msshd-mtls.key
   ca_pubkey:   /etc/mssh/server-mtls-ca.pub
   timeout_seconds: 5
 inner:
@@ -263,7 +263,7 @@ users:
 logging:
   level: info
   destination: stderr
-  audit_destination: file:/var/log/mssh/wrapper-audit.jsonl
+  audit_destination: file:/var/log/mssh/msshd-audit.jsonl
 ```
 
 For each server, write the yaml and restart msshd. On the Ubuntu
@@ -280,8 +280,8 @@ nohup-spawn pattern instead:
 lxc exec ${eng_CONTAINER} -- sh -c '
     fuser -k -9 2200/tcp 2>/dev/null; sleep 1
     mkdir -p /var/log/mssh
-    SSH_RT_AUTH_WRAPPER_STATE_DIR=/var/lib/mssh nohup msshd \
-        --config /etc/mssh/wrapper.yaml > /var/log/mssh/msshd.log 2>&1 &
+    MSSHD_STATE_DIR=/var/lib/mssh nohup msshd \
+        --config /etc/mssh/msshd.yaml > /var/log/mssh/msshd.log 2>&1 &
     echo $! > /run/msshd.pid
 '
 ```
@@ -290,7 +290,7 @@ In production an Alpine deployment would use OpenRC; the lab keeps
 things minimal. See [design/future-ideas.md §16](../design/future-ideas.md)
 for the packaging path.
 
-> **Templating note:** the wrapper.yaml above has `https://CA_IP:8443`
+> **Templating note:** the msshd.yaml above has `https://CA_IP:8443`
 > as a placeholder. Replace `CA_IP` with `${ca_IP}` (the lab env
 > variable; `source ./adhoc-env.sh` exports it) before pushing.
 
@@ -312,7 +312,7 @@ MSSH_CERT=$PKI/alice.crt MSSH_KEY=$PKI/alice.key MSSH_CA=$PKI/user-ca.crt \
 # alice tries sales → denied by policy:
 MSSH_CERT=$PKI/alice.crt MSSH_KEY=$PKI/alice.key MSSH_CA=$PKI/user-ca.crt \
     mssh alice@$sales_IP:2200 -- whoami
-# → mssh: wrapper rejected request: no_matching_policy: user 'alice'
+# → mssh: msshd rejected request: no_matching_policy: user 'alice'
 #         has no policy granting access to server 'srv-sales'
 
 # bob has sales policy → allowed:
@@ -337,7 +337,7 @@ fallback:
 
 ```bash
 lxc exec $sales_CONTAINER -- sh -c \
-  "sed -i 's/^mode: enforce/mode: fallback/' /etc/mssh/wrapper.yaml \
+  "sed -i 's/^mode: enforce/mode: fallback/' /etc/mssh/msshd.yaml \
    && systemctl restart msshd"
 ```
 
@@ -358,7 +358,7 @@ Flip it back:
 
 ```bash
 lxc exec $sales_CONTAINER -- sh -c \
-  "sed -i 's/^mode: fallback/mode: enforce/' /etc/mssh/wrapper.yaml \
+  "sed -i 's/^mode: fallback/mode: enforce/' /etc/mssh/msshd.yaml \
    && systemctl restart msshd"
 ```
 
@@ -392,17 +392,17 @@ The sequence matches [MIGRATION.md](MIGRATION.md) one-for-one:
 |---|---|
 | `setup_adhoc.sh msshd 1` | Operator installs msshd in fallback on every host |
 | `mssh-admin server add` | Per-server enrollment ceremony |
-| `scripts/mint-user-pki.py` | Org PKI mints user-CA + wrapper TLS + per-user mTLS |
-| `ssh-keygen wrapper-user-ca` | Per-server, on-host signing key |
+| `scripts/mint-user-pki.py` | Org PKI mints user-CA + msshd TLS + per-user mTLS |
+| `ssh-keygen msshd-user-ca` | Per-server, on-host signing key |
 | `mssh-admin user add` + `policy add` | Per-user enrollment |
-| push files + flip wrapper.yaml | Config-management rollout |
+| push files + flip msshd.yaml | Config-management rollout |
 | `sed enforce→fallback` | Per-server rollback path |
 
 ---
 
 ## Known gaps
 
-- **`mssh-admin pki`**: minting the user-CA + wrapper TLS + per-user
+- **`mssh-admin pki`**: minting the user-CA + msshd TLS + per-user
   mTLS is currently a separate script. See
   [design/future-ideas.md](../design/future-ideas.md) — folding this
   into a `mssh-admin pki bootstrap` / `mssh-admin user mint-mtls`

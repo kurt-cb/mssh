@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from mssh.client import (DEFAULT_WRAPPER_PORT, Identity,
+from mssh.client import (DEFAULT_MSSHD_PORT, Identity,
                                   PROTOCOL_VERSION, Target,
                                   build_header, load_config, parse_ack,
                                   parse_target, resolve_identity,

@@ -52,17 +52,17 @@ async def _run_echo(port: int):
 
 
 def test_fallback_daemon_proxies_bytes(tmp_path):
-    """Spawn the wrapper in fallback mode and confirm bytes shuffle
+    """Spawn msshd in fallback mode and confirm bytes shuffle
     end-to-end through it."""
-    wrapper_port = _free_port()
+    msshd_port = _free_port()
     fallback_port = _free_port()
 
-    cfg = tmp_path / 'wrapper.yaml'
+    cfg = tmp_path / 'msshd.yaml'
     cfg.write_text(
         f'mode: fallback\n'
         f'fallback: {{host: 127.0.0.1, port: {fallback_port}}}\n'
         f'listen: '
-        f'{{external_address: 127.0.0.1, external_port: {wrapper_port}}}\n'
+        f'{{external_address: 127.0.0.1, external_port: {msshd_port}}}\n'
         f'logging: {{level: warn, destination: stderr}}\n'
     )
 
@@ -107,7 +107,7 @@ def test_fallback_daemon_proxies_bytes(tmp_path):
     assert echo_started.wait(timeout=2.0), 'echo server failed to start'
     assert shutdown_event is not None
 
-    # Spawn the wrapper daemon as a subprocess. The subprocess doesn't
+    # Spawn msshd daemon as a subprocess. The subprocess doesn't
     # inherit conftest's sys.path tweak, so pass PYTHONPATH explicitly.
     src_dir = Path(__file__).resolve().parent.parent / 'src'
     env = {**os.environ, 'PYTHONPATH': str(src_dir)}
@@ -118,14 +118,14 @@ def test_fallback_daemon_proxies_bytes(tmp_path):
         env=env,
     )
     try:
-        _wait_for_port('127.0.0.1', wrapper_port, timeout=5.0)
+        _wait_for_port('127.0.0.1', msshd_port, timeout=5.0)
 
-        # Send bytes through the wrapper, expect them echoed back.
-        with socket.create_connection(('127.0.0.1', wrapper_port),
+        # Send bytes through msshd, expect them echoed back.
+        with socket.create_connection(('127.0.0.1', msshd_port),
                                        timeout=3.0) as s:
-            s.sendall(b'ping-through-the-wrapper\n')
+            s.sendall(b'ping-through-msshd\n')
             data = s.recv(64)
-            assert data == b'ping-through-the-wrapper\n'
+            assert data == b'ping-through-msshd\n'
 
             s.sendall(b'pong-back\n')
             data = s.recv(64)
@@ -144,18 +144,18 @@ def test_fallback_daemon_proxies_bytes(tmp_path):
 
 
 def test_fallback_daemon_rejects_no_fallback_target(tmp_path):
-    """If the fallback target isn't reachable, the wrapper should
+    """If the fallback target isn't reachable, msshd should
     accept the client connection then close it cleanly — not crash."""
-    wrapper_port = _free_port()
+    msshd_port = _free_port()
     # Pick a port that's almost certainly not listening.
     fallback_port = 1   # privileged, almost always closed for non-root.
 
-    cfg = tmp_path / 'wrapper.yaml'
+    cfg = tmp_path / 'msshd.yaml'
     cfg.write_text(
         f'mode: fallback\n'
         f'fallback: {{host: 127.0.0.1, port: {fallback_port}}}\n'
         f'listen: '
-        f'{{external_address: 127.0.0.1, external_port: {wrapper_port}}}\n'
+        f'{{external_address: 127.0.0.1, external_port: {msshd_port}}}\n'
         f'logging: {{level: warn, destination: stderr}}\n'
     )
 
@@ -168,15 +168,15 @@ def test_fallback_daemon_rejects_no_fallback_target(tmp_path):
         env=env,
     )
     try:
-        _wait_for_port('127.0.0.1', wrapper_port, timeout=5.0)
-        # Connect; wrapper should accept then close.
-        with socket.create_connection(('127.0.0.1', wrapper_port),
+        _wait_for_port('127.0.0.1', msshd_port, timeout=5.0)
+        # Connect; msshd should accept then close.
+        with socket.create_connection(('127.0.0.1', msshd_port),
                                        timeout=3.0) as s:
             # Read should return empty (EOF) within timeout.
             s.settimeout(3.0)
             data = s.recv(64)
             assert data == b''   # EOF
-        # And the wrapper is still alive.
+        # And msshd is still alive.
         assert proc.poll() is None
     finally:
         proc.terminate()

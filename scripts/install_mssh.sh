@@ -37,7 +37,7 @@
 #   6. Drops symlinks for the binaries into /usr/local/bin.
 #   7. Installs systemd units (DISABLED) for msshd and mssh-ca, if
 #      systemd is present and --no-systemd was not passed.
-#   8. Lays down sshd_config.template + wrapper.yaml.example into
+#   8. Lays down sshd_config.template + msshd.yaml.example into
 #      /etc/mssh/ (operator edits these).
 #   9. Prints next-step instructions.
 #
@@ -187,7 +187,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/msshd --config /etc/mssh/wrapper.yaml
+ExecStart=/usr/local/bin/msshd --config /etc/mssh/msshd.yaml
 Restart=on-failure
 StandardError=journal
 
@@ -200,10 +200,10 @@ fi
 
 # ---- 8. Default config templates ------------------------------------------
 mkdir -p /etc/mssh
-if [ -f "$INSTALL_DIR/config/wrapper.yaml.example" ] \
-   && [ ! -f /etc/mssh/wrapper.yaml ]; then
-    cp -p "$INSTALL_DIR/config/wrapper.yaml.example" /etc/mssh/wrapper.yaml.example
-    echo "==> placed /etc/mssh/wrapper.yaml.example — edit and save as wrapper.yaml"
+if [ -f "$INSTALL_DIR/config/msshd.yaml.example" ] \
+   && [ ! -f /etc/mssh/msshd.yaml ]; then
+    cp -p "$INSTALL_DIR/config/msshd.yaml.example" /etc/mssh/msshd.yaml.example
+    echo "==> placed /etc/mssh/msshd.yaml.example — edit and save as msshd.yaml"
 fi
 if [ -f "$INSTALL_DIR/config/sshd_config.template" ]; then
     cp -p "$INSTALL_DIR/config/sshd_config.template" /etc/mssh/sshd_config.template
@@ -229,9 +229,9 @@ Next steps (NOT done by this script):
      Capture the printed mTLS cert + key and provision them onto
      this host as /etc/mssh/server-mtls.{crt,key}.
 
-  2. Edit /etc/mssh/wrapper.yaml:
-        cp /etc/mssh/wrapper.yaml.example /etc/mssh/wrapper.yaml
-        \$EDITOR /etc/mssh/wrapper.yaml
+  2. Edit /etc/mssh/msshd.yaml:
+        cp /etc/mssh/msshd.yaml.example /etc/mssh/msshd.yaml
+        \$EDITOR /etc/mssh/msshd.yaml
      Start in mode: fallback. Flip to mode: enforce after you've
      verified the gateway is wired in.
 

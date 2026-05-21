@@ -35,7 +35,7 @@ seconds.
 ```
 
 OpenSSH `sshd` already comes with every CI image. The `cryptography` lib
-already mints what we need. msshd's `wrapper.yaml` takes inner-host /
+already mints what we need. msshd's `msshd.yaml` takes inner-host /
 inner-port as config — point it at our local sshd. The CA is just a
 Flask app that signs whatever we ask it to.
 

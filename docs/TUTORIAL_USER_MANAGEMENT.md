@@ -134,7 +134,7 @@ Policy lives at the CA. alice's enrollment has access to the
 ```bash
 mssh_as alice sales whoami
 # → command exits non-zero with an actionable stderr:
-#       mssh: wrapper rejected request: no_matching_policy: user
+#       mssh: msshd rejected request: no_matching_policy: user
 #       'alice' has no policy granting access to server 'srv-sales'
 ```
 
@@ -220,7 +220,7 @@ mssh-admin user remove --user newperson
 
 Each msshd shows a banner before the user authenticates. The
 default says "this session is mediated by mssh." Operators can
-override it per-server with `wrapper.yaml`:
+override it per-server with `msshd.yaml`:
 
 ```bash
 # Drop a template file onto the acct server:
@@ -229,8 +229,8 @@ cat <<'EOF' | lxc file push - ${acct_CONTAINER}/etc/mssh/banner.txt
 For access issues: contact #ops on Slack.
 EOF
 
-# Tell wrapper.yaml to use it:
-lxc exec ${acct_CONTAINER} -- sh -c "cat >> /etc/mssh/wrapper.yaml" <<'EOF'
+# Tell msshd.yaml to use it:
+lxc exec ${acct_CONTAINER} -- sh -c "cat >> /etc/mssh/msshd.yaml" <<'EOF'
 
 banner:
   template_path: /etc/mssh/banner.txt
@@ -269,7 +269,7 @@ Revert the change before moving on:
 
 ```bash
 lxc exec ${acct_CONTAINER} -- sh -c \
-  "sed -i '/^banner:/,/^$/d' /etc/mssh/wrapper.yaml \
+  "sed -i '/^banner:/,/^$/d' /etc/mssh/msshd.yaml \
    && systemctl restart msshd"
 ```
 
@@ -321,7 +321,7 @@ design is that this is a one-line revert.
 # Flip back to Phase 1 (fallback) just for the sales server. This is
 # what the per-server rollback in MIGRATION.md § 4.4 looks like.
 lxc exec ${sales_CONTAINER} -- sh -c \
-  "sed -i 's/^mode: enforce/mode: fallback/' /etc/mssh/wrapper.yaml \
+  "sed -i 's/^mode: enforce/mode: fallback/' /etc/mssh/msshd.yaml \
    && systemctl restart msshd"
 
 # Now the other servers are still in enforce mode, but sales is
@@ -340,7 +340,7 @@ When you've fixed whatever was wrong, flip the single host back:
 
 ```bash
 lxc exec ${sales_CONTAINER} -- sh -c \
-  "sed -i 's/^mode: fallback/mode: enforce/' /etc/mssh/wrapper.yaml \
+  "sed -i 's/^mode: fallback/mode: enforce/' /etc/mssh/msshd.yaml \
    && systemctl restart msshd"
 ```
 
@@ -470,7 +470,7 @@ for the full distinction.
     same adhoc lab, different starting point.
   - **Multi-CA failover.** Both
     [operations.md § bounce the CA without dropping sessions](operations.md#bounce-the-ca-without-dropping-sessions)
-    and the multi-endpoint `ca.endpoints` list in wrapper.yaml
+    and the multi-endpoint `ca.endpoints` list in msshd.yaml
     support running two CAs behind DNS. The lab has only one CA.
   - **Source-CIDR + time-window policies.** The policy YAML schema
     supports both (`source_cidrs: [...]`, `time_window: { ... }`);

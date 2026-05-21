@@ -119,7 +119,7 @@ def test_last_crl_seq_persists(tmp_path):
 
 
 class _FakeCAClient:
-    """Drop-in for WrapperCAClient for sync tests. Records call args
+    """Drop-in for MsshdCAClient for sync tests. Records call args
     and returns pre-canned CRL pages."""
 
     def __init__(self, pages: list[dict]):

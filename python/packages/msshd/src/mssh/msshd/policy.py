@@ -4,12 +4,12 @@ The CA returns an X.509 authorization cert whose **critical extensions**
 encode the policy decision: source-bind, server-bind, channel-policy,
 force-command, environment, max-session, etc.
 
-For the wrapper to enforce those at the inner sshd, we have to:
+For msshd to enforce those at the inner sshd, we have to:
 
   1. Translate the X.509 extensions that map cleanly onto OpenSSH user
      cert fields (force_command, source_address) → pass them as kwargs
      to ``userca.UserCA.mint_user_cert``.
-  2. Carry the remainder ourselves at the wrapper level (max-session
+  2. Carry the remainder ourselves at msshd level (max-session
      timer, server-bind check, channel-policy when we add Variant B
      parsing).
 
@@ -57,7 +57,7 @@ OID_2FA_EVIDENCE    = '1.3.6.1.4.1.55555.1.7'
 # archive/design/notes-bypass-cache.md.
 OID_CA_BYPASS       = '1.3.6.1.4.1.55555.1.8'
 
-# Critical extensions the wrapper recognises. If the CA returns a
+# Critical extensions msshd recognises. If the CA returns a
 # cert with a critical extension NOT in this set, reject the cert
 # entirely (defense in depth) — see shim/shim.py:_KNOWN_CRITICAL.
 KNOWN_CRITICAL = {
@@ -135,19 +135,19 @@ def translate_to_inner_cert_kwargs(p: CertPolicy) -> InnerCertKwargs:
     """Project the parts of ``CertPolicy`` that OpenSSH user certs can
     express natively into kwargs for ``UserCA.mint_user_cert``.
 
-    What does NOT translate here (enforced elsewhere by the wrapper):
+    What does NOT translate here (enforced elsewhere by msshd):
       - source_bind: ALREADY enforced by the CA at the outer-mTLS
         layer (the CA's grant is conditional on the client's source
         IP matching the policy's source_cidrs). Propagating source-
         bind onto the inner cert would mean the inner sshd refuses
-        the wrapper's localhost handoff, because the inner connection
+        msshd's localhost handoff, because the inner connection
         comes from 127.0.0.1 — not the outer client's IP.
       - server_bind: validated pre-mint in enforce_listener
       - channels: enforced in proxy (Variant B; Variant A relies on
         the hermetic inner sshd disabling non-session channels globally)
-      - environment: applied to the spawned child env in the wrapper's
+      - environment: applied to the spawned child env in msshd's
         proxy/exec layer
-      - max_session_seconds: wrapper-side timer
+      - max_session_seconds: msshd-side timer
     """
     kw = InnerCertKwargs()
     if p.force_command:
@@ -157,7 +157,7 @@ def translate_to_inner_cert_kwargs(p: CertPolicy) -> InnerCertKwargs:
 
 # ---------------------------------------------------------------------------
 # Minimal DER decoder. Mirrors the writer in ca/cert_minter.py and the
-# reader in server/ssh_server.py — duplicated here so the wrapper has no
+# reader in server/ssh_server.py — duplicated here so msshd has no
 # import-back into the SSH server module.
 # ---------------------------------------------------------------------------
 

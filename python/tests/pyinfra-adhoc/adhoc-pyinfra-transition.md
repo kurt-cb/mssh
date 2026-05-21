@@ -154,7 +154,7 @@ A small `examples/build_images.py` is **not** part of this design — defer unti
 
 ## Follow-ups (not in this transition)
 
-- Port pytest's msshd Phase 1 install ([test_setup_only_msshd.py:1664-1700](../python/tests/lxc/test_setup_only_msshd.py#L1664-L1700)) to a `phase1_msshd_fallback.py` task. Already cleanly factored — sshd is up, only wrapper.yaml + systemd unit + restart needed.
+- Port pytest's msshd Phase 1 install ([test_setup_only_msshd.py:1664-1700](../python/tests/lxc/test_setup_only_msshd.py#L1664-L1700)) to a `phase1_msshd_fallback.py` task. Already cleanly factored — sshd is up, only msshd.yaml + systemd unit + restart needed.
 - Port Phase 2 cert push ([msshd_helpers.py:214](../python/tests/lxc/msshd_helpers.py#L214) `push_msshd_cert_material`) to `phase2_certs.py`. Cert *minting* stays host-side Python (cryptography library); pyinfra is push-only.
 - Prebake recipes for `mssh-debian-12-fixed`, `mssh-fedora-40-fixed`, `mssh-ubuntu-24-fixed` — each needs apt-daily / dnf-automatic / unattended-upgrades masked.
 - Subprocess pyinfra from pytest once the operator-facing surface is stable, replacing the hardcoded `for s in SERVERS` loops with a single pyinfra invocation parameterized by `matrix.py`.
