@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import base64
 import datetime as _dt
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable
+
+from cryptography import x509
+from cryptography.x509 import oid
 
 from . import cert_minter
 from . import templates as _templates
@@ -18,6 +22,8 @@ from .enrollment import Admin, Enrollment, EnrollmentError, KeyBinding
 from ..identity import (CertIdentity, IdentityParseError, PubkeyIdentity,
                               parse_identity)
 from .render import TemplateError, validate_template
+
+log = logging.getLogger('mssh.ca.admin')
 
 
 # Role permissions: maps action key -> set of allowed roles.
@@ -2085,3 +2091,221 @@ def external_tool_passkey_status(ctx: AdminContext,
 # commit focused. For now, an external-tool callback verifies and
 # stores correctly; the tool polls via /v1/external/passkey/status
 # until the outcome arrives.
+
+
+# ---------------------------------------------------------------------------
+# §25: cert renewal (auto-renew for any CA-issued cert)
+# ---------------------------------------------------------------------------
+#
+# Wire shape: POST /v1/cert/renew. The caller authenticates with the
+# CERT BEING RENEWED as the mTLS client cert; the CA validates the
+# chain at the TLS layer (so we already issued it), checks the CRL,
+# enforces the renewable window, and re-mints with the same CN/SAN/
+# EKU.
+#
+# The endpoint is NOT under /v1/admin/ because the auth model is
+# "cert is its own credential", not "admin role check". A separate
+# handler entry point + a separate Flask route.
+
+# Default renewal-window knobs. Operators override via ca-config.yaml's
+# cert_renewal section. Sensible defaults match the per-type cert
+# validity choices: 90-day TLS leafs let services renew within the
+# last month.
+_DEFAULT_RENEWAL_WINDOW_DAYS = 30   # how far before expiry we accept
+_DEFAULT_GRACE_PERIOD_DAYS    = 7   # how far past expiry we accept
+
+
+def cert_renew(ctx: AdminContext, presented_cert,
+               body: dict) -> tuple[int, dict]:
+    """Renew a cert that's authenticating this request.
+
+    ``presented_cert`` is the x509.Certificate the caller offered as
+    its mTLS client cert. ``body`` carries optional knobs:
+      - revoke_predecessor: bool (default False) — also append the
+        old cert's serial to the CRL.
+
+    The renewable predicate is evaluated against the presented
+    cert's not_after — independent of what body asks for.
+
+    Returns 200 with the new cert+key bundle, or 410 if the cert
+    is outside the renewable window, 403 if it's revoked, 502 if
+    the underlying mint fails.
+    """
+    if presented_cert is None:
+        return _err(401, 'unauthorized',
+                    'no mTLS client cert presented; cert is its own credential')
+
+    # 1. Revocation check. If the cert's serial is in the CRL, refuse.
+    serial_hex = format(presented_cert.serial_number, 'x')
+    if ctx.crl is not None:
+        for entry in ctx.crl.fetch_after(0):
+            if serial_hex in (s.lower() for s in entry.serials):
+                ctx.audit.write({
+                    'timestamp': _now_iso(),
+                    'type': 'admin',
+                    'action': 'cert.renew.refused',
+                    'admin': {'name': '<cert>', 'role': 'cert',
+                              'mtls_subject': '<presented>'},
+                    'target': {'serial': serial_hex,
+                               'reason': 'revoked'},
+                    'result': 'refused',
+                })
+                return _err(403, 'revoked',
+                             f'cert {serial_hex} is revoked')
+
+    # 2. Window check.
+    now = _dt.datetime.now(tz=_dt.timezone.utc)
+    not_after = presented_cert.not_valid_after_utc
+    # Some cryptography versions don't have not_valid_after_utc; fall back.
+    if getattr(not_after, 'tzinfo', None) is None:
+        not_after = not_after.replace(tzinfo=_dt.timezone.utc)
+
+    seconds_to_expiry = (not_after - now).total_seconds()
+    window_days = _DEFAULT_RENEWAL_WINDOW_DAYS
+    grace_days = _DEFAULT_GRACE_PERIOD_DAYS
+
+    if seconds_to_expiry > window_days * 86400:
+        # Too early to renew. Not an error — 304 Not Modified so the
+        # CLI can exit 0 (nothing to do).
+        return 304, {
+            'status': 'too_early',
+            'detail': (f'cert not_after is {not_after.isoformat()}; '
+                       f'{int(seconds_to_expiry / 86400)} days from now '
+                       f'(threshold {window_days})'),
+            'seconds_to_expiry': int(seconds_to_expiry),
+        }
+    if seconds_to_expiry < -(grace_days * 86400):
+        # Too late — past grace period.
+        ctx.audit.write({
+            'timestamp': _now_iso(),
+            'type': 'admin',
+            'action': 'cert.renew.refused',
+            'admin': {'name': '<cert>', 'role': 'cert',
+                      'mtls_subject': '<presented>'},
+            'target': {'serial': serial_hex,
+                       'not_after': not_after.isoformat(),
+                       'reason': 'past_grace_period'},
+            'result': 'refused',
+        })
+        return _err(410, 'past_grace',
+                     f'cert expired more than {grace_days} days ago '
+                     f'(not_after={not_after.isoformat()}); operator '
+                     f'must re-mint via mssh-admin cert mint')
+
+    # 3. Extract identity bits from the presented cert.
+    subject_cn = None
+    for attr in presented_cert.subject:
+        if attr.oid == oid.NameOID.COMMON_NAME:
+            subject_cn = attr.value
+            break
+    if not subject_cn:
+        return _err(400, 'bad_cert', 'presented cert has no CN')
+
+    # SANs (DNS + IP), preserved verbatim on renewal.
+    sans: list[str] = []
+    try:
+        san_ext = presented_cert.extensions.get_extension_for_oid(
+            oid.ExtensionOID.SUBJECT_ALTERNATIVE_NAME).value
+        for entry in san_ext:
+            if isinstance(entry, x509.DNSName):
+                sans.append(f'DNS:{entry.value}')
+            elif isinstance(entry, x509.IPAddress):
+                sans.append(f'IP:{entry.value}')
+    except x509.ExtensionNotFound:
+        pass
+
+    # EKU determines which cert_minter helper to call.
+    eku_usages = set()
+    try:
+        eku_ext = presented_cert.extensions.get_extension_for_oid(
+            oid.ExtensionOID.EXTENDED_KEY_USAGE).value
+        for usage in eku_ext:
+            eku_usages.add(usage.dotted_string)
+    except x509.ExtensionNotFound:
+        pass
+
+    is_server = oid.ExtendedKeyUsageOID.SERVER_AUTH.dotted_string in eku_usages
+    is_client = oid.ExtendedKeyUsageOID.CLIENT_AUTH.dotted_string in eku_usages
+    is_codesign = oid.ExtendedKeyUsageOID.CODE_SIGNING.dotted_string in eku_usages
+
+    # Validity: the new cert gets the same lifetime the original was
+    # minted with. Compute from the original cert's not_before.
+    not_before = presented_cert.not_valid_before_utc
+    if getattr(not_before, 'tzinfo', None) is None:
+        not_before = not_before.replace(tzinfo=_dt.timezone.utc)
+    original_validity = (not_after - not_before).total_seconds()
+    validity_days = max(1, int(round(original_validity / 86400)))
+
+    # 4. Mint the new leaf via the same helper that issued it.
+    try:
+        if is_server:
+            bundle = cert_minter.issue_server_cert(
+                subject_cn, ctx.tls_ca_key, ctx.tls_ca_cert,
+                validity_days=validity_days,
+                key_type=ctx.mtls_key_type,
+                sans=sans or None,
+                crl_url=ctx.crl_url)
+        elif is_codesign:
+            bundle = cert_minter.issue_codesign_cert(
+                subject_cn, ctx.tls_ca_key, ctx.tls_ca_cert,
+                validity_days=validity_days,
+                key_type=ctx.mtls_key_type)
+        elif is_client or not eku_usages:
+            # Default-and-fallback: a cert with clientAuth or with no
+            # EKU is treated as client (matches admin / server-mTLS /
+            # https-user shape).
+            bundle = cert_minter.issue_client_cert(
+                subject_cn, ctx.tls_ca_key, ctx.tls_ca_cert,
+                validity_days=validity_days,
+                key_type=ctx.mtls_key_type,
+                crl_url=ctx.crl_url)
+        else:
+            return _err(400, 'unsupported_eku',
+                         f'cannot renew cert with EKUs {sorted(eku_usages)}; '
+                         f'use mssh-admin cert mint instead')
+    except Exception as e:
+        return _err(502, 'mint_failed', f'cert issuance failed: {e}')
+
+    # 5. Optionally revoke the predecessor.
+    revoked_old = False
+    if body and body.get('revoke_predecessor'):
+        if ctx.crl is None:
+            return _err(503, 'unavailable',
+                         'revoke_predecessor requested but CRL not configured')
+        try:
+            ctx.crl.append([serial_hex],
+                            revoked_by='<cert.renew>',
+                            reason='renewed')
+            revoked_old = True
+        except Exception as e:
+            log.warning('cert.renew: revoke_predecessor failed: %s', e)
+
+    ctx.audit.write({
+        'timestamp': _now_iso(),
+        'type': 'admin',
+        'action': 'cert.renew.complete',
+        'admin': {'name': '<cert>', 'role': 'cert',
+                  'mtls_subject': f'CN={subject_cn}'},
+        'target': {'old_serial': serial_hex,
+                   'cn': subject_cn,
+                   'sans': sans,
+                   'validity_days': validity_days,
+                   'revoked_predecessor': revoked_old},
+        'result': 'ok',
+    })
+
+    return 200, {
+        'status': 'ok',
+        'cert': {
+            'subject_cn': subject_cn,
+            'sans': sans,
+            'validity_days': validity_days,
+            'old_serial': serial_hex,
+            'revoked_predecessor': revoked_old,
+        },
+        'credentials': {
+            'cert_pem': bundle.cert_pem.decode('ascii'),
+            'key_pem': bundle.key_pem.decode('ascii'),
+            'ca_cert_pem': bundle.ca_cert_pem.decode('ascii'),
+        },
+    }

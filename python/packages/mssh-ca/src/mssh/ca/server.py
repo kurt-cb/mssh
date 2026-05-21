@@ -56,37 +56,40 @@ def _load_identity_trust_root_fingerprints(paths: list[str]) -> set[str]:
     return out
 
 
-def _extract_client_cert_subject(req) -> str | None:
-    """Pull CN from the client cert presented in this request.
+def _extract_client_cert(req) -> 'x509.Certificate | None':
+    """Return the parsed peer cert from this request, or None.
 
-    Werkzeug's dev server forwards the cert via the ``ssl_socket`` on the
-    request. We translate that into a CN string ("CN=...") matching the format
-    used in the enrollment store. Returns ``None`` if no cert.
+    Tries the WSGI environ first (test-injected), then the
+    custom ``peercert_der`` slot our request handler populates
+    from the live socket. Same lookup as the prior CN-only
+    helper.
     """
-    # The peer cert PEM is exposed via environ['werkzeug.peer_cert_chain'] in
-    # some setups; the most reliable path on stdlib's wsgiref is the raw socket.
     env = req.environ
-    # Try direct WSGI env first (used by tests that inject a cert).
     pem = env.get('SSL_CLIENT_CERT') or env.get('werkzeug.peer_cert_pem')
     if pem:
         try:
-            cert = x509.load_pem_x509_certificate(pem.encode('ascii'))
-            return _cn_from_cert(cert)
+            return x509.load_pem_x509_certificate(pem.encode('ascii'))
         except Exception:
             return None
-    # Fall back to the live socket if available.
-    sock = env.get('werkzeug.socket') or env.get('wsgi.input')
-    # Newer werkzeug exposes peer cert binary on the connection — but the
-    # cleanest cross-version path is to read from the request.environ key set
-    # by our custom WSGI wrapper below.
-    peer_cert = env.get('peercert_der')
-    if peer_cert:
+    der = env.get('peercert_der')
+    if der:
         try:
-            cert = x509.load_der_x509_certificate(peer_cert)
-            return _cn_from_cert(cert)
+            return x509.load_der_x509_certificate(der)
         except Exception:
             return None
     return None
+
+
+def _extract_client_cert_subject(req) -> str | None:
+    """Pull CN from the client cert presented in this request.
+
+    Returns ``None`` if no cert. Returned as a ``"CN=..."`` string
+    matching the format used in the enrollment store.
+    """
+    cert = _extract_client_cert(req)
+    if cert is None:
+        return None
+    return _cn_from_cert(cert)
 
 
 def _cn_from_cert(cert: x509.Certificate) -> str | None:
@@ -195,7 +198,9 @@ def create_app(config: CAConfig) -> Flask:
 def register_routes(app: Flask) -> None:
     @app.before_request
     def _attach_caller():
-        g.client_subject = _extract_client_cert_subject(request)
+        g.client_cert = _extract_client_cert(request)
+        g.client_subject = (_cn_from_cert(g.client_cert)
+                             if g.client_cert is not None else None)
 
     @app.errorhandler(Exception)
     def _on_error(e: Exception):
@@ -684,6 +689,24 @@ def register_routes(app: Flask) -> None:
                             'detail': 'limit must be an integer'}), 400
         status, payload = admin_handlers.crl_fetch(
             app.config['ADMIN_CTX'], adm, after, limit)
+        return jsonify(payload), status
+
+    # /v1/cert/renew — auth-by-cert-being-renewed (NOT admin role).
+    # The presented mTLS client cert IS the credential. CA validates
+    # it chains to its own TLS hierarchy, isn't revoked, is in the
+    # renewable window, and mints a fresh leaf with the same identity.
+    # See design/ca-integration.md § "cert renew" and design/future-
+    # ideas.md §25.
+    @app.post('/v1/cert/renew')
+    def _cert_renew():
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.cert_renew(
+            app.config['ADMIN_CTX'], g.client_cert, body)
+        # 304 has special HTTP semantics — Flask wants no body. We
+        # still return a body so the CLI sees the not_modified
+        # detail. Use 200 + status='too_early' instead.
+        if status == 304:
+            return jsonify(payload), 200
         return jsonify(payload), status
 
     # /v1/crl.pem is the X.509 CRL that consumers like OpenVPN's
