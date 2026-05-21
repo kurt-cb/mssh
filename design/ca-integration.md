@@ -255,9 +255,9 @@ Audit entry lands as `cert.mint.tls-server` with `{cn, validity_days,
 sans}`. Revocation goes through `mssh-admin cert revoke <serial>`
 and propagates via the existing CRL feed.
 
-ACME endpoint compatibility — so existing certbot-style clients can
-use mssh-ca with no code changes — is the high-leverage adoption
-multiplier still pending in §5.
+For auto-renewal across the fleet, see
+[`mssh-admin cert renew`](#cert-renew-) below — service-driven
+refresh via daily systemd-timer, no ACME involved.
 
 ### HTTPS user (client) certs ✅
 
@@ -432,23 +432,114 @@ The PGP signing key has its own custody requirements — separate
 from the X.509 signing key — and is the largest piece of the §5
 budget (~700 LOC).
 
-### ACME endpoint compatibility 🚧
+### `cert renew` 🟡
 
-A separate listener on mssh-ca speaking RFC 8555 (ACME). Lets
-existing `certbot` / lego / cert-manager clients use mssh-ca with
-no code changes:
+Service-side auto-renewal of any cert mssh-ca has issued. The
+**replacement for an ACME endpoint** — the 2026-05-21 direction
+review dropped ACME (compatibility with certbot / cert-manager
+isn't a goal) in favor of this simpler shape: a single
+mTLS-authenticated endpoint where the cert being renewed IS the
+auth credential.
 
 ```bash
-# On a server that wants a TLS cert from mssh-ca:
-certbot certonly --server https://mssh-ca.internal:8443/acme/v1 \
-                 --email ops@example.com \
-                 -d service.internal.example.com
+# Run daily by systemd-timer on each service host.
+mssh-admin cert renew \
+    --cert /etc/grafana/tls.crt \
+    --key  /etc/grafana/tls.key \
+    --out-cert /etc/grafana/tls.crt \
+    --out-key  /etc/grafana/tls.key \
+    --threshold-days 14 \
+    --on-renew "systemctl reload grafana"
 ```
 
-ACME's account model maps to mssh-CA's admin / server enrollment
-records; account creation requires a one-time admin-approved
-enrollment. Highest adoption-value piece of §5 once the X.509
-expansion is in.
+What happens:
+
+  1. Read the existing cert. Bail with exit 0 (no-op) if
+     `not_after - now > threshold_days`.
+  2. Open mTLS to mssh-ca presenting `--cert`/`--key` as the
+     client identity. The CA validates the chain at the TLS
+     layer (so already "we issued this") and checks it isn't in
+     the CRL.
+  3. The CA validates the cert is in its renewable window:
+     - Early: `not_after - now ≤ renewal_window_days` (default 30)
+     - Grace: `now - not_after ≤ grace_period_days` (default 7)
+     - Outside both → 410 Gone, operator must re-mint.
+  4. CA mints a new leaf with the same CN, SANs, EKU, and
+     validity_days as the presented cert.
+  5. Returns new PEM + key.
+  6. CLI writes them atomically, runs `--on-renew`.
+
+#### Renewable scope
+
+Any cert mssh-ca has issued: from `cert mint --type {tls-server,
+https-user, code-sign}`, from `openvpn issue`, from `server add`,
+from `admin add`. All flow through the same renewal endpoint;
+the CA infers the cert type from the presented cert's EKU + the
+issuing intermediate.
+
+#### What it does NOT do
+
+  - **Doesn't auto-revoke the predecessor.** Already-expired
+    certs don't need explicit revocation. Pre-expiry renewal of
+    a still-valid cert leaves the old cert technically usable
+    until its not_after. Operators who want immediate
+    invalidation pass `--revoke-old`.
+  - **Doesn't auto-renew indefinitely.** The CA enforces
+    `cert_renewal_max_age_days` (default 2×validity). Past that,
+    the service has to do a fresh `cert mint` — operator-mediated
+    by design.
+  - **Doesn't handle key rotation.** v1 keeps the existing
+    private key. A future `--rotate-key` flag could mint a fresh
+    keypair on renewal; not v1.
+
+#### Systemd-timer template
+
+```
+# /etc/systemd/system/cert-renew@.service
+[Unit]
+Description=Renew mssh TLS cert for %i
+
+[Service]
+Type=oneshot
+ExecStart=mssh-admin cert renew \
+    --cert /etc/%i/tls.crt \
+    --key  /etc/%i/tls.key \
+    --out-cert /etc/%i/tls.crt \
+    --out-key  /etc/%i/tls.key \
+    --threshold-days 14 \
+    --on-renew "systemctl reload %i"
+```
+
+```
+# /etc/systemd/system/cert-renew@.timer
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Then per service:
+```bash
+systemctl enable --now cert-renew@grafana.timer
+systemctl enable --now cert-renew@prometheus.timer
+```
+
+#### Why this beats ACME for an internal CA
+
+  - ACME's value was being a drop-in for existing renewal
+    automation. Without that goal, ACME's complexity (state
+    machine, JWS, accounts, challenges) is parallel-system
+    overhead.
+  - mssh-ca already has every authorization signal it needs:
+    "this cert presented itself" + "we issued it" + "it's not
+    revoked" is sufficient evidence to renew. ACME's challenge
+    layer (HTTP-01 / DNS-01 / TLS-ALPN-01) recreates the same
+    signal via a different path.
+  - 250 LOC server + 120 LOC client + 50 LOC systemd-timer vs.
+    ~2000 LOC for a from-scratch RFC 8555 implementation.
 
 ### Passkey RP service for external tools 🚧
 
@@ -778,8 +869,9 @@ migration paths for the common cases:
   - Issue the new mssh-ca signing key as an intermediate signed
     by the existing root. All existing trust stores keep working
     until you're ready to flip the trust anchor.
-  - Migrate per-service certs at renewal time — point each
-    service's renewal script at mssh-ca's ACME endpoint.
+  - Migrate per-service certs at renewal time — operator
+    `cert mint`s once against mssh-ca, then `cert renew` takes
+    over via systemd-timer (see "cert renew" above).
 
 ### From an existing OpenVPN deployment
 
@@ -829,17 +921,13 @@ migration paths for the common cases:
 | WireGuard peer keypair + config | ✅ | `mssh-admin wireguard server-init / issue / server-show / revoke` |
 | CRL Distribution Point embedded in leaves | ✅ | Set `cert_generation.crl_url` in `ca-config.yaml`; CA exposes `GET /v1/crl.pem` (X.509 CRL signed by the TLS CA) |
 | PGP (OpenPGP) key directory + signing | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) + [§27](future-ideas.md#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory) — needs OpenPGP library + parallel signing key |
-| ACME endpoint | 🚧 | [§5](future-ideas.md#5-the-ca-could-mint-credentials-for-other-applications-step-ca-parallel) — separate listener + RFC 8555 state machine; full server is ~2000+ LOC, deserves its own design pass |
-| mssh-passkey integration (CA-side 2FA via separate broker) | 🚧 | mssh-passkey is a new public-facing module (per [passkey-design-document.md](passkey-design-document.md) Option 2); mssh-ca consumes it via mTLS. See this doc § "mssh-passkey integration for 2FA on CA operations". Two API contracts still to solidify (registration, public broker). |
+| Cert auto-renewal (`mssh-admin cert renew`) | 🟡 | `POST /v1/cert/renew` endpoint + CLI + systemd-timer template. **Replaces ACME** (dropped 2026-05-21). See `cert renew` section above. |
+| ACME endpoint | ❌ | **DROPPED 2026-05-21.** ACME was for compatibility with existing renewal automation (certbot, cert-manager); not a goal for mssh-ca. Use `mssh-admin cert renew` instead. |
+| Passkey integration (admin-2FA + external-tool RP) | ✅ | mssh-passkey broker module (v0.1.5) + mssh-ca shared bits + admin-2FA + external-tool RP. See [admin-2fa.md](admin-2fa.md) + [§ Passkey RP service](#passkey-rp-service-for-external-tools-) above |
 | v2 PKI hierarchy (Root + named intermediates) | 🟡 | Foundation primitives landed; full migration is roadmapped at [notes-pki-hierarchy.md](notes-pki-hierarchy.md). Until v2 ships, all §5 leaves share one signing key — see "implication for currently-landed §5 work" below |
 
 Remaining roadmap, in priority order:
 
-  - **ACME endpoint** — biggest adoption multiplier (every certbot /
-    cert-manager / lego deployment becomes a consumer), biggest
-    implementation cost (~2000+ LOC for a from-scratch RFC 8555
-    server). Most likely a library evaluation pass (`acme`/`josepy`
-    from EFF) precedes any code.
   - **PGP (OpenPGP)** — composes with [§27](future-ideas.md#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory)
     (the `mscp` consumer). Needs an OpenPGP library and a parallel
     signing key with its own custody requirements.

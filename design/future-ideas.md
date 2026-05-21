@@ -132,13 +132,22 @@ session cookie handling.
     the TLS CA. OpenVPN's `--crl-verify` consumes this directly.
 
 Still outstanding:
-  - **ACME endpoint** (RFC 8555 listener + state machine). Highest
-    adoption multiplier; ~2000+ LOC for a from-scratch server.
-    Deserves its own library-evaluation design pass.
   - **PGP (OpenPGP) signing hierarchy.** Composes with
     [§27](#27-mscp--pgp-encrypted-file-transfer-using-the-ca-as-key-directory).
     Needs an OpenPGP library + a parallel signing key with its own
     custody requirements.
+
+**Dropped from scope:** ACME (RFC 8555) endpoint. The 2026-05-21
+direction review concluded the only value of ACME was
+compatibility with existing renewal automation (certbot,
+cert-manager, etc.), which isn't a goal for mssh-ca. The
+universal "auto-renew internal TLS certs" use case is covered by
+[§25 cert renewal](#25-mssh-admin-pki--first-class-user-facing-pki-ceremony)
+instead — `mssh-admin cert renew` presents the existing cert
+as the mTLS client identity, the CA mints a fresh leaf with
+the same CN/SAN/EKU. Same operational outcome (cron / systemd
+timer auto-renews fleet TLS certs), ~250 LOC server-side vs.
+~1500+ for a from-scratch ACME server.
 
 **See also:** [ca-integration.md](ca-integration.md) — operator
 playbook with the working CLI invocations for each protocol plus
@@ -1456,10 +1465,28 @@ changes exerciseable end-to-end.
 
 ---
 
-## 25. `mssh-admin pki` — first-class user-facing PKI ceremony
+## 25. `mssh-admin pki` — first-class user-facing PKI ceremony + auto-renewal
 
 **Status:** CLI gap exposed by the 2026-05-19 migration tutorial
-walk-through.
+walk-through. Scope expanded 2026-05-21 to absorb cert auto-
+renewal — the ACME-compat use case the 2026-05-21 direction
+review dropped from §5.
+
+Three pieces under this banner:
+
+  1. **User-facing PKI ceremony** — formalize `scripts/mint-user-pki.py`
+     as `mssh-admin pki {bootstrap, server mint, user mint}`. Local
+     crypto, no network call. (Original §25 scope.)
+  2. **External Intermediate CA tier** — `mssh-admin pki external mint`
+     for delegating signing authority to external entities. mssh
+     trust stores actively exclude these. (Added in the 2026-05-20
+     trust-model amendment; depends on the v2 PKI hierarchy
+     migration.)
+  3. **`mssh-admin cert renew`** — service-side auto-renewal of any
+     CA-issued cert. Presents the existing cert as the mTLS client
+     identity; CA mints a fresh leaf with the same CN/SAN/EKU. The
+     daily/weekly systemd-timer flow that subsumes ACME. (Added
+     2026-05-21.)
 
 ### Background
 
@@ -1596,7 +1623,107 @@ new capability — and the load-bearing protection is the
 intermediate-pinning rule documented above: any leaves the External
 CA later mints will not be honored by mssh for auth.
 
-### Idea
+### `mssh-admin cert renew` — service-side auto-renewal
+
+Subsumes the ACME use case from §5. The 2026-05-21 direction
+review concluded ACME's value was 100% compatibility with existing
+renewal automation (certbot, cert-manager, etc.), which isn't a
+goal for mssh-ca. The actually-useful capability is
+"automatically refresh TLS certs across the fleet" — that's a
+~250 LOC server endpoint + CLI + systemd-timer.
+
+#### Operator surface
+
+```bash
+# Service host, run daily by systemd-timer:
+mssh-admin cert renew \
+    --cert /etc/grafana/tls.crt \
+    --key  /etc/grafana/tls.key \
+    --out-cert /etc/grafana/tls.crt \
+    --out-key  /etc/grafana/tls.key \
+    --threshold-days 14 \
+    --on-renew "systemctl reload grafana"
+
+# Exit 0 if not yet renewable (cert > threshold-days from expiry),
+# 0 if renewed successfully, non-zero on error.
+```
+
+#### Wire shape
+
+`POST /v1/cert/renew` — note: NOT under `/v1/admin/`. Auth is by
+the cert being renewed (presented as mTLS client cert), not by an
+admin role. The CA validates:
+
+  - The presented cert chains to the CA's TLS root (mTLS layer
+    handles this automatically).
+  - The cert is not in the CRL.
+  - The cert was issued no more than `cert_renewal_max_age_days`
+    ago (default 2×validity, configurable). Prevents indefinite
+    renewal chains.
+  - The cert is within the renewable window:
+      - **Early renew:** `not_after - now ≤ renewal_window_days`
+        (default 30). Lets services start renewing well before
+        expiry.
+      - **Grace period:** `now - not_after ≤ grace_period_days`
+        (default 7). Lets a cron that missed a window still
+        renew.
+      - Outside both → 410 Gone; operator must re-mint via
+        `mssh-admin cert mint`.
+
+On success, the CA mints a new leaf with the **same CN, SANs, EKU,
+and validity_days** as the presented cert, signed by the same
+intermediate (host-mint / auth / user-mint depending on the cert
+type). Returns the new PEM + key.
+
+#### CRL on renewal
+
+The OLD cert's serial is **not** automatically added to the CRL.
+Two reasons:
+  - Already-expired certs don't need explicit revocation (the
+    not_after handles it).
+  - Pre-expiry renewal of a still-valid cert leaves the old cert
+    technically usable until its not_after. Operators who want
+    immediate invalidation can revoke explicitly:
+    `mssh-admin cert revoke <serial>`.
+
+If the operator wants automatic revocation on renewal, the
+endpoint accepts `revoke_predecessor=true` in the request body
+(default false).
+
+#### Renewal vs. re-mint
+
+`mssh-admin cert mint --type tls-server --cn ...` (existing) is
+the **operator-driven first mint**. `cert renew` is the
+**service-driven refresh**. The two compose:
+
+  1. Operator runs `cert mint --type tls-server --cn grafana.example.com`
+     (or `server add`, `admin add`, etc.) — yields the initial
+     cert + key on the service host.
+  2. Service runs `cert renew` daily via systemd-timer. Bails
+     when nothing to do; refreshes the cert+key + restarts the
+     service when within `threshold_days` of expiry.
+  3. If the cert expires AND past grace period, the service
+     reports failure. Operator re-runs the initial `cert mint`
+     and redistributes.
+
+#### Audit log entries
+
+  - `cert.renew.attempt` — every call to /v1/cert/renew,
+    including those that return 410 Gone (too old) or 304 Not
+    Modified (not yet renewable).
+  - `cert.renew.complete` — successful renewal, with old + new
+    serials.
+  - `cert.renew.refused` — refused because not in renewable
+    window / chain invalid / revoked / not issued by us.
+
+#### LOC estimate
+
+  - Server handler + endpoint: ~200 LOC
+  - CLI command: ~120 LOC
+  - systemd-timer template + docs: ~50 LOC
+  - Tests: ~200 LOC
+
+### Idea (PKI ceremony — original §25 scope)
 
 Add a `mssh-admin pki` subcommand surface:
 
