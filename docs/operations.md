@@ -414,9 +414,9 @@ swap the hrefs).
 
 ---
 
-### Require passkey 2FA for high-privilege admin operations
+### Require passkey 2FA for high-privilege admin operations 🚧
 
-🚧 **Design captured, implementation in progress.** Reference:
+**Design captured, implementation in progress.** Reference:
 [design/admin-2fa.md](../design/admin-2fa.md) for the dataflow +
 state-machine; [design/mssh-passkey-module.md](../design/mssh-passkey-module.md)
 for the broker.

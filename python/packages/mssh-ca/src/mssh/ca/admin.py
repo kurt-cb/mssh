@@ -106,6 +106,24 @@ class AdminContext:
     # no WireGuard configured for this CA. See ca/wireguard.py.
     wireguard: Any = None       # WireGuardStore
 
+    # mssh-passkey broker integration. When all the passkey_*
+    # fields are set, the passkey endpoints are live. Unset →
+    # the passkey endpoints respond 503.
+    passkey_broker: Any = None        # PasskeyBrokerClient
+    passkey_rp_id: str = ''
+    passkey_rp_name: str = ''
+    passkey_expected_origin: str = ''
+    passkey_callback_url: str = ''
+    passkey_aaguid_allowlist: Any = None   # AAGUIDAllowlist
+    # In-flight ceremony state keyed by ceremony_id. Holds the
+    # webauthn challenge bytes + the per-flow context (admin name
+    # or external-tool/user) until the broker callback arrives.
+    # Two parallel maps: registration challenges + auth challenges.
+    passkey_pending_registrations: Any = None   # dict[ceremony_id -> dict]
+    passkey_pending_authentications: Any = None # dict[ceremony_id -> dict]
+    # Per-admin 2FA cache: admin_name -> last_verified_at_iso
+    passkey_2fa_cache: Any = None     # dict[str, str]
+
 
 def _now_iso() -> str:
     return _dt.datetime.now(tz=_dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')

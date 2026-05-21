@@ -18,7 +18,14 @@ dependencies = [
     "mssh-common",
     "flask>=3.0",
     "pyyaml>=6.0",
+    "requests>=2.31",
 ]
+
+[project.optional-dependencies]
+# WebAuthn relying-party functionality for admin-2FA and the
+# external-tool RP service. Opt-in because operators not using
+# passkey 2FA don't need the dep tree.
+passkey = ["webauthn>=2.0"]
 
 [project.scripts]
 mssh-ca = "mssh.ca.server:main"

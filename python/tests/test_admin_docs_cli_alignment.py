@@ -65,6 +65,43 @@ def _extract_documented_commands() -> set[tuple[str, ...]]:
     if future_match:
         text = text[:future_match.start()]
 
+    # Drop any subsection whose heading carries the 🚧 marker — those
+    # sections document design-in-progress features. The marker is the
+    # canonical "not yet implemented" signal (matches the icon usage
+    # in ca-integration.md + todo_current_status.md). Section ends at
+    # the next heading at the same or higher level.
+    #
+    # Important: must ignore "headings" that appear inside fenced
+    # code blocks — Python shell comments (`# Foo`) look like h1
+    # headings to a naive regex and would falsely close the skip.
+    def _strip_construction_sections(s: str) -> str:
+        lines = s.splitlines(keepends=True)
+        out: list[str] = []
+        skip_until_level: int | None = None
+        in_code_fence = False
+        for line in lines:
+            if line.startswith('```'):
+                in_code_fence = not in_code_fence
+                if skip_until_level is not None:
+                    continue
+                out.append(line)
+                continue
+            if not in_code_fence:
+                heading = re.match(r'^(#+)\s', line)
+                if heading:
+                    level = len(heading.group(1))
+                    if skip_until_level is not None and level <= skip_until_level:
+                        skip_until_level = None
+                    if '🚧' in line:
+                        skip_until_level = level
+                        continue
+            if skip_until_level is not None:
+                continue
+            out.append(line)
+        return ''.join(out)
+
+    text = _strip_construction_sections(text)
+
     found: set[tuple[str, ...]] = set()
     for match in _INVOCATION.finditer(text):
         tokens = tuple(match.group(1).split())

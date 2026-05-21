@@ -52,6 +52,19 @@ class CAConfig:
     # Unset → WireGuard endpoints respond 503 (not configured).
     wireguard_path: str = ''
 
+    # mssh-passkey broker config. When set, mssh-ca acts as a
+    # WebAuthn RP using the broker for both admin-2FA and
+    # external-tool flows. Unset → passkey endpoints respond 503.
+    passkey_broker_url: str = ''
+    passkey_client_cert: str = ''
+    passkey_client_key: str = ''
+    passkey_ca_cert: str = ''
+    passkey_callback_url: str = ''
+    passkey_rp_id: str = ''        # WebAuthn RP ID — usually the broker's public hostname
+    passkey_rp_name: str = ''
+    passkey_expected_origin: str = ''  # https://<rp_id>
+    passkey_aaguid_allowlist_path: str = ''
+
     @classmethod
     def load(cls, path: str | Path) -> 'CAConfig':
         with Path(path).open() as f:
@@ -84,5 +97,23 @@ class CAConfig:
                 (data.get('cert_generation') or {}).get('crl_url') or ''),
             wireguard_path=str(
                 (data.get('wireguard') or {}).get('path') or ''),
+            passkey_broker_url=str(
+                (data.get('passkey') or {}).get('broker_url') or ''),
+            passkey_client_cert=str(
+                (data.get('passkey') or {}).get('client_cert') or ''),
+            passkey_client_key=str(
+                (data.get('passkey') or {}).get('client_key') or ''),
+            passkey_ca_cert=str(
+                (data.get('passkey') or {}).get('ca_cert') or ''),
+            passkey_callback_url=str(
+                (data.get('passkey') or {}).get('callback_url') or ''),
+            passkey_rp_id=str(
+                (data.get('passkey') or {}).get('rp_id') or ''),
+            passkey_rp_name=str(
+                (data.get('passkey') or {}).get('rp_name') or 'mssh-ca'),
+            passkey_expected_origin=str(
+                (data.get('passkey') or {}).get('expected_origin') or ''),
+            passkey_aaguid_allowlist_path=str(
+                (data.get('passkey') or {}).get('aaguid_allowlist_path') or ''),
         )
         return c

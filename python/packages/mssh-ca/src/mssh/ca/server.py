@@ -140,6 +140,28 @@ def create_app(config: CAConfig) -> Flask:
         from . import wireguard as _wg
         wg_store = _wg.WireGuardStore(config.wireguard_path)
 
+    # mssh-passkey broker integration (optional). All of the
+    # passkey_* fields must be set together or none of them.
+    passkey_broker = None
+    passkey_allowlist = None
+    pending_regs = None
+    pending_auths = None
+    cache_2fa = None
+    if config.passkey_broker_url:
+        from . import passkey_broker as _pb
+        from . import passkey as _pk
+        passkey_broker = _pb.PasskeyBrokerClient(
+            base_url=config.passkey_broker_url,
+            client_cert=config.passkey_client_cert,
+            client_key=config.passkey_client_key,
+            ca_cert=config.passkey_ca_cert,
+        )
+        passkey_allowlist = _pk.AAGUIDAllowlist.load(
+            config.passkey_aaguid_allowlist_path or None)
+        pending_regs = {}
+        pending_auths = {}
+        cache_2fa = {}
+
     admin_ctx = admin_handlers.AdminContext(
         enrollment=enrollment, audit=audit,
         tls_ca_key=tls_ca_key, tls_ca_cert=tls_ca_cert,
@@ -150,6 +172,15 @@ def create_app(config: CAConfig) -> Flask:
         crl=crl_store,
         crl_url=(config.crl_url or None),
         wireguard=wg_store,
+        passkey_broker=passkey_broker,
+        passkey_rp_id=config.passkey_rp_id,
+        passkey_rp_name=config.passkey_rp_name,
+        passkey_expected_origin=config.passkey_expected_origin,
+        passkey_callback_url=config.passkey_callback_url,
+        passkey_aaguid_allowlist=passkey_allowlist,
+        passkey_pending_registrations=pending_regs,
+        passkey_pending_authentications=pending_auths,
+        passkey_2fa_cache=cache_2fa,
     )
 
     app.config['AUTH_CTX'] = auth_ctx

@@ -55,10 +55,33 @@ class Policy:
 
 
 @dataclass
+class PasskeyCredential:
+    """One registered WebAuthn credential. Attached to a user (for
+    ssh-user-flow 2FA, future) or to an admin (for admin-2FA today)
+    or under an external-tool namespace.
+
+    Fields mirror what's needed by ``webauthn.verify_authentication_response``:
+    the credential ID, the COSE-encoded public key, the sign counter,
+    and the AAGUID for allowlist enforcement. Plus operator-side
+    metadata (label, enrolled_at, revoked_at).
+    """
+    credential_id: str          # base64url-encoded
+    public_key: str             # base64url-encoded COSE bytes
+    aaguid: str = ''            # 16-byte UUID in standard 8-4-4-4-12 hex form
+    sign_count: int = 0
+    transports: list[str] = field(default_factory=list)
+    label: str = ''             # operator/user-set, e.g. "alice yubikey 5C"
+    enrolled_at: str = ''
+    enrolled_by: str = ''
+    revoked_at: str = ''        # empty when active
+
+
+@dataclass
 class User:
     username: str
     keys: list[KeyBinding] = field(default_factory=list)
     policies: list[Policy] = field(default_factory=list)
+    passkey_credentials: list[PasskeyCredential] = field(default_factory=list)
     enrolled_at: str = ''
     enrolled_by: str = ''
 
@@ -68,6 +91,23 @@ class Admin:
     name: str
     role: str               # "superuser" | "server-admin" | "user-admin" | "auditor"
     mtls_subject: str
+    passkey_credentials: list[PasskeyCredential] = field(default_factory=list)
+    enrolled_at: str = ''
+    enrolled_by: str = ''
+
+
+@dataclass
+class ExternalTool:
+    """An external application enrolled at mssh-ca that can use it
+    as a WebAuthn relying party. See
+    [ca-integration.md § Passkey RP service for external tools].
+    """
+    name: str
+    mtls_subject: str
+    rp_id: str                  # the WebAuthn RP ID the tool's users register under
+    outcome_url_prefix: str     # outbound callbacks to the tool restricted to this prefix
+    # Per-tool-user credentials: dict[user_id -> list of credentials]
+    user_credentials: dict[str, list[PasskeyCredential]] = field(default_factory=dict)
     enrolled_at: str = ''
     enrolled_by: str = ''
 
@@ -99,6 +139,7 @@ class Enrollment:
         self.servers: dict[str, Server] = {}
         self.users: dict[str, User] = {}
         self.admins: dict[str, Admin] = {}
+        self.external_tools: dict[str, ExternalTool] = {}
         # Inner sshd_config template storage (see mssh.ca.templates).
         # Keyed by inner_sshd_kind (e.g. 'openssh'); values are template
         # text. ``templates_servers[server][kind]`` and
@@ -124,15 +165,29 @@ class Enrollment:
                 name: Server(name=name, **fields)
                 for name, fields in (data.get('servers') or {}).items()
             }
-            self.admins = {
-                name: Admin(name=name, **fields)
-                for name, fields in (data.get('admins') or {}).items()
-            }
+            self.admins = {}
+            for name, fields in (data.get('admins') or {}).items():
+                creds = [PasskeyCredential(**c)
+                         for c in (fields.pop('passkey_credentials', None) or [])]
+                self.admins[name] = Admin(
+                    name=name,
+                    passkey_credentials=creds,
+                    **fields,
+                )
+            self.external_tools = {}
+            for name, fields in (data.get('external_tools') or {}).items():
+                uc_raw = fields.pop('user_credentials', None) or {}
+                uc = {u: [PasskeyCredential(**c) for c in creds]
+                      for u, creds in uc_raw.items()}
+                self.external_tools[name] = ExternalTool(
+                    name=name, user_credentials=uc, **fields)
             self.users = {}
             max_pol = 0
             for uname, ufields in (data.get('users') or {}).items():
                 keys = [KeyBinding(**k) for k in (ufields.get('keys') or [])]
                 policies = [Policy(**p) for p in (ufields.get('policies') or [])]
+                creds = [PasskeyCredential(**c)
+                         for c in (ufields.get('passkey_credentials') or [])]
                 for p in policies:
                     n = _policy_num(p.id)
                     if n > max_pol:
@@ -141,6 +196,7 @@ class Enrollment:
                     username=uname,
                     keys=keys,
                     policies=policies,
+                    passkey_credentials=creds,
                     enrolled_at=ufields.get('enrolled_at', ''),
                     enrolled_by=ufields.get('enrolled_by', ''),
                 )
@@ -177,6 +233,8 @@ class Enrollment:
                         'mtls_subject': a.mtls_subject,
                         'enrolled_at': a.enrolled_at,
                         'enrolled_by': a.enrolled_by,
+                        **({'passkey_credentials': [asdict(c) for c in a.passkey_credentials]}
+                           if a.passkey_credentials else {}),
                     }
                     for a in self.admins.values()
                 }
@@ -187,8 +245,25 @@ class Enrollment:
                         'policies': [asdict(p) for p in u.policies],
                         'enrolled_at': u.enrolled_at,
                         'enrolled_by': u.enrolled_by,
+                        **({'passkey_credentials': [asdict(c) for c in u.passkey_credentials]}
+                           if u.passkey_credentials else {}),
                     }
                     for u in self.users.values()
+                }
+            if self.external_tools:
+                out['external_tools'] = {
+                    t.name: {
+                        'mtls_subject': t.mtls_subject,
+                        'rp_id': t.rp_id,
+                        'outcome_url_prefix': t.outcome_url_prefix,
+                        'enrolled_at': t.enrolled_at,
+                        'enrolled_by': t.enrolled_by,
+                        **({'user_credentials':
+                              {u: [asdict(c) for c in creds]
+                               for u, creds in t.user_credentials.items()}}
+                           if t.user_credentials else {}),
+                    }
+                    for t in self.external_tools.values()
                 }
             templates_section: dict[str, Any] = {}
             if self.templates_default:
@@ -332,6 +407,141 @@ class Enrollment:
             if len(self.users[username].keys) == before:
                 raise EnrollmentError(f'key not found: {fingerprint}')
             self.save()
+
+    # ---- passkey credentials (admin-2FA flow) ----------------------------
+
+    def add_admin_passkey(self, admin_name: str,
+                          cred: PasskeyCredential) -> PasskeyCredential:
+        with self._lock:
+            if admin_name not in self.admins:
+                raise EnrollmentError(f'admin not found: {admin_name}')
+            existing = {c.credential_id
+                        for c in self.admins[admin_name].passkey_credentials
+                        if not c.revoked_at}
+            if cred.credential_id in existing:
+                raise EnrollmentError(
+                    f'passkey credential {cred.credential_id} already exists '
+                    f'for admin {admin_name}')
+            if not cred.enrolled_at:
+                cred.enrolled_at = _now_iso()
+            self.admins[admin_name].passkey_credentials.append(cred)
+            self.save()
+            return cred
+
+    def revoke_admin_passkey(self, admin_name: str,
+                              credential_id: str) -> None:
+        with self._lock:
+            if admin_name not in self.admins:
+                raise EnrollmentError(f'admin not found: {admin_name}')
+            for c in self.admins[admin_name].passkey_credentials:
+                if c.credential_id == credential_id and not c.revoked_at:
+                    c.revoked_at = _now_iso()
+                    self.save()
+                    return
+            raise EnrollmentError(
+                f'no active passkey credential {credential_id} for '
+                f'admin {admin_name}')
+
+    def update_admin_passkey_sign_count(self, admin_name: str,
+                                          credential_id: str,
+                                          new_count: int) -> None:
+        with self._lock:
+            if admin_name not in self.admins:
+                raise EnrollmentError(f'admin not found: {admin_name}')
+            for c in self.admins[admin_name].passkey_credentials:
+                if c.credential_id == credential_id:
+                    c.sign_count = new_count
+                    self.save()
+                    return
+            raise EnrollmentError(
+                f'no passkey credential {credential_id} for admin {admin_name}')
+
+    # ---- external tools (RP-service flow) --------------------------------
+
+    def add_external_tool(self, name: str, mtls_subject: str,
+                          rp_id: str, outcome_url_prefix: str,
+                          enrolled_by: str = '') -> ExternalTool:
+        with self._lock:
+            if name in self.external_tools:
+                raise EnrollmentError(f'external tool exists: {name}')
+            if not outcome_url_prefix.startswith('https://'):
+                raise EnrollmentError(
+                    'outcome_url_prefix must be https://')
+            tool = ExternalTool(
+                name=name, mtls_subject=mtls_subject,
+                rp_id=rp_id,
+                outcome_url_prefix=outcome_url_prefix,
+                enrolled_at=_now_iso(),
+                enrolled_by=enrolled_by,
+            )
+            self.external_tools[name] = tool
+            self.save()
+            return tool
+
+    def remove_external_tool(self, name: str) -> None:
+        with self._lock:
+            if name not in self.external_tools:
+                raise EnrollmentError(f'external tool not found: {name}')
+            del self.external_tools[name]
+            self.save()
+
+    def find_external_tool_by_mtls_subject(self,
+                                            subject: str) -> ExternalTool | None:
+        with self._lock:
+            for t in self.external_tools.values():
+                if t.mtls_subject == subject:
+                    return t
+            return None
+
+    def add_external_tool_user_passkey(self, tool_name: str, user_id: str,
+                                         cred: PasskeyCredential
+                                         ) -> PasskeyCredential:
+        with self._lock:
+            if tool_name not in self.external_tools:
+                raise EnrollmentError(f'external tool not found: {tool_name}')
+            tool = self.external_tools[tool_name]
+            creds = tool.user_credentials.setdefault(user_id, [])
+            existing = {c.credential_id for c in creds if not c.revoked_at}
+            if cred.credential_id in existing:
+                raise EnrollmentError(
+                    f'credential {cred.credential_id} already exists '
+                    f'for {tool_name}/{user_id}')
+            if not cred.enrolled_at:
+                cred.enrolled_at = _now_iso()
+            creds.append(cred)
+            self.save()
+            return cred
+
+    def revoke_external_tool_user_passkey(self, tool_name: str,
+                                            user_id: str,
+                                            credential_id: str) -> None:
+        with self._lock:
+            if tool_name not in self.external_tools:
+                raise EnrollmentError(f'external tool not found: {tool_name}')
+            creds = self.external_tools[tool_name].user_credentials.get(
+                user_id, [])
+            for c in creds:
+                if c.credential_id == credential_id and not c.revoked_at:
+                    c.revoked_at = _now_iso()
+                    self.save()
+                    return
+            raise EnrollmentError(
+                f'no active credential {credential_id} for '
+                f'{tool_name}/{user_id}')
+
+    def update_external_tool_user_passkey_sign_count(
+            self, tool_name: str, user_id: str,
+            credential_id: str, new_count: int) -> None:
+        with self._lock:
+            if tool_name not in self.external_tools:
+                raise EnrollmentError(f'external tool not found: {tool_name}')
+            for c in self.external_tools[tool_name].user_credentials.get(user_id, []):
+                if c.credential_id == credential_id:
+                    c.sign_count = new_count
+                    self.save()
+                    return
+            raise EnrollmentError(
+                f'no credential {credential_id} for {tool_name}/{user_id}')
 
     def find_user_by_fingerprint(self, fingerprint: str) -> User | None:
         with self._lock:
