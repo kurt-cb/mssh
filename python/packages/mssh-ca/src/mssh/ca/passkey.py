@@ -166,17 +166,14 @@ def verify_registration(*, response_json: str,
     (challenge mismatch, signature invalid, AAGUID not allowed,
     etc.)."""
     from webauthn import verify_registration_response
-    from webauthn.helpers.structs import RegistrationCredential
     from webauthn.helpers.exceptions import InvalidRegistrationResponse
 
-    try:
-        cred_in = RegistrationCredential.parse_raw(response_json)
-    except Exception as e:
-        raise ValueError(f'response_json not parseable: {e}')
-
+    # webauthn 2.x: verify_registration_response accepts JSON string
+    # directly. The Pydantic-v1-era `RegistrationCredential.parse_raw`
+    # is gone in 2.x; the structs are now plain dataclasses.
     try:
         verified = verify_registration_response(
-            credential=cred_in,
+            credential=response_json,
             expected_challenge=challenge.challenge_bytes,
             expected_rp_id=challenge.rp_id,
             expected_origin=challenge.expected_origin,
@@ -184,18 +181,25 @@ def verify_registration(*, response_json: str,
         )
     except InvalidRegistrationResponse as e:
         raise ValueError(f'registration response invalid: {e}')
+    except Exception as e:
+        raise ValueError(f'registration response could not be parsed: {e}')
 
     aaguid_str = str(verified.aaguid) if verified.aaguid else ''
     err = challenge.aaguid_allowlist.check(aaguid_str)
     if err:
         raise ValueError(f'aaguid rejected: {err}')
 
+    # Transports come from the response JSON; the library extracts
+    # them into the verified result on 2.x. Fall back to empty if
+    # the authenticator didn't report any.
+    transports = list(getattr(verified, 'credential_transports', None) or [])
+
     return PasskeyCredential(
         credential_id=_b64u_encode(verified.credential_id),
         public_key=_b64u_encode(verified.credential_public_key),
         aaguid=aaguid_str,
         sign_count=int(verified.sign_count),
-        transports=list(cred_in.response.transports or []) if cred_in.response else [],
+        transports=transports,
     )
 
 
@@ -250,16 +254,25 @@ def verify_authentication(*, response_json: str,
                             ) -> AuthenticationOutcome:
     """Verify the browser's assertion response. Raises ValueError
     on any failure."""
+    import json as _json
     from webauthn import verify_authentication_response
-    from webauthn.helpers.structs import AuthenticationCredential
     from webauthn.helpers.exceptions import InvalidAuthenticationResponse
 
+    # Parse the response JSON ourselves enough to extract `rawId` for
+    # the credential lookup. webauthn 2.x accepts the JSON string
+    # directly when calling verify_authentication_response, so we
+    # don't need to instantiate AuthenticationCredential.
     try:
-        cred_in = AuthenticationCredential.parse_raw(response_json)
+        parsed = _json.loads(response_json)
+        # rawId is base64url-encoded in the JSON; the parsed structs
+        # store it as bytes after decode. We can use the b64url form
+        # directly — that's what our credentials_by_id is keyed on.
+        cred_id_b64 = parsed.get('rawId') or parsed.get('id') or ''
     except Exception as e:
         raise ValueError(f'response_json not parseable: {e}')
+    if not cred_id_b64:
+        raise ValueError('response_json missing rawId/id')
 
-    cred_id_b64 = _b64u_encode(cred_in.raw_id)
     stored = challenge.credentials_by_id.get(cred_id_b64)
     if not stored:
         raise ValueError(f'credential {cred_id_b64} not recognised')
@@ -268,7 +281,7 @@ def verify_authentication(*, response_json: str,
 
     try:
         verified = verify_authentication_response(
-            credential=cred_in,
+            credential=response_json,
             expected_challenge=challenge.challenge_bytes,
             expected_rp_id=challenge.rp_id,
             expected_origin=challenge.expected_origin,

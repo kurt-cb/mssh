@@ -461,22 +461,28 @@ def bootstrap_ca(ca_dir: str | Path, *, key_type: str = 'ec',
         os.chmod(role_dir / 'key.pem', 0o600)
         inter_pems[role] = (key_pem, cert_pem)
 
-    # CA TLS server cert. Per the trust-model amendment, clients pin
-    # to host-mint (not root), so the leaf alone suffices — they
-    # already trust the issuer. Bundling the intermediate would be
-    # redundant and triggers "unable to get issuer certificate"
-    # errors in some OpenSSL configurations that don't honor the
-    # PARTIAL_CHAIN flag.
-    tls_server_bundle = serialize_certificate(tls_server_cert)
+    # CA TLS server cert. PRESENTED on wire as leaf + host-mint chain
+    # bundle. The host-mint cert in the bundle is what lets OpenSSL
+    # walk from the leaf to a trust anchor that the client recognizes.
+    # Two valid client trust-store configurations both work:
+    #   - Pinned: trust store has host-mint only → server's chain
+    #     terminates immediately at host-mint (the trust anchor).
+    #   - Legacy: trust store has auth+root (the tls-ca-cert.pem
+    #     bundle) → chain walks leaf → host-mint (from server) →
+    #     root (from trust store). Standard X.509 path-building.
+    # Leaf-only on the wire would force clients into pinned mode,
+    # which broke v0.2.0 callers that still use tls-ca-cert.pem.
+    tls_server_bundle = _chain_pem(tls_server_cert,
+                                    intermediates['host-mint'].cert)
     (ca_dir / 'tls-server-cert.pem').write_bytes(tls_server_bundle)
     (ca_dir / 'tls-server-key.pem').write_bytes(
         serialize_private_key(tls_server_key))
     os.chmod(ca_dir / 'tls-server-key.pem', 0o600)
 
-    # Bootstrap admin cert. Leaf alone, same rationale as the TLS
-    # server cert above — server pins to auth, no need to send the
-    # intermediate on the wire.
-    admin_bundle = serialize_certificate(boot_admin_cert)
+    # Bootstrap admin cert. Same chain-bundle rationale as the TLS
+    # server cert above — leaf + auth lets validators walk to either
+    # auth-pinned or root-pinned trust stores.
+    admin_bundle = _chain_pem(boot_admin_cert, intermediates['auth'].cert)
     (ca_dir / 'bootstrap-admin-cert.pem').write_bytes(admin_bundle)
     (ca_dir / 'bootstrap-admin-key.pem').write_bytes(
         serialize_private_key(boot_admin_key))
