@@ -88,6 +88,12 @@ def _make_listener(cache: AuthzCache, *,
         listener._auth_trust_root_pubkey = sc.public_key()
     else:
         listener._auth_trust_root_pubkey = None
+    # bypass_trust_root_pubkey (v0.2.3+): the bypass-mint intermediate
+    # pubkey. In single-signer test setup, this is the same as
+    # auth_trust_root (the listener falls back to auth_trust_root
+    # when bypass_trust_root is None, so leaving it None is fine for
+    # most tests).
+    listener._bypass_trust_root_pubkey = None
     return listener
 
 

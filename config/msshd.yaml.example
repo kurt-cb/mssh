@@ -44,14 +44,21 @@ ca:
   client_key:  /etc/mssh/msshd-mtls.key
   ca_pubkey:   /etc/mssh/server-mtls-ca.pub
   timeout_seconds: 5
-  # Authorization-signing trust root. Used to verify CA-bypass certs
-  # presented inline by `mssh --inject-bypass-cert`. Without this,
-  # bypass-cert injection refuses (fail-closed) because the marker
-  # alone is not authenticity proof. This file is the CA's
-  # signing-cert.pem; copy it from the CA host during enrollment.
-  # Distinct from `ca_pubkey` above, which trusts mssh-ca's mTLS
-  # server identity (different hierarchy — see CLAUDE.md).
+  # Authorization-signing trust root (legacy single-signer; v0.2.0+).
+  # Used to verify CA-bypass certs presented inline when
+  # `bypass_trust_root` below isn't set (backward-compat with
+  # deployments where bypass and user-cert signing share a key).
+  # This file is the CA's signing-cert.pem (an alias for the
+  # user-mint intermediate in v0.2.1+). Distinct from `ca_pubkey`
+  # above, which trusts mssh-ca's mTLS server identity.
   auth_trust_root: /etc/mssh/auth-signing-ca.pem
+  # Bypass-cert trust root (v0.2.3+ — RECOMMENDED for new deployments).
+  # Pins inline-bypass-cert verification to the dedicated bypass-mint
+  # intermediate. Per the trust-model amendment, this closes the
+  # attack where a user-mint-signed §5 leaf could otherwise be
+  # injected as a bypass cert. Copy `intermediates/bypass-mint/cert.pem`
+  # from the CA host during enrollment.
+  bypass_trust_root: /etc/mssh/bypass-mint-ca.pem
   # Operator emergency-cert path. Only consumed by the legacy shim
   # path (akc_shim). msshd's break-glass story is "CA-bypass cert
   # presented by the operator at session time" — see design/security.md.

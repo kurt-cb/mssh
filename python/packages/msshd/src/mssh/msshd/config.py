@@ -60,15 +60,23 @@ class CAConfig:
     # archive/design/notes-bypass-cache.md "CRL Amendment".
     crl_fetch_limit: int = 100
     crl_strict_threshold: int = 50
-    # Trust root for verifying inline-presented bypass certs (the
-    # mssh-ca authorization signing cert). When set, msshd verifies
-    # each --inject-bypass-cert against this trust root in addition
-    # to the OID_CA_BYPASS marker check. Required for bypass-cert
-    # injection; unset → bypass injection refuses (fail closed).
-    # Distinct from `ca_pubkey`, which trusts mssh-ca's mTLS server
-    # identity (a different CA in the two-hierarchy design — see
-    # CLAUDE.md "Key design decisions").
+    # Trust root for verifying CA-grant authz certs (mssh-ca's
+    # user-mint intermediate cert in v0.2.1+; the legacy signing-cert
+    # in v0.2.0). Used by inline cert verification paths that don't
+    # go through the live CA. Required to enable bypass-cert injection
+    # unless `bypass_trust_root` below is also set (in which case
+    # bypass injection uses that one and auth_trust_root is optional).
     auth_trust_root: str = ''
+    # Trust root for verifying inline-presented bypass certs (the
+    # mssh-ca `bypass-mint` intermediate cert, since v0.2.1). When
+    # unset, bypass-cert injection falls back to verifying against
+    # `auth_trust_root` for backward-compat with v0.2.0 deployments
+    # (single-signer layout where bypass certs and authz certs
+    # share a signing key). New deployments must pin separately to
+    # honor the trust-model amendment (validation pins to the
+    # SPECIFIC intermediate). See design/security.md "Chain of
+    # trust v2".
+    bypass_trust_root: str = ''
 
 
 INNER_MODE_LONG_LIVED = 'long-lived'
@@ -201,6 +209,7 @@ class MsshdConfig:
                     if ca.get('crl_strict_threshold') is not None
                     else 50),
                 auth_trust_root=str(ca.get('auth_trust_root') or ''),
+                bypass_trust_root=str(ca.get('bypass_trust_root') or ''),
             ),
             inner=InnerConfig(
                 sshd_binary=str(inner.get('sshd_binary') or '/usr/sbin/sshd'),

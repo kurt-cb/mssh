@@ -127,7 +127,8 @@ class _FakeCAClient:
         self._pages = list(pages)
         self.fetch_calls: list[tuple[int, int]] = []
 
-    async def fetch_crl(self, *, after: int, limit: int) -> dict:
+    async def fetch_crl(self, *, after: int, limit: int,
+                        issuer: str = 'user-mint') -> dict:
         self.fetch_calls.append((after, limit))
         if not self._pages:
             return {'status': 'ok', 'current_seq': after, 'entries': []}
@@ -154,8 +155,8 @@ async def test_sync_invalidates_revoked_serial(tmp_path):
         'entries': [_make_entry(1, ['abc'])],
     }])
     sync = CRLSync(c, fake, fetch_limit=10)
-    new_seq = await sync.sync_now(1)
-    assert new_seq == 1
+    new_seqs = await sync.sync_now(1)
+    assert new_seqs.get('user-mint') == 1
     assert c.last_crl_seq == 1
     assert c.get('alice') is None
 
@@ -178,8 +179,8 @@ async def test_sync_pages_through_multiple_fetches(tmp_path):
          'entries': [_make_entry(3, ['ghi'])]},
     ])
     sync = CRLSync(c, fake, fetch_limit=2)
-    new_seq = await sync.sync_now(3)
-    assert new_seq == 3
+    new_seqs = await sync.sync_now(3)
+    assert new_seqs.get('user-mint') == 3
     assert c.last_crl_seq == 3
     assert c.get('alice') is None
     assert c.get('bob') is None
@@ -196,7 +197,7 @@ async def test_sync_stops_on_ca_error_and_preserves_partial_progress():
     class _FailingClient:
         def __init__(self):
             self._calls = 0
-        async def fetch_crl(self, *, after, limit):
+        async def fetch_crl(self, *, after, limit, issuer='user-mint'):
             self._calls += 1
             if self._calls == 1:
                 return {
@@ -206,9 +207,9 @@ async def test_sync_stops_on_ca_error_and_preserves_partial_progress():
             raise RuntimeError('CA unreachable')
 
     sync = CRLSync(c, _FailingClient(), fetch_limit=1)
-    new_seq = await sync.sync_now(5)
+    new_seqs = await sync.sync_now(5)
     # First entry applied; second fetch failed → stops at seq=1.
-    assert new_seq == 1
+    assert new_seqs.get('user-mint') == 1
     assert c.last_crl_seq == 1
     assert c.get('alice') is None
     assert c.get('bob') is not None
@@ -223,8 +224,8 @@ async def test_sync_handles_empty_response():
         'status': 'ok', 'current_seq': 7, 'entries': [],
     }])
     sync = CRLSync(c, fake, fetch_limit=10)
-    new_seq = await sync.sync_now(7)
-    assert new_seq == 7
+    new_seqs = await sync.sync_now(7)
+    assert new_seqs.get('user-mint') == 7
     assert c.last_crl_seq == 7
 
 
@@ -234,6 +235,6 @@ async def test_sync_noop_when_already_caught_up():
     c.set_last_crl_seq(5)
     fake = _FakeCAClient([])
     sync = CRLSync(c, fake, fetch_limit=10)
-    new_seq = await sync.sync_now(5)
-    assert new_seq == 5
+    new_seqs = await sync.sync_now(5)
+    assert new_seqs.get('user-mint') == 5
     assert fake.fetch_calls == []

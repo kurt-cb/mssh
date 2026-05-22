@@ -54,10 +54,15 @@ class CRLSync:
         self._lock = asyncio.Lock()
         self._running: Optional[asyncio.Task] = None
 
-    def maybe_sync(self, current_crl_seq: int) -> None:
-        """Schedule a background sync if msshd is behind. Cheap and
-        non-blocking; safe to call from the hot authorize path."""
-        if current_crl_seq <= self._cache.last_crl_seq:
+    def maybe_sync(self, current_crl_seqs: dict[str, int] | int) -> None:
+        """Schedule a background sync if msshd is behind on ANY
+        issuer. Cheap and non-blocking; safe to call from the hot
+        authorize path.
+
+        Accepts either the new per-issuer ``current_crl_seqs`` map or
+        the legacy singular int (treated as user-mint's value)."""
+        seqs = self._coerce_seqs(current_crl_seqs)
+        if not self._needs_sync(seqs):
             return
         if self._running is not None and not self._running.done():
             return                              # already syncing
@@ -67,42 +72,61 @@ class CRLSync:
             log.warning('crl_sync: no running loop, skipping')
             return
         self._running = loop.create_task(
-            self._sync(current_crl_seq),
-            name='crl-sync')
+            self._sync(seqs), name='crl-sync')
 
-    async def sync_now(self, current_crl_seq: int) -> int:
+    async def sync_now(self,
+                       current_crl_seqs: dict[str, int] | int) -> dict[str, int]:
         """Synchronous variant — caller awaits completion. Returns the
-        new last_crl_seq. Used by tests and by enforce_listener's
+        new last_crl_seqs map. Used by tests and by enforce_listener's
         strict-mode catch-up. Holds the lock so concurrent calls
         serialize."""
+        seqs = self._coerce_seqs(current_crl_seqs)
         async with self._lock:
-            return await self._do_sync(current_crl_seq)
+            return await self._do_sync(seqs)
 
-    async def _sync(self, current_crl_seq: int) -> None:
+    @staticmethod
+    def _coerce_seqs(v) -> dict[str, int]:
+        """Accept either a dict or a singular int (legacy)."""
+        if isinstance(v, dict):
+            return {str(k): int(s) for k, s in v.items()}
+        return {'user-mint': int(v or 0)}
+
+    def _needs_sync(self, current_seqs: dict[str, int]) -> bool:
+        for issuer, current in current_seqs.items():
+            if current > self._cache.last_crl_seqs.get(issuer, 0):
+                return True
+        return False
+
+    async def _sync(self, current_seqs: dict[str, int]) -> None:
         async with self._lock:
             try:
-                await self._do_sync(current_crl_seq)
+                await self._do_sync(current_seqs)
             except Exception:                   # noqa: BLE001
                 log.exception('crl_sync: background sync raised')
 
-    async def _do_sync(self, current_crl_seq: int) -> int:
-        """Fetch + apply loop. Returns the new last_crl_seq.
+    async def _do_sync(self,
+                       current_seqs: dict[str, int]) -> dict[str, int]:
+        """Iterate over each stale issuer and apply its missing
+        entries to the authz cache. Returns the new last_crl_seqs."""
+        for issuer, current in current_seqs.items():
+            if current > self._cache.last_crl_seqs.get(issuer, 0):
+                await self._do_sync_issuer(issuer, current)
+        return dict(self._cache.last_crl_seqs)
 
-        Stops on the first CA failure; next authorize call will
-        re-trigger from wherever we left off. msshd never has a
-        partially-applied CRL entry because we apply each entry's
-        serials AS we receive it.
-        """
-        start = self._cache.last_crl_seq
+    async def _do_sync_issuer(self, issuer: str, current: int) -> int:
+        """Fetch + apply loop for ONE issuer. Returns the new
+        last-applied seq for that issuer."""
+        start = self._cache.last_crl_seqs.get(issuer, 0)
         applied_through = start
 
-        while applied_through < current_crl_seq:
+        while applied_through < current:
             try:
                 resp = await self._ca.fetch_crl(
-                    after=applied_through, limit=self._fetch_limit)
+                    after=applied_through, limit=self._fetch_limit,
+                    issuer=issuer)
             except Exception as e:              # noqa: BLE001
-                log.warning('crl_sync: fetch failed at after=%d: %s',
-                            applied_through, e)
+                log.warning('crl_sync[%s]: fetch failed at after=%d: %s',
+                            issuer, applied_through, e)
                 break
 
             entries = resp.get('entries') or []
@@ -112,7 +136,7 @@ class CRLSync:
                 # whatever the CA reports as current to stop looping.
                 ca_current = int(resp.get('current_seq') or 0)
                 if ca_current > applied_through:
-                    self._cache.set_last_crl_seq(ca_current)
+                    self._cache.set_last_crl_seq(ca_current, issuer=issuer)
                     applied_through = ca_current
                 break
 
@@ -125,18 +149,18 @@ class CRLSync:
                 for serial in serials:
                     total += self._cache.invalidate_by_serial(serial)
                 if total:
-                    log.info('crl_sync: applied seq=%d, invalidated '
+                    log.info('crl_sync[%s]: applied seq=%d, invalidated '
                              '%d cache entries (serials=%s)',
-                             seq, total, serials)
+                             issuer, seq, total, serials)
                 applied_through = seq
 
             # Persist after each page so a crash mid-loop doesn't
             # re-fetch already-applied entries.
-            self._cache.set_last_crl_seq(applied_through)
+            self._cache.set_last_crl_seq(applied_through, issuer=issuer)
 
         if applied_through > start:
-            log.info('crl_sync: caught up from seq=%d to seq=%d',
-                     start, applied_through)
+            log.info('crl_sync[%s]: caught up from seq=%d to seq=%d',
+                     issuer, start, applied_through)
         return applied_through
 
     def is_running(self) -> bool:

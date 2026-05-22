@@ -80,21 +80,30 @@ class EnforceListener:
         # CRL sync — fetches missing CRLs after each authorize call;
         # see crl_sync.py. May be None in early-bootstrap / test code.
         self.crl_sync = crl_sync
-        # Highest CRL sequence we've seen the CA advertise. Tracks
-        # CA's view of "current" across connections so the strict
-        # gate has a fresh enough number to compare against
+        # Highest per-issuer CRL sequences we've seen the CA advertise.
+        # Tracks CA's view of "current" across connections so the strict
+        # gate has a fresh enough numbers to compare against
         # last-applied. Seeded from the persisted cache state.
-        self._last_known_ca_crl_seq: int = authz_cache.last_crl_seq
+        self._last_known_ca_crl_seqs: dict[str, int] = dict(
+            authz_cache.last_crl_seqs)
         self.inner_sshd_kind = inner_sshd_kind
         self.inner_sshd_version = inner_sshd_version
         self.msshd_version = msshd_version
         self.protocol_version = protocol_version
         self._server: Optional[asyncio.base_events.Server] = None
         self._ssl_ctx = _build_ssl_context(cfg)
-        # Authorization-signing trust root for inline bypass-cert
-        # verification. None when the operator hasn't configured one;
-        # bypass-cert injection then refuses with a clear error.
+        # Trust roots for inline cert verification. Two distinct
+        # signing keys per the v2 PKI hierarchy (Commit 4):
+        #   - bypass_trust_root: bypass-mint intermediate. Pins
+        #     bypass certs to the dedicated bypass-mint issuer.
+        #   - auth_trust_root:  user-mint intermediate (legacy alias
+        #     in v0.2.0 was the same as the bypass signer). Used for
+        #     bypass-cert verification when bypass_trust_root is
+        #     unset (backward-compat with single-signer deployments).
+        # New deployments should configure bypass_trust_root explicitly
+        # to honor intermediate-pinning.
         self._auth_trust_root_pubkey = _load_auth_trust_root(cfg)
+        self._bypass_trust_root_pubkey = _load_bypass_trust_root(cfg)
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(
@@ -204,20 +213,26 @@ class EnforceListener:
 
         # --- Strict-mode CRL gate ---
         # If we know the CA is significantly ahead of our CRL state
-        # (last live response advertised current_crl_seq much higher
-        # than last_applied), refuse to serve cache hits — force a
-        # live CA call so revocations propagate before granting.
-        # Threshold of 0 disables the gate (always serve from cache).
+        # (last live response advertised any issuer much higher than
+        # last_applied), refuse to serve cache hits — force a live CA
+        # call so revocations propagate before granting. Threshold of 0
+        # disables the gate (always serve from cache). The gap is
+        # SUMMED across all issuers, so any combination of stale-on-A
+        # plus stale-on-B counts.
         cache_is_stale = False
         if self.crl_sync is not None:
             threshold = self.cfg.ca.crl_strict_threshold
             if threshold > 0:
-                gap = (self._last_known_ca_crl_seq
-                       - self.authz_cache.last_crl_seq)
-                if gap > threshold:
-                    log.warning('[%s] cache stale: CRL gap=%d > '
+                # Per-issuer gap; sum (any single-issuer gap > 0 contributes).
+                total_gap = 0
+                for issuer, ca_seq in self._last_known_ca_crl_seqs.items():
+                    last_applied = self.authz_cache.last_crl_seqs.get(issuer, 0)
+                    if ca_seq > last_applied:
+                        total_gap += (ca_seq - last_applied)
+                if total_gap > threshold:
+                    log.warning('[%s] cache stale: total CRL gap=%d > '
                                 'threshold=%d; bypassing cache',
-                                conn_id, gap, threshold)
+                                conn_id, total_gap, threshold)
                     cache_is_stale = True
 
         # --- Normal flow: cache first, CA on miss (or stale) ---
@@ -262,11 +277,11 @@ class EnforceListener:
                 # Denial responses also carry current_crl_seq — propagate
                 # it so revocations don't stall on small fleets where
                 # only deny traffic happens to hit the CA.
-                if result.current_crl_seq:
-                    self._last_known_ca_crl_seq = max(
-                        self._last_known_ca_crl_seq, result.current_crl_seq)
+                if result.current_crl_seqs or result.current_crl_seq:
+                    self._update_known_ca_seqs(result)
                     if self.crl_sync is not None:
-                        self.crl_sync.maybe_sync(result.current_crl_seq)
+                        self.crl_sync.maybe_sync(
+                            result.current_crl_seqs or result.current_crl_seq)
                 # v1.1: write an actionable ack so the mssh client sees
                 # the deny reason instead of "server closed before
                 # sending ack". Closes Bug #1.
@@ -296,10 +311,10 @@ class EnforceListener:
                      result.not_after)
             self.authz_cache.put(principal, result, source=SOURCE_CA)
             # Record + maybe trigger background CRL sync.
-            self._last_known_ca_crl_seq = max(
-                self._last_known_ca_crl_seq, result.current_crl_seq)
+            self._update_known_ca_seqs(result)
             if self.crl_sync is not None:
-                self.crl_sync.maybe_sync(result.current_crl_seq)
+                self.crl_sync.maybe_sync(
+                    result.current_crl_seqs or result.current_crl_seq)
 
         # --- Validate + parse policy (shared path for cache-hit + fresh-CA) ---
         try:
@@ -403,6 +418,17 @@ class EnforceListener:
                 except Exception:
                     log.exception('[%s] release_session raised', conn_id)
 
+    def _update_known_ca_seqs(self, result) -> None:
+        """Merge per-issuer seqs from an authorize response (grant
+        OR deny) into our running max-known view. Falls back to the
+        legacy singular value (= user-mint) when only that is present."""
+        seqs = result.current_crl_seqs or {}
+        if not seqs and result.current_crl_seq:
+            seqs = {'user-mint': result.current_crl_seq}
+        for issuer, seq in seqs.items():
+            self._last_known_ca_crl_seqs[issuer] = max(
+                self._last_known_ca_crl_seqs.get(issuer, 0), int(seq))
+
     async def _handle_bypass_injection(
         self,
         conn_id: str,
@@ -490,19 +516,27 @@ class EnforceListener:
             return False, f'bypass_ext_invalid: {e}'
 
         # 3b. Chain-to-trust-root: the cert must be signed by the
-        # mssh-ca authorization signing key. Without this, a forged
+        # mssh-ca bypass-mint intermediate. Without this, a forged
         # cert carrying the bypass marker would be honored on its
         # marker alone — the marker is a structural hint, not an
-        # authenticity proof. Fail closed when no trust root is
-        # configured rather than fall back to marker-only.
-        if self._auth_trust_root_pubkey is None:
-            log.warning('[%s] bypass_cert: ca.auth_trust_root not '
-                        'configured — bypass injection refused. Set '
-                        'ca.auth_trust_root in msshd.yaml to the CA\'s '
-                        'signing-cert.pem', conn_id)
+        # authenticity proof. Pinning specifically to bypass-mint
+        # closes the §5-leaf-impersonates-bypass attack (per the
+        # trust-model amendment in notes-pki-hierarchy.md).
+        #
+        # If bypass_trust_root is set, use it (the v0.2.3+ canonical
+        # path). Otherwise fall back to auth_trust_root for backward
+        # compat with v0.2.0 single-signer deployments.
+        trust_root = (self._bypass_trust_root_pubkey
+                       or self._auth_trust_root_pubkey)
+        if trust_root is None:
+            log.warning('[%s] bypass_cert: ca.bypass_trust_root and '
+                        'ca.auth_trust_root both unset — bypass '
+                        'injection refused. Configure ca.bypass_trust_root '
+                        'in msshd.yaml to the CA\'s '
+                        'intermediates/bypass-mint/cert.pem', conn_id)
             return False, 'bypass_trust_root_not_configured'
         try:
-            _verify_signature(cert, self._auth_trust_root_pubkey)
+            _verify_signature(cert, trust_root)
         except InvalidSignature:
             log.warning('[%s] bypass_cert: signature does not verify '
                         'against ca.auth_trust_root — forgery attempt '
@@ -572,7 +606,20 @@ def _load_auth_trust_root(cfg: MsshdConfig):
     the file is set but unreadable / unparseable — we want loud failure
     at startup rather than silent degrade-to-marker-only.
     """
-    path = cfg.ca.auth_trust_root
+    return _load_pubkey_from_pem(cfg.ca.auth_trust_root)
+
+
+def _load_bypass_trust_root(cfg: MsshdConfig):
+    """Load the public key of mssh-ca's bypass-mint intermediate cert.
+
+    Used for verifying inline-presented bypass certs (Commit 4 of the
+    PKI hierarchy work). Returns None when unset — bypass injection
+    then falls back to auth_trust_root for backward compat.
+    """
+    return _load_pubkey_from_pem(cfg.ca.bypass_trust_root)
+
+
+def _load_pubkey_from_pem(path: str):
     if not path:
         return None
     from pathlib import Path

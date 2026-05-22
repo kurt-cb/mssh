@@ -98,10 +98,10 @@ class AuthzCache:
           the globally-oldest entry is evicted first.
         """
         self._entries: dict[str, CachedGrant] = {}
-        # Last applied CRL sequence number (sequence-based revocation
-        # log — see ca/crl.py). 0 = "nothing applied yet". Persisted
-        # alongside the cache entries.
-        self.last_crl_seq: int = 0
+        # Last applied CRL sequences, per intermediate (v0.2.3+).
+        # Empty dict = nothing applied yet. Persisted alongside the
+        # cache entries.
+        self.last_crl_seqs: dict[str, int] = {}
         self.max_per_principal = int(max_per_principal)
         self.max_total = int(max_total)
         self._persist_path: Optional[Path] = (
@@ -243,11 +243,20 @@ class AuthzCache:
                      '(principals=%s)', serial, dropped)
         return len(dropped)
 
-    def set_last_crl_seq(self, seq: int) -> None:
-        """Update the highest-applied CRL sequence and persist."""
-        if seq <= self.last_crl_seq:
+    @property
+    def last_crl_seq(self) -> int:
+        """Legacy alias for the user-mint last-applied seq. Existing
+        callers read this; new code should use last_crl_seqs[issuer]."""
+        return self.last_crl_seqs.get('user-mint', 0)
+
+    def set_last_crl_seq(self, seq: int, issuer: str = 'user-mint') -> None:
+        """Update the highest-applied CRL sequence for ``issuer`` and
+        persist. No-op if the new value isn't strictly greater than
+        what's already recorded."""
+        current = self.last_crl_seqs.get(issuer, 0)
+        if seq <= current:
             return
-        self.last_crl_seq = int(seq)
+        self.last_crl_seqs[issuer] = int(seq)
         self._persist()
 
     def list_all(self) -> list[CachedGrant]:
@@ -272,7 +281,10 @@ class AuthzCache:
             return
         body = {
             'version': 1,
-            'last_crl_seq': self.last_crl_seq,
+            # Legacy single-issuer field (user-mint's value) preserved
+            # for any v0.2.0-era reader; new readers prefer the dict.
+            'last_crl_seq': self.last_crl_seqs.get('user-mint', 0),
+            'last_crl_seqs': dict(self.last_crl_seqs),
             'entries': [
                 {
                     'principal':    e.principal,
@@ -315,9 +327,19 @@ class AuthzCache:
                         'starting empty', self._persist_path)
             return
         try:
-            self.last_crl_seq = int(body.get('last_crl_seq') or 0)
+            seqs_raw = body.get('last_crl_seqs')
+            if isinstance(seqs_raw, dict):
+                # v0.2.3+ format.
+                self.last_crl_seqs = {
+                    str(k): int(v) for k, v in seqs_raw.items()}
+            else:
+                # v0.2.2 and earlier wrote a single int. Treat it as
+                # user-mint's value (matches legacy single-signer
+                # semantics — user-mint is the user-cert authz issuer).
+                legacy = int(body.get('last_crl_seq') or 0)
+                self.last_crl_seqs = {'user-mint': legacy} if legacy else {}
         except (TypeError, ValueError):
-            self.last_crl_seq = 0
+            self.last_crl_seqs = {}
         loaded, skipped = 0, 0
         now = _now()
         for raw in body.get('entries', []):

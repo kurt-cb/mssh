@@ -19,7 +19,7 @@ import asyncio
 import base64
 import datetime as _dt
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Union
 
 from mssh.shim.ca_client import (AuthorizeResult, CAClient, CAClientFailedOver)
@@ -40,9 +40,10 @@ class AuthorizationGrant:
     protocol_version: str = ''
     # CA's current CRL sequence at response time. 0 = CA has no CRL
     # (legacy CA or empty log). msshd uses this to decide whether to
-    # fetch missing CRL entries via GET /v1/crl?after=N. See
-    # archive/design/notes-bypass-cache.md "CRL Amendment".
+    # fetch missing CRL entries. Legacy singular = user-mint's value;
+    # current_crl_seqs (v0.2.2+) is the full per-issuer map.
     current_crl_seq: int = 0
+    current_crl_seqs: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -50,11 +51,12 @@ class AuthorizationDeny:
     reason: str
     detail: str = ''
     http_status: int = 0
-    # CA's current CRL sequence at the time it denied. Carried so msshd's
+    # CA's current CRL state at the time it denied. Carried so msshd's
     # CRL sync can advance even when only denials happen — otherwise
     # revocations stall indefinitely on small fleets where the cache
-    # mostly hits.
+    # mostly hits. Both singular (legacy) and per-issuer map (v0.2.2+).
     current_crl_seq: int = 0
+    current_crl_seqs: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -151,17 +153,18 @@ class MsshdCAClient:
 
         return _parse_result(result)
 
-    async def fetch_crl(self, *, after: int, limit: int) -> dict:
-        """GET /v1/crl?after=N&limit=K against the same CA endpoint
-        list. Returns the parsed JSON body: {status, current_seq,
-        entries: [...]}.
+    async def fetch_crl(self, *, after: int, limit: int,
+                         issuer: str = 'user-mint') -> dict:
+        """GET /v1/crl?after=N&limit=K&issuer=X against the same CA
+        endpoint list. Returns the parsed JSON body: {status, issuer,
+        current_seq, current_seqs, entries: [...]}.
 
         Raises an exception on transport / parse failure. Callers
         (the CRL sync loop) treat exceptions as "skip this round,
         retry later"."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, self._client.crl_fetch, after, limit)
+            None, self._client.crl_fetch, after, limit, issuer)
 
 
 def _parse_result(result: AuthorizeResult) -> AuthorizationResult:
@@ -186,22 +189,30 @@ def _parse_result(result: AuthorizeResult) -> AuthorizationResult:
             current_crl_seq = int(body.get('current_crl_seq') or 0)
         except (TypeError, ValueError):
             current_crl_seq = 0
+        seqs_raw = body.get('current_crl_seqs') or {}
+        current_crl_seqs = {str(k): int(v) for k, v in seqs_raw.items()
+                             if isinstance(v, (int, float))}
         return AuthorizationGrant(
             cert_der=cert_der, serial=serial, not_after=not_after,
             inner_sshd_config=str(body.get('inner_sshd_config') or ''),
             protocol_version=str(body.get('protocol_version') or ''),
-            current_crl_seq=current_crl_seq)
+            current_crl_seq=current_crl_seq,
+            current_crl_seqs=current_crl_seqs)
 
     if status == 'denied':
         try:
             deny_crl_seq = int(body.get('current_crl_seq') or 0)
         except (TypeError, ValueError):
             deny_crl_seq = 0
+        seqs_raw = body.get('current_crl_seqs') or {}
+        deny_crl_seqs = {str(k): int(v) for k, v in seqs_raw.items()
+                          if isinstance(v, (int, float))}
         return AuthorizationDeny(
             reason=str(body.get('reason', 'unspecified')),
             detail=str(body.get('detail', '')),
             http_status=result.http_status,
             current_crl_seq=deny_crl_seq,
+            current_crl_seqs=deny_crl_seqs,
         )
 
     return AuthorizationError(
