@@ -257,6 +257,67 @@ mssh-admin audit --decision denied --limit 20
 # (Time-window flags like --since are future work — see future-ideas.md.)
 ```
 
+### Manage intermediate CAs (v0.2.4+)
+
+The CA hierarchy below the root has four named intermediates:
+
+| Role | Signs | What pins to it |
+|---|---|---|
+| `user-mint` | Per-session authz certs | msshd's auth-signing trust root (legacy `auth_trust_root`) |
+| `bypass-mint` | CA-bypass certs (operator break-glass) | msshd's `ca.bypass_trust_root` |
+| `host-mint` | Server identities (CA's TLS server cert, msshd's mTLS) | mssh client's view of the CA host (`ca-tls-root.pem`) |
+| `auth` | Admin/client mTLS certs | msshd's `tls.user_ca_pubkey` |
+
+```bash
+# Inspect:
+mssh-admin intermediate list
+# role         issuer_id                            not_after
+# user-mint    user-mint:7f3c4b2a8d1e5f60          2036-05-22T...
+# bypass-mint  bypass-mint:a1b2c3d4e5f60718         2036-05-22T...
+# host-mint    host-mint:3e2d1c0b9a8f7e6d           2036-05-22T...
+# auth         auth:5d4c3b2a19087f6e                2036-05-22T...
+```
+
+#### Rotate a compromised intermediate
+
+```bash
+mssh-admin intermediate rotate bypass-mint --force
+# 2FA prompt (if cert.revoke/admin.* are gated and you haven't
+# satisfied the cache).
+# wrote new intermediates/bypass-mint/{cert.pem, key.pem}.
+# old key archived to intermediates/bypass-mint/{cert,key}.pem.archive.<ts>
+# WARNING: Distribute the new cert to validators that pin this
+# intermediate (msshd bypass_trust_root, ...) before existing
+# leaves expire.
+```
+
+After rotation: copy `intermediates/<role>/cert.pem` to every
+validator that pins that role. The OLD intermediate's certs remain
+valid against the OLD trust store until they expire or are
+explicitly revoked.
+
+#### Delegate signing to an external entity
+
+```bash
+mssh-admin intermediate mint-external \
+    --name partner-corp --path-length 1 \
+    --out-cert partner-corp.crt --out-key partner-corp.key
+# wrote partner-corp.crt (cert) and partner-corp.key (key, mode 0600)
+# WARNING: Private key is returned in this response ONLY. ...
+```
+
+The external entity gets `partner-corp.{crt,key}` and operates their
+own signing infrastructure under it. Leaves they sign chain back to
+your root, but mssh validators do NOT trust the external CA for any
+auth decision (it's intentionally excluded from all validators'
+trust stores). This is the right tool when you want a partner to
+sign their own certs without giving them access to your auth surface.
+
+To revoke an external CA later: `mssh-admin cert revoke <serial>
+--issuer auth --reason 'partner offboarded'` (use the root's CRL
+mechanism — that gap is documented in design/notes-pki-hierarchy.md
+as a v1 polish item).
+
 ### Bounce the CA without dropping sessions
 
 The CA can be restarted at will. In-flight authorize calls fail

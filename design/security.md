@@ -226,6 +226,36 @@ HTTPS-user / OpenVPN leaves with user-auth leaves under one
 signing key — acceptable for small / experimental deployments,
 not acceptable for hardened production.
 
+### Status: v2 migration in progress (v0.2.x)
+
+The multi-intermediate model landed across v0.2.1–v0.2.5 (commits
+2–5b of the PKI hierarchy plan):
+
+| Tag | What landed | Pinning impact |
+|---|---|---|
+| v0.2.1 | `bootstrap_ca` produces Root + 4 intermediates on disk | Layout in place |
+| v0.2.2 | Per-issuer CRLs (`CRLRegistry`); per-issuer wire fields | Revocations no longer cross-pollinate across issuers |
+| v0.2.3 | `msshd.yaml ca.bypass_trust_root` pins bypass certs to `bypass-mint`; `AuthzCache.last_crl_seqs` per-issuer | Load-bearing rule enforced for bypass certs |
+| v0.2.4 | `mssh-admin intermediate list / rotate <role> --force` | Operator can rotate any compromised intermediate independently |
+| v0.2.5 | `mssh-admin intermediate mint-external --name X` | External CAs sign through root but are NOT trusted by any mssh validator |
+
+**Operator action required for hardened production deployments**:
+- Re-run `bootstrap_ca` (or upgrade in place — legacy aliases are
+  preserved) so the new layout exists.
+- Point `msshd.yaml ca.bypass_trust_root` at
+  `<ca_dir>/intermediates/bypass-mint/cert.pem`.
+- Continue to point `tls.user_ca_pubkey` at the appropriate
+  intermediate (typically `auth`), NOT at the root.
+
+Validators still configured against `auth` (legacy `tls-ca-cert.pem`
+bundle) work in v0.2.x but receive an implicit security degrade:
+the auth+root bundle accepts any leaf chaining to root, not just
+auth-signed leaves. The pure-intermediate trust store (just
+`intermediates/auth/cert.pem`, no root bundled) is the v1 target —
+once your OpenSSL stack supports `X509_V_FLAG_PARTIAL_CHAIN` or
+the operator picks an mTLS implementation that honors intermediate
+pinning by default.
+
 ---
 
 ## Fail-closed defaults
