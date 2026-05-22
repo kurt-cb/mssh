@@ -190,6 +190,10 @@ def create_app(config: CAConfig) -> Flask:
         passkey_2fa_cache=cache_2fa,
         admin_2fa_protected_actions=frozenset(config.admin_2fa_protected_actions),
         admin_2fa_within_seconds=config.admin_2fa_within_seconds,
+        # PKI hierarchy root dir. We derive it from signing_cert's
+        # parent — bootstrap_ca writes everything next to signing-cert.pem.
+        ca_dir=str(Path(config.signing_cert).parent
+                    if config.signing_cert else ''),
     )
 
     app.config['AUTH_CTX'] = auth_ctx
@@ -672,6 +676,27 @@ def register_routes(app: Flask) -> None:
             return err
         body = request.get_json(silent=True) or {}
         status, payload = admin_handlers.cert_revoke(
+            app.config['ADMIN_CTX'], adm, body)
+        return jsonify(payload), status
+
+    # /v1/admin/intermediate/* — PKI hierarchy management (v0.2.4+).
+    # See design/notes-pki-hierarchy.md Commit 5.
+    @app.get('/v1/admin/intermediate/list')
+    def _intermediate_list():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        status, payload = admin_handlers.intermediate_list(
+            app.config['ADMIN_CTX'], adm)
+        return jsonify(payload), status
+
+    @app.post('/v1/admin/intermediate/rotate')
+    def _intermediate_rotate():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.intermediate_rotate(
             app.config['ADMIN_CTX'], adm, body)
         return jsonify(payload), status
 

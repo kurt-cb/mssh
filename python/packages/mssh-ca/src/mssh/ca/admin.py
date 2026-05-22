@@ -138,6 +138,11 @@ class AdminContext:
     admin_2fa_protected_actions: frozenset[str] = frozenset()
     admin_2fa_within_seconds: int = 300
 
+    # Path to the CA's on-disk PKI layout (root + intermediates +
+    # legacy aliases). Set in v0.2.1+ deployments; unset means
+    # legacy single-signer mode. Used by intermediate.list/rotate.
+    ca_dir: str = ''
+
 
 def _now_iso() -> str:
     return _dt.datetime.now(tz=_dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -849,6 +854,130 @@ def cert_revoke(ctx: AdminContext, admin: Admin,
         'issuer': issuer,
         'revoked_at': entry.revoked_at,
         'serials': cleaned,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Intermediates (v0.2.4+ — Commit 5 of PKI hierarchy work)
+# ---------------------------------------------------------------------------
+
+_PERMISSIONS['intermediate.list'] = {'superuser', 'auditor'}
+_PERMISSIONS['intermediate.rotate'] = {'superuser'}
+
+
+def intermediate_list(ctx: AdminContext, admin: Admin
+                      ) -> tuple[int, dict]:
+    """Return metadata about each named intermediate. Read-only;
+    superuser + auditor both allowed."""
+    if (err := _check('intermediate.list', admin)):
+        return err
+    from . import cert_minter
+    if not ctx.ca_dir:
+        return _err(503, 'unavailable',
+                    'CA running in legacy single-signer mode; no '
+                    'intermediates to list. Re-run mssh-admin init to '
+                    'bootstrap the multi-intermediate layout.')
+    try:
+        intermediates = cert_minter.load_intermediates(ctx.ca_dir)
+    except FileNotFoundError as e:
+        return _err(503, 'unavailable',
+                    f'intermediates not on disk: {e}')
+    out = []
+    for role, inter in intermediates.items():
+        out.append({
+            'role': role,
+            'issuer_id': inter.issuer_id,
+            'pubkey_fp16': inter.pubkey_fp16,
+            'subject': inter.cert.subject.rfc4514_string(),
+            'not_before': inter.cert.not_valid_before_utc.strftime(
+                '%Y-%m-%dT%H:%M:%SZ'),
+            'not_after': inter.cert.not_valid_after_utc.strftime(
+                '%Y-%m-%dT%H:%M:%SZ'),
+        })
+    return 200, {'status': 'ok', 'intermediates': out}
+
+
+def intermediate_rotate(ctx: AdminContext, admin: Admin,
+                         body: dict) -> tuple[int, dict]:
+    """Replace the named intermediate's keypair + cert. The new cert
+    is signed by root; the old key/cert files are archived with a
+    timestamp suffix.
+
+    Operators must distribute the new cert to validators that pin
+    to it (msshd's bypass_trust_root, auth_trust_root, user_ca_pubkey,
+    or ca.ca_pubkey depending on the role) before existing leaves
+    expire. Until distributed, validators rejecting the new cert
+    means freshly-minted leaves fail validation.
+    """
+    if (err := _check('intermediate.rotate', admin)):
+        return err
+    if (err := admin_check_2fa(ctx, admin, 'intermediate.rotate')):
+        return err
+    role = (body.get('role') or '').strip()
+    from . import cert_minter
+    if role not in cert_minter.INTERMEDIATE_ROLES:
+        return _err(400, 'bad_request',
+                    f'role must be one of '
+                    f'{list(cert_minter.INTERMEDIATE_ROLES)}, got {role!r}')
+    if not ctx.ca_dir:
+        return _err(503, 'unavailable',
+                    'CA running in legacy single-signer mode; nothing '
+                    'to rotate. Bootstrap with the multi-intermediate '
+                    'layout first.')
+
+    from pathlib import Path
+    ca_dir = Path(ctx.ca_dir)
+    role_dir = ca_dir / 'intermediates' / role
+    if not role_dir.exists():
+        return _err(503, 'unavailable',
+                    f'intermediate {role} not on disk at {role_dir}')
+
+    # Load root + generate new keypair + sign new cert.
+    root_cert = cert_minter.load_root_cert(ca_dir)
+    root_key = cert_minter.load_private_key(ca_dir / 'root-key.pem')
+    new_key = cert_minter.generate_signing_key('ec')
+    new_cert = cert_minter._issue_intermediate(role, new_key, root_key, root_cert)
+
+    # Archive old, write new. Archive is timestamp-suffixed in the role
+    # dir itself so an operator can audit the rotation later.
+    ts = _now_iso().replace(':', '').replace('-', '')
+    (role_dir / f'cert.pem.archive.{ts}').write_bytes(
+        (role_dir / 'cert.pem').read_bytes())
+    (role_dir / f'key.pem.archive.{ts}').write_bytes(
+        (role_dir / 'key.pem').read_bytes())
+    new_cert_pem = cert_minter.serialize_certificate(new_cert)
+    new_key_pem = cert_minter.serialize_private_key(new_key)
+    (role_dir / 'cert.pem').write_bytes(new_cert_pem)
+    (role_dir / 'key.pem').write_bytes(new_key_pem)
+    import os as _os
+    _os.chmod(role_dir / 'key.pem', 0o600)
+
+    # Keep legacy aliases in sync for user-mint + auth roles.
+    if role == 'user-mint':
+        (ca_dir / 'signing-cert.pem').write_bytes(new_cert_pem)
+        (ca_dir / 'signing-key.pem').write_bytes(new_key_pem)
+        _os.chmod(ca_dir / 'signing-key.pem', 0o600)
+    elif role == 'auth':
+        root_pem = cert_minter.serialize_certificate(root_cert)
+        (ca_dir / 'tls-ca-cert.pem').write_bytes(new_cert_pem + root_pem)
+        (ca_dir / 'tls-ca-key.pem').write_bytes(new_key_pem)
+        _os.chmod(ca_dir / 'tls-ca-key.pem', 0o600)
+
+    new_fp = cert_minter.compute_pubkey_fp16(new_key.public_key())
+    _audit_admin(ctx, admin, 'intermediate.rotate',
+                 {'role': role, 'new_pubkey_fp16': new_fp,
+                  'archive_suffix': ts}, 'ok')
+
+    return 200, {
+        'status': 'ok',
+        'role': role,
+        'new_issuer_id': f'{role}:{new_fp}',
+        'new_cert_pem': new_cert_pem.decode('ascii'),
+        'archive_suffix': ts,
+        'warning': ('Distribute the new cert to validators that pin '
+                    'this intermediate (msshd bypass_trust_root, '
+                    'auth_trust_root, user_ca_pubkey, ca.ca_pubkey) '
+                    'before existing leaves expire.'),
     }
 
 

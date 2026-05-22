@@ -312,19 +312,36 @@ class CAClient:
 
     # ---- CRL ----
     def cert_revoke(self, serials: list[str], *,
-                    reason: str = '') -> dict[str, Any]:
-        """Append a CRL entry revoking the listed cert serials.
-        Every msshd in the fleet picks this up on its next authorize
-        call. See archive/design/notes-bypass-cache.md "CRL Amendment"."""
-        body: dict[str, Any] = {'serials': list(serials)}
+                    reason: str = '',
+                    issuer: str = 'user-mint') -> dict[str, Any]:
+        """Append a CRL entry revoking the listed cert serials under
+        ``issuer`` (default user-mint, matching v0.2.0 behavior). Every
+        msshd in the fleet picks this up on its next authorize call."""
+        body: dict[str, Any] = {'serials': list(serials), 'issuer': issuer}
         if reason:
             body['reason'] = reason
         return self._request('POST', '/v1/admin/cert/revoke', json=body)
 
     def crl_list(self, after: int = 0,
-                 limit: int | None = None) -> dict[str, Any]:
-        """Return the CRL entries with seq > after."""
-        params: dict[str, Any] = {'after': int(after)}
+                 limit: int | None = None,
+                 issuer: str = 'user-mint') -> dict[str, Any]:
+        """Return the CRL entries with seq > after for ``issuer``."""
+        params: dict[str, Any] = {'after': int(after), 'issuer': issuer}
         if limit is not None:
             params['limit'] = int(limit)
         return self._request('GET', '/v1/admin/crl', params=params)
+
+    # ---- intermediate management (v0.2.4+) ----
+    def intermediate_list(self) -> dict[str, Any]:
+        """Return metadata about each named intermediate (issuer_id,
+        cert validity window, role). See /v1/admin/intermediate/list."""
+        return self._request('GET', '/v1/admin/intermediate/list')
+
+    def intermediate_rotate(self, role: str) -> dict[str, Any]:
+        """Generate a fresh keypair for the named intermediate, sign
+        a new cert via root, and archive the old one. Validators that
+        pin to this intermediate need the new cert distributed
+        out-of-band."""
+        return self._request('POST',
+                              '/v1/admin/intermediate/rotate',
+                              json={'role': role})

@@ -1172,23 +1172,90 @@ def _atomic_write(path, data, *, mode=0o644):
 @click.argument('serials', nargs=-1, required=True)
 @click.option('--reason', default='',
               help='Free-text reason recorded in the CRL entry + audit.')
+@click.option('--issuer', default='user-mint',
+              type=click.Choice(['user-mint', 'bypass-mint',
+                                  'host-mint', 'auth']),
+              help='Which intermediate signed the cert(s) being revoked. '
+                   'Default user-mint (matches v0.2.0 single-signer behavior).')
 @click.pass_context
-def cert_revoke_cmd(ctx, serials, reason):
-    """Revoke one or more cert SERIALS (lowercase hex).
+def cert_revoke_cmd(ctx, serials, reason, issuer):
+    """Revoke one or more cert SERIALS (lowercase hex) under --issuer.
 
-    Appends a CRL entry; the fleet picks it up on next authorize
-    call. Affects both normal CA-grant entries AND bypass-injected
-    entries in each msshd's authz cache. See
+    Appends a CRL entry to that intermediate's log; the fleet picks it
+    up on next authorize call. Affects both normal CA-grant entries
+    AND bypass-injected entries in each msshd's authz cache. See
     archive/design/notes-bypass-cache.md "CRL Amendment".
 
     Example:
         mssh-admin cert revoke deadbeef abcd1234 --reason 'key rotation'
+        mssh-admin cert revoke abc --issuer bypass-mint --reason 'lost'
     """
     c = _make_client(ctx)
-    out = _handle_2fa_call(c, c.cert_revoke, list(serials), reason=reason)
+    out = _handle_2fa_call(c, c.cert_revoke, list(serials),
+                            reason=reason, issuer=issuer)
     click.echo(f'revoked seq={out["seq"]} serials={out["serials"]}',
                err=True)
     _output(ctx, out)
+
+
+@cli.group('intermediate')
+def intermediate_group():
+    """Inspect / rotate the named intermediates (user-mint, bypass-mint,
+    host-mint, auth). See design/notes-pki-hierarchy.md."""
+
+
+@intermediate_group.command('list')
+@click.pass_context
+def intermediate_list_cmd(ctx):
+    """Show issuer_id + validity for each intermediate.
+
+    Example:
+        mssh-admin intermediate list
+        # role         issuer_id                                 not_after
+        # user-mint    user-mint:7f3c4b2a8d1e5f60               2036-05-22T...
+        # bypass-mint  bypass-mint:a1b2c3d4e5f60718              2036-05-22T...
+    """
+    c = _make_client(ctx)
+    out = _handle_call(c.intermediate_list)
+    _output(ctx, out['intermediates'])
+
+
+@intermediate_group.command('rotate')
+@click.argument('role',
+                type=click.Choice(['user-mint', 'bypass-mint',
+                                    'host-mint', 'auth']))
+@click.option('--force', is_flag=True,
+              help='Required: confirms operator understands that '
+                   'validators pinning to this intermediate must '
+                   'have the NEW cert distributed before existing '
+                   'leaves expire.')
+@click.pass_context
+def intermediate_rotate_cmd(ctx, role, force):
+    """Generate a fresh keypair for one intermediate; sign with root;
+    archive the old key+cert. DESTRUCTIVE: requires --force.
+
+    After rotation, distribute the new intermediate cert to validators
+    that pin it (msshd's bypass_trust_root, auth_trust_root,
+    user_ca_pubkey, or ca.ca_pubkey depending on role) before existing
+    leaves expire. Until distributed, leaves freshly minted by the
+    new key will fail to validate against the old trust store.
+    """
+    if not force:
+        raise click.UsageError(
+            'intermediate rotate is destructive — pass --force to confirm. '
+            'See `mssh-admin intermediate rotate --help` for the '
+            'redistribution requirement.')
+    c = _make_client(ctx)
+    out = _handle_2fa_call(c, c.intermediate_rotate, role)
+    click.echo(f'rotated {role} → new issuer_id {out["new_issuer_id"]}',
+                err=True)
+    click.echo(f'archive suffix: {out["archive_suffix"]}', err=True)
+    click.echo(f'WARNING: {out["warning"]}', err=True)
+    _output(ctx, {
+        'role': out['role'],
+        'new_issuer_id': out['new_issuer_id'],
+        'archive_suffix': out['archive_suffix'],
+    })
 
 
 @cli.group('crl')
@@ -1201,11 +1268,15 @@ def crl_group():
               help='Return entries with seq > AFTER.')
 @click.option('--limit', type=int, default=None,
               help='Cap the number of entries returned.')
+@click.option('--issuer', default='user-mint',
+              type=click.Choice(['user-mint', 'bypass-mint',
+                                  'host-mint', 'auth']),
+              help='Which intermediate\'s CRL to list (default user-mint).')
 @click.pass_context
-def crl_list_cmd(ctx, after, limit):
-    """List CRL entries, optionally filtered by seq."""
+def crl_list_cmd(ctx, after, limit, issuer):
+    """List CRL entries for one issuer, optionally filtered by seq."""
     c = _make_client(ctx)
-    out = _handle_call(c.crl_list, after, limit)
+    out = _handle_call(c.crl_list, after, limit, issuer)
     _output(ctx, out)
 
 
