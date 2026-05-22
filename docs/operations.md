@@ -606,6 +606,38 @@ matching commands skip the prompt.
 If a policy has `require_2fa: passkey` but ca-config.yaml has no
 `passkey:` block, mssh-ca refuses to start (fail closed).
 
+#### What the operator sees end-to-end
+
+When the operator runs a 2FA-gated command, `mssh-admin` prints
+the approval URL plus a scannable QR code on stderr, then blocks
+silently while polling the ceremony. On approval the command
+resumes and prints its normal result on stdout.
+
+```
+$ mssh-admin cert revoke deadbeef --reason 'key rotation'
+2FA required — approve on your phone:
+    https://passkey.example.com/approve/d224d63c-765c-4416-ac2f-9f2c98ca7e07
+[QR code rendered here when stderr is a TTY]
+  ✓ approved — retrying operation
+revoked seq=5 serials=['deadbeef']
+status     ok
+seq        5
+issuer     user-mint
+```
+
+The operator either:
+- **Scans the QR** with their phone (camera app on iOS / Android
+  opens the URL directly), then approves the WebAuthn prompt with
+  biometric / hardware key. Easiest path.
+- **Copies the URL** and pastes into a browser on the same device,
+  approves there (useful when the operator's passkey lives on the
+  workstation, e.g. Touch ID / Windows Hello / a Yubikey on the
+  same machine).
+
+QR rendering is skipped automatically when stderr is not a TTY
+(piped output, CI runs, redirected to a file) so it doesn't
+pollute machine-parseable logs.
+
 #### Gating specific admin operations (v0.1.8+)
 
 Policy-driven gating above is the future-direction model. For

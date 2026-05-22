@@ -26,6 +26,10 @@ dependencies = [
     "click>=8.0",
     "requests>=2.31",
     "pyyaml>=6.0",
+    # Renders the 2FA approve URL as a terminal QR code so the operator
+    # can scan it with their phone instead of copy-pasting. Pure-Python,
+    # ~50KB, no compiled deps. Used only by _handle_2fa_call in main.py.
+    "qrcode>=7.0",
 ]
 
 [project.optional-dependencies]

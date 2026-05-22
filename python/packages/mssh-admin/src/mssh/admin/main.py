@@ -61,13 +61,34 @@ _PASSKEY_POLL_INTERVAL_SECONDS = 2.0
 _PASSKEY_POLL_TIMEOUT_SECONDS = 180.0
 
 
+def _print_qr_to_stderr(url: str) -> None:
+    """Render a terminal QR code of the URL to stderr so the operator
+    can scan with a phone. Skips silently if stderr isn't a TTY (e.g.
+    piped or in CI) or if the qrcode lib isn't importable, since
+    neither case is a failure mode for the 2FA flow itself — the URL
+    is also printed in clear text directly above."""
+    try:
+        if not sys.stderr.isatty():
+            return
+        import qrcode
+        qr = qrcode.QRCode(border=1,
+                           error_correction=qrcode.constants.ERROR_CORRECT_L)
+        qr.add_data(url)
+        qr.make(fit=True)
+        qr.print_ascii(out=sys.stderr, invert=True)
+    except Exception:
+        # QR rendering is convenience; never break the auth flow on it.
+        pass
+
+
 def _handle_2fa_call(client, fn, *args, **kwargs):
     """Like `_handle_call`, but recognises the 2FA challenge protocol.
 
     Server returns ``{'status': 'pending_2fa', ...}`` when the
-    operation needs a passkey ceremony. We print the URL, poll the
-    ceremony, and on approval retry the original request — the second
-    call hits the 2FA cache and proceeds.
+    operation needs a passkey ceremony. We print the URL (plus a
+    terminal QR for phone-scan convenience), poll the ceremony, and
+    on approval retry the original request — the second call hits the
+    2FA cache and proceeds.
     """
     resp = _handle_call(fn, *args, **kwargs)
     if not isinstance(resp, dict) or resp.get('status') != 'pending_2fa':
@@ -76,6 +97,7 @@ def _handle_2fa_call(client, fn, *args, **kwargs):
     url = resp.get('url') or '(no URL)'
     click.echo(f'2FA required — approve on your phone:\n    {url}',
                err=True)
+    _print_qr_to_stderr(url)
     deadline = time.monotonic() + _PASSKEY_POLL_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         time.sleep(_PASSKEY_POLL_INTERVAL_SECONDS)

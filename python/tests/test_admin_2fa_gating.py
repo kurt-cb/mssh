@@ -213,3 +213,57 @@ def test_cli_2fa_passthrough_when_no_challenge():
     assert out == {'status': 'ok', 'removed': 'alice'}
     assert fake_op.call_count == 1
     fake_client.passkey_poll.assert_not_called()
+
+
+def test_cli_qr_renders_when_stderr_is_tty(capsys):
+    """When stderr is a TTY (interactive run), _handle_2fa_call
+    renders a QR code below the URL. Operator can scan it with
+    a phone instead of typing the URL.
+
+    Verifies: code path doesn't crash + the QR characters appear
+    in stderr (unicode half-blocks indicate a rendered QR)."""
+    from mssh.admin.main import _handle_2fa_call
+
+    fake_client = MagicMock()
+    fake_op = MagicMock(side_effect=[
+        _mk_pending_2fa_resp(),
+        {'status': 'ok', 'removed': 'alice'},
+    ])
+    fake_client.passkey_poll = MagicMock(return_value={
+        'status': 'ok', 'outcome': 'approved'})
+
+    with patch('mssh.admin.main.sys.stderr.isatty', return_value=True), \
+         patch('mssh.admin.main.time.sleep'):
+        _handle_2fa_call(fake_client, fake_op, 'alice')
+
+    err = capsys.readouterr().err
+    # QR uses unicode half-block chars (▄ ▀ █) when rendered. Look
+    # for any of them; presence confirms the QR went out.
+    assert any(ch in err for ch in '▄▀█'), (
+        f'no QR chars in stderr; output was:\n{err}')
+
+
+def test_cli_qr_skipped_when_stderr_not_a_tty(capsys):
+    """Piped output (e.g. CI, redirected to file) shouldn't pollute
+    with QR escape sequences."""
+    from mssh.admin.main import _handle_2fa_call
+
+    fake_client = MagicMock()
+    fake_op = MagicMock(side_effect=[
+        _mk_pending_2fa_resp(),
+        {'status': 'ok', 'removed': 'alice'},
+    ])
+    fake_client.passkey_poll = MagicMock(return_value={
+        'status': 'ok', 'outcome': 'approved'})
+
+    # capsys already replaces stderr with a non-tty wrapper; isatty()
+    # returns False naturally. Belt-and-suspenders, force it.
+    with patch('mssh.admin.main.sys.stderr.isatty', return_value=False), \
+         patch('mssh.admin.main.time.sleep'):
+        _handle_2fa_call(fake_client, fake_op, 'alice')
+
+    err = capsys.readouterr().err
+    # URL still printed; no QR chars.
+    assert 'approve' in err
+    assert not any(ch in err for ch in '▄▀█'), (
+        f'QR rendered into non-tty stderr; output was:\n{err}')
