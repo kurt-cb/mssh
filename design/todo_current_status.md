@@ -163,7 +163,7 @@ Passkey ecosystem section at the top of this doc.)
 | Location | Description |
 |---|---|
 | ~~[enforce_listener.py:487](../python/packages/msshd/src/mssh/msshd/enforce_listener.py#L487)~~ | ~~Bypass-cert chain-to-trust-root verification~~ — closed in v0.1.9 via new `ca.auth_trust_root` config field. Operators MUST point it at the CA's `signing-cert.pem`; bypass injection refuses if unset (fail-closed). |
-| [authz_cache.py:26](../python/packages/msshd/src/mssh/msshd/authz_cache.py#L26) | Unbounded growth on long-lived bypass certs (documented in CLAUDE.md amendment c) |
+| ~~[authz_cache.py:26](../python/packages/msshd/src/mssh/msshd/authz_cache.py#L26)~~ | ~~Unbounded growth on long-lived bypass certs~~ — closed pre-v0.2. Eviction-on-capacity implemented per CLAUDE.md amendment (c): per-principal + global FIFO caps, defaults 10 / 10000. Module docstring updated in v0.2.x doc pass. |
 
 ## Drift / housekeeping
 

@@ -22,8 +22,12 @@ Source-tag policy (per archive/design/notes-bypass-cache.md):
     source. CA is the oracle when reachable. Admin re-injects bypass
     if they still need it.
   - Persistence: on-disk JSON, mode 0600. Lazy expiry on load.
-  - Eviction-on-capacity is NOT implemented (acknowledged design
-    hole; TODO outside the scope of bypass-cert work).
+  - Eviction-on-capacity: FIFO by injected_at. Two caps:
+    ``max_per_principal`` (forward-compat for multi-key caches —
+    structurally enforced at 1 today by dict-keyed-by-principal),
+    ``max_total`` (the operative global control). 0 disables each
+    level. Bypass entries follow the same eviction rule (no
+    source-based exemption). See CLAUDE.md amendment 2026-05-18 (c).
 
 This module has no I/O dependencies beyond the filesystem and is
 synchronous — all calls are fast in-memory operations plus an

@@ -257,6 +257,43 @@ mssh-admin audit --decision denied --limit 20
 # (Time-window flags like --since are future work — see future-ideas.md.)
 ```
 
+### Inspect a msshd's authz cache (v0.3.0+)
+
+`msshd-admin authz-cache status` reads the on-disk cache JSON
+(`$MSSHD_STATE_DIR/authz_cache.json`) and prints a summary — total
+entries, breakdown by source (CA-grant vs operator-injected bypass),
+soonest expiry, and the per-issuer CRL sequences msshd has applied.
+Read-only; safe to run while msshd is serving traffic.
+
+```bash
+msshd-admin authz-cache status
+# cache:           /var/lib/mssh/authz_cache.json
+# total entries:   3
+# by source:
+#   ca       2
+#   bypass   1
+# soonest expiry:  2026-05-22T18:30:00Z
+# CRL applied (per issuer):
+#   user-mint     seq=42
+#   bypass-mint   seq=3
+
+# Full per-entry listing:
+msshd-admin authz-cache status --verbose
+# (adds principal/serial/not_after for each cached grant)
+
+# Machine-parseable:
+msshd-admin authz-cache status --json
+```
+
+Use cases:
+- **Incident triage**: "is alice still cached from before her key was
+  revoked?" → grep for her principal in `--verbose`.
+- **Bypass audit**: "how many bypass-cert injections are live right
+  now?" → look at the `bypass` row.
+- **CRL sync drift**: "msshd missed a revocation — did its CRL state
+  catch up?" → check the per-issuer seqs against `mssh-admin crl list
+  --issuer X`.
+
 ### Manage intermediate CAs (v0.2.4+)
 
 The CA hierarchy below the root has four named intermediates:
