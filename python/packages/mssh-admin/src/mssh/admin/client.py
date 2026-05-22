@@ -345,3 +345,21 @@ class CAClient:
         return self._request('POST',
                               '/v1/admin/intermediate/rotate',
                               json={'role': role})
+
+    def intermediate_mint_external(self, name: str, *,
+                                     path_length: int = 0,
+                                     validity_days: int = 3650
+                                     ) -> dict[str, Any]:
+        """Mint an external Intermediate CA cert. The response carries
+        the cert + key — operator hands the key to the external entity
+        OUT OF BAND. The CA retains only the public cert."""
+        return self._request('POST',
+                              '/v1/admin/intermediate/mint-external',
+                              json={'name': name,
+                                    'path_length': int(path_length),
+                                    'validity_days': int(validity_days)})
+
+    def intermediate_list_external(self) -> dict[str, Any]:
+        """List external Intermediate CAs previously minted."""
+        return self._request('GET',
+                              '/v1/admin/intermediate/list-external')

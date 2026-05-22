@@ -863,6 +863,8 @@ def cert_revoke(ctx: AdminContext, admin: Admin,
 
 _PERMISSIONS['intermediate.list'] = {'superuser', 'auditor'}
 _PERMISSIONS['intermediate.rotate'] = {'superuser'}
+_PERMISSIONS['intermediate.external.mint'] = {'superuser'}
+_PERMISSIONS['intermediate.external.list'] = {'superuser', 'auditor'}
 
 
 def intermediate_list(ctx: AdminContext, admin: Admin
@@ -979,6 +981,117 @@ def intermediate_rotate(ctx: AdminContext, admin: Admin,
                     'auth_trust_root, user_ca_pubkey, ca.ca_pubkey) '
                     'before existing leaves expire.'),
     }
+
+
+def external_intermediate_mint(ctx: AdminContext, admin: Admin,
+                                body: dict) -> tuple[int, dict]:
+    """Mint an external Intermediate CA cert per the trust-model
+    amendment (design/notes-pki-hierarchy.md § External Intermediate
+    CA tier).
+
+    Body: {name, path_length?, validity_days?}
+
+    The external entity gets the (cert, key) pair to operate their
+    own signing infrastructure. The CA keeps the cert on disk for
+    audit + revocation; the private key is NOT retained — it's
+    returned exactly once and the operator hands it off out-of-band.
+    """
+    if (err := _check('intermediate.external.mint', admin)):
+        return err
+    if (err := admin_check_2fa(ctx, admin, 'intermediate.external.mint')):
+        return err
+    name = (body.get('name') or '').strip()
+    if not name or '/' in name or name.startswith('.'):
+        return _err(400, 'bad_request',
+                    'name required: short alphanumeric (no /, no leading .)')
+    try:
+        path_length = int(body.get('path_length') or 0)
+    except (TypeError, ValueError):
+        return _err(400, 'bad_request', 'path_length must be int')
+    if path_length < 0 or path_length > 5:
+        return _err(400, 'bad_request',
+                    'path_length must be in [0, 5]')
+    validity_days = int(body.get('validity_days') or 3650)
+
+    if not ctx.ca_dir:
+        return _err(503, 'unavailable',
+                    'CA in legacy single-signer mode; multi-intermediate '
+                    'layout required for external CAs.')
+
+    from pathlib import Path
+    from . import cert_minter
+    ca_dir = Path(ctx.ca_dir)
+    target = ca_dir / 'external' / name
+    if target.exists():
+        return _err(409, 'conflict',
+                    f'external intermediate {name!r} already exists at '
+                    f'{target}; rotate or pick a different name')
+
+    root_cert = cert_minter.load_root_cert(ca_dir)
+    root_key = cert_minter.load_private_key(ca_dir / 'root-key.pem')
+    new_key, new_cert = cert_minter.issue_external_intermediate(
+        name, root_key=root_key, root_cert=root_cert,
+        path_length=path_length, validity_days=validity_days)
+
+    target.mkdir(parents=True, exist_ok=True)
+    cert_pem = cert_minter.serialize_certificate(new_cert)
+    (target / 'cert.pem').write_bytes(cert_pem)
+    # NOTE: we do NOT persist the private key. The external entity
+    # gets it once in this response; the CA retains only the public
+    # cert. This is the whole point of delegating signing authority.
+    key_pem = cert_minter.serialize_private_key(new_key)
+    fp16 = cert_minter.compute_pubkey_fp16(new_key.public_key())
+
+    _audit_admin(ctx, admin, 'intermediate.external.mint',
+                 {'name': name, 'path_length': path_length,
+                  'pubkey_fp16': fp16,
+                  'serial': format(new_cert.serial_number, 'x')},
+                 'ok')
+
+    return 201, {
+        'status': 'ok',
+        'name': name,
+        'path_length': path_length,
+        'issuer_id': f'external-{name}:{fp16}',
+        'cert_pem': cert_pem.decode('ascii'),
+        'key_pem': key_pem.decode('ascii'),
+        'serial': format(new_cert.serial_number, 'x'),
+        'warning': ('Private key is returned in this response ONLY. The '
+                    'CA does NOT retain it. Deliver to the external '
+                    'entity over a secure channel and store offline.'),
+    }
+
+
+def external_intermediate_list(ctx: AdminContext, admin: Admin
+                                ) -> tuple[int, dict]:
+    """List all external Intermediate CAs minted by this CA. CAs
+    are identified by their on-disk cert under <ca_dir>/external/<name>/."""
+    if (err := _check('intermediate.external.list', admin)):
+        return err
+    if not ctx.ca_dir:
+        return 200, {'status': 'ok', 'external_intermediates': []}
+    from . import cert_minter
+    externals = cert_minter.load_external_intermediates(ctx.ca_dir)
+    out = []
+    for name, cert in externals.items():
+        try:
+            bc = cert.extensions.get_extension_for_class(
+                __import__('cryptography.x509', fromlist=['BasicConstraints']
+                            ).BasicConstraints).value
+            path_length = bc.path_length
+        except Exception:
+            path_length = None
+        out.append({
+            'name': name,
+            'serial': format(cert.serial_number, 'x'),
+            'subject': cert.subject.rfc4514_string(),
+            'path_length': path_length,
+            'not_before': cert.not_valid_before_utc.strftime(
+                '%Y-%m-%dT%H:%M:%SZ'),
+            'not_after': cert.not_valid_after_utc.strftime(
+                '%Y-%m-%dT%H:%M:%SZ'),
+        })
+    return 200, {'status': 'ok', 'external_intermediates': out}
 
 
 def crl_fetch(ctx: AdminContext, admin: Admin,

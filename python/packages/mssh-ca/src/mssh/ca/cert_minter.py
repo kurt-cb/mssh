@@ -566,6 +566,81 @@ def load_root_cert(ca_dir: str | Path) -> x509.Certificate:
     return load_certificate(Path(ca_dir) / 'root-cert.pem')
 
 
+def issue_external_intermediate(name: str, *, root_key, root_cert,
+                                 path_length: int = 0,
+                                 key_type: str = 'ec',
+                                 validity_days: int = 3650
+                                 ) -> tuple[Any, x509.Certificate]:
+    """Mint an external intermediate CA cert signed by root.
+
+    External CAs delegate signing authority to a third party (per
+    §25 of design/future-ideas.md + the trust-model amendment in
+    notes-pki-hierarchy.md). They are signed by the same root as the
+    4 internal intermediates BUT carry distinguishing markers and
+    are NEVER added to any mssh validator's trust store. A leaf
+    chaining through external-<name> terminates without a trust
+    anchor for any mssh auth decision — exactly the property that
+    isolates the operator's auth surface from external-entity certs.
+
+    Markers:
+        Organization        = <name>
+        OrganizationalUnit  = external
+        BasicConstraints.ca = True
+        path_length         = <path_length>  (operator-chosen; 0 or 1+)
+    """
+    external_key = generate_signing_key(key_type)
+    subject = x509.Name([
+        x509.NameAttribute(oid.NameOID.COMMON_NAME, f'mssh-external-{name}'),
+        x509.NameAttribute(oid.NameOID.ORGANIZATION_NAME, name),
+        x509.NameAttribute(oid.NameOID.ORGANIZATIONAL_UNIT_NAME, 'external'),
+    ])
+    not_before = _dt.datetime.now(tz=_dt.timezone.utc) - _dt.timedelta(minutes=1)
+    not_after = not_before + _dt.timedelta(days=validity_days)
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(root_cert.subject)
+        .public_key(external_key.public_key())
+        .serial_number(int.from_bytes(secrets.token_bytes(16), 'big') | 1)
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(
+            x509.BasicConstraints(ca=True, path_length=int(path_length)),
+            critical=True)
+        .add_extension(x509.KeyUsage(
+            digital_signature=True, key_cert_sign=True, crl_sign=True,
+            content_commitment=False, key_encipherment=False,
+            data_encipherment=False, key_agreement=False,
+            encipher_only=False, decipher_only=False,
+        ), critical=True)
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(
+                external_key.public_key()),
+            critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                root_key.public_key()),
+            critical=False)
+    )
+    cert = builder.sign(private_key=root_key, algorithm=_sig_hash_for(root_key))
+    return external_key, cert
+
+
+def load_external_intermediates(ca_dir: str | Path) -> dict[str, x509.Certificate]:
+    """Discover all external intermediates on disk. Returns
+    name → cert. Private keys are not retained on the CA side (they
+    were handed to the external entity at mint time)."""
+    base = Path(ca_dir) / 'external'
+    if not base.exists():
+        return {}
+    out: dict[str, x509.Certificate] = {}
+    for sub in sorted(base.iterdir()):
+        cert_path = sub / 'cert.pem'
+        if cert_path.exists():
+            out[sub.name] = load_certificate(cert_path)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Server / admin mTLS cert issuance
 # ---------------------------------------------------------------------------

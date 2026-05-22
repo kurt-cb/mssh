@@ -1258,6 +1258,62 @@ def intermediate_rotate_cmd(ctx, role, force):
     })
 
 
+@intermediate_group.command('mint-external')
+@click.option('--name', required=True,
+              help='Short identifier for the external entity (no /, '
+                   'no leading dot). Becomes Organization= in the cert.')
+@click.option('--path-length', type=int, default=0,
+              help='Sub-CA path length (default 0 = the external entity '
+                   'can mint only leaves, no further sub-CAs).')
+@click.option('--validity-days', type=int, default=3650,
+              help='Cert validity. Defaults to 10 years.')
+@click.option('--out-cert', required=True, type=click.Path(),
+              help='Where to write the external intermediate cert PEM.')
+@click.option('--out-key', required=True, type=click.Path(),
+              help='Where to write the external intermediate private key. '
+                   'Mode 0600. Hand off to the external entity OUT-OF-BAND; '
+                   'the CA does NOT retain a copy.')
+@click.pass_context
+def intermediate_mint_external_cmd(ctx, name, path_length, validity_days,
+                                     out_cert, out_key):
+    """Mint an external Intermediate CA per the trust-model amendment.
+
+    The external entity then runs their own signing infrastructure;
+    leaves they sign chain back to mssh-root, but mssh validators do
+    NOT trust external CAs for any auth decision — the chain
+    terminates without a trust anchor.
+
+    Example:
+        mssh-admin intermediate mint-external \\
+            --name partner-corp --path-length 1 \\
+            --out-cert partner-corp.crt --out-key partner-corp.key
+    """
+    c = _make_client(ctx)
+    out = _handle_2fa_call(c, c.intermediate_mint_external, name,
+                            path_length=path_length,
+                            validity_days=validity_days)
+    Path(out_cert).write_text(out['cert_pem'])
+    _atomic_write(Path(out_key), out['key_pem'].encode('ascii'), mode=0o600)
+    click.echo(f'wrote {out_cert} (cert) and {out_key} (key, mode 0600)',
+                err=True)
+    click.echo(f'WARNING: {out["warning"]}', err=True)
+    _output(ctx, {
+        'name': out['name'],
+        'issuer_id': out['issuer_id'],
+        'path_length': out['path_length'],
+        'serial': out['serial'],
+    })
+
+
+@intermediate_group.command('list-external')
+@click.pass_context
+def intermediate_list_external_cmd(ctx):
+    """List external Intermediate CAs previously minted by this CA."""
+    c = _make_client(ctx)
+    out = _handle_call(c.intermediate_list_external)
+    _output(ctx, out['external_intermediates'])
+
+
 @cli.group('crl')
 def crl_group():
     """View the CA's CRL (revocation log)."""

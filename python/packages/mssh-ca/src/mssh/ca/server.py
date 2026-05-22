@@ -700,6 +700,28 @@ def register_routes(app: Flask) -> None:
             app.config['ADMIN_CTX'], adm, body)
         return jsonify(payload), status
 
+    # External Intermediate CA tier (v0.2.5+ — Commit 5b of PKI hierarchy).
+    # Delegates signing to a third party; the resulting cert chains
+    # to root but is intentionally NOT trusted by any mssh validator.
+    @app.post('/v1/admin/intermediate/mint-external')
+    def _intermediate_mint_external():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.external_intermediate_mint(
+            app.config['ADMIN_CTX'], adm, body)
+        return jsonify(payload), status
+
+    @app.get('/v1/admin/intermediate/list-external')
+    def _intermediate_list_external():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        status, payload = admin_handlers.external_intermediate_list(
+            app.config['ADMIN_CTX'], adm)
+        return jsonify(payload), status
+
     # /v1/admin/crl is the operator/auditor view (RBAC: any admin role
     # except no role at all).
     @app.get('/v1/admin/crl')
