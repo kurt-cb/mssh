@@ -120,11 +120,15 @@ def create_app(config: CAConfig) -> Flask:
     tls_ca_key = cert_minter.load_private_key(
         Path(config.signing_cert).parent / 'tls-ca-key.pem')
 
-    # CRL log lives next to the enrollment file. Sequence-based
-    # revocation channel; msshds pick up entries on next authorize.
+    # Per-issuer CRL registry lives next to the enrollment file. One
+    # log per intermediate (user-mint.jsonl, bypass-mint.jsonl, etc.);
+    # auto-migrates the legacy single-file crl.jsonl on upgrade from
+    # v0.2.1 or earlier.
     from . import crl as _crl
-    crl_path = Path(config.enrollment_path).parent / 'crl.jsonl'
-    crl_store = _crl.CRLStore(crl_path)
+    crl_dir = Path(config.enrollment_path).parent / 'crl'
+    _crl.migrate_legacy_crl(
+        crl_dir, Path(config.enrollment_path).parent / 'crl.jsonl')
+    crl_store = _crl.CRLRegistry(crl_dir)
 
     identity_fps = _load_identity_trust_root_fingerprints(config.identity_trust_roots)
 
@@ -689,8 +693,9 @@ def register_routes(app: Flask) -> None:
         except ValueError:
             return jsonify({'status': 'error', 'reason': 'bad_request',
                             'detail': 'limit must be an integer'}), 400
+        issuer = request.args.get('issuer') or 'user-mint'
         status, payload = admin_handlers.crl_fetch(
-            app.config['ADMIN_CTX'], adm, after, limit)
+            app.config['ADMIN_CTX'], adm, after, limit, issuer=issuer)
         return jsonify(payload), status
 
     # /v1/cert/renew — auth-by-cert-being-renewed (NOT admin role).
@@ -713,17 +718,19 @@ def register_routes(app: Flask) -> None:
 
     # /v1/crl.pem is the X.509 CRL that consumers like OpenVPN's
     # --crl-verify and browsers fetch. Built on the fly from the
-    # JSON CRL log; signed by the TLS CA so anyone trusting
-    # tls-ca-cert.pem can verify the signature. Public read — same
-    # rationale as /v1/crl below: revocation info is not sensitive.
+    # JSON CRL log of one issuer (default user-mint). Signed by the
+    # TLS CA so anyone trusting tls-ca-cert.pem can verify the
+    # signature. Public read — revocation info is not sensitive.
     @app.get('/v1/crl.pem')
     def _crl_x509_pem():
         from . import crl as crl_module
         ctx = app.config['ADMIN_CTX']
         if ctx.crl is None:
             return ('', 503)
+        issuer = request.args.get('issuer') or 'user-mint'
         pem = crl_module.build_x509_crl(
-            ctx.crl, signing_key=ctx.tls_ca_key,
+            ctx.crl.for_issuer(issuer),
+            signing_key=ctx.tls_ca_key,
             signing_cert=ctx.tls_ca_cert,
         )
         return (pem, 200, {'Content-Type': 'application/x-pem-file'})
@@ -731,6 +738,8 @@ def register_routes(app: Flask) -> None:
     # /v1/crl is the msshd hot-path fetch. Authenticated by the same
     # mTLS chain as /v1/authorize (msshd presents its mTLS cert
     # — no admin role gate). Pure read; never mutates state.
+    # ?issuer=<short_name> selects which intermediate's CRL feed.
+    # Default = user-mint (matches v0.2.0 single-signer behavior).
     @app.get('/v1/crl')
     def _crl_msshd_fetch():
         try:
@@ -744,14 +753,18 @@ def register_routes(app: Flask) -> None:
         except ValueError:
             return jsonify({'status': 'error', 'reason': 'bad_request',
                             'detail': 'limit must be an integer'}), 400
+        issuer = request.args.get('issuer') or 'user-mint'
         auth_ctx = app.config['AUTH_CTX']
         if auth_ctx.crl is None:
-            return jsonify({'status': 'ok', 'current_seq': 0,
+            return jsonify({'status': 'ok', 'issuer': issuer,
+                            'current_seq': 0, 'current_seqs': {},
                             'entries': []}), 200
-        entries = auth_ctx.crl.fetch_after(after, limit=limit)
+        entries = auth_ctx.crl.fetch_after(issuer, after, limit=limit)
         return jsonify({
             'status': 'ok',
-            'current_seq': auth_ctx.crl.current_seq(),
+            'issuer': issuer,
+            'current_seq': auth_ctx.crl.for_issuer(issuer).current_seq(),
+            'current_seqs': auth_ctx.crl.current_seqs(),
             'entries': [e.to_dict() for e in entries],
         }), 200
 

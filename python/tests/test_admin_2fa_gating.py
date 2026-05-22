@@ -18,7 +18,7 @@ from mssh.ca import admin as admin_handlers
 from mssh.ca import cert_minter
 from mssh.ca.admin import AdminContext
 from mssh.ca.audit import AuditLog
-from mssh.ca.crl import CRLStore
+from mssh.ca.crl import CRLRegistry
 from mssh.ca.enrollment import Enrollment, PasskeyCredential
 
 
@@ -49,7 +49,7 @@ def gated_ctx(ca_dir, tmp_path):
         server_cert_validity_days=30, admin_cert_validity_days=30,
         mtls_key_type='ec',
         signing_key=signing_key, signing_cert=signing_cert,
-        crl=CRLStore(ca_dir / 'crl.jsonl'),
+        crl=CRLRegistry(ca_dir / 'crl'),
         passkey_broker=fake_broker,
         passkey_rp_id='passkey.example.com',
         passkey_rp_name='mssh-ca test',
@@ -151,7 +151,7 @@ def test_empty_protected_list_passes_through(ca_dir, tmp_path):
         tls_ca_key=tls_ca_key, tls_ca_cert=tls_ca_cert,
         server_cert_validity_days=30, admin_cert_validity_days=30,
         mtls_key_type='ec',
-        crl=CRLStore(ca_dir / 'crl.jsonl'),
+        crl=CRLRegistry(ca_dir / 'crl'),
     )  # admin_2fa_protected_actions defaults to empty
     enroll.add_admin('boot', 'superuser', 'CN=boot')
     su = enroll.admins['boot']

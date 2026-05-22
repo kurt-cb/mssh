@@ -16,17 +16,24 @@ from mssh.ca import admin as admin_handlers
 from mssh.ca import cert_minter
 from mssh.ca.admin import AdminContext
 from mssh.ca.audit import AuditLog
-from mssh.ca.crl import CRLStore
+from mssh.ca.crl import CRLRegistry, CRLStore
 from mssh.ca.enrollment import Admin, Enrollment
 
 
 @pytest.fixture
 def crl_store(tmp_path):
+    """Bare CRLStore for unit tests of the store's own API."""
     return CRLStore(tmp_path / 'crl.jsonl')
 
 
 @pytest.fixture
-def adminctx(ca_dir, crl_store):
+def crl_registry(tmp_path):
+    """Per-issuer registry that handlers expect on ctx.crl."""
+    return CRLRegistry(tmp_path / 'crl')
+
+
+@pytest.fixture
+def adminctx(ca_dir, crl_registry):
     enroll = Enrollment(ca_dir / 'enrollment.yaml')
     audit = AuditLog(ca_dir / 'audit.jsonl')
     tls_ca_key = cert_minter.load_private_key(ca_dir / 'tls-ca-key.pem')
@@ -35,7 +42,7 @@ def adminctx(ca_dir, crl_store):
         enrollment=enroll, audit=audit,
         tls_ca_key=tls_ca_key, tls_ca_cert=tls_ca_cert,
         server_cert_validity_days=30, admin_cert_validity_days=30,
-        mtls_key_type='ec', crl=crl_store,
+        mtls_key_type='ec', crl=crl_registry,
     )
 
 
@@ -154,23 +161,38 @@ def test_cert_revoke_rejects_blank_serial(adminctx, superuser):
     assert status == 400
 
 
-def test_cert_revoke_happy_path(adminctx, superuser, crl_store):
+def test_cert_revoke_happy_path(adminctx, superuser, crl_registry):
     status, body = admin_handlers.cert_revoke(
         adminctx, superuser,
         {'serials': ['abc123', 'DEF456'], 'reason': 'rotation'})
     assert status == 201
     assert body['seq'] == 1
     assert body['serials'] == ['abc123', 'def456']
-    assert crl_store.current_seq() == 1
+    # Default issuer is user-mint.
+    assert body['issuer'] == 'user-mint'
+    assert crl_registry.for_issuer('user-mint').current_seq() == 1
 
 
-def test_cert_revoke_appends_to_existing_log(adminctx, superuser, crl_store):
+def test_cert_revoke_appends_to_existing_log(adminctx, superuser, crl_registry):
     admin_handlers.cert_revoke(
         adminctx, superuser, {'serials': ['a']})
     status, body = admin_handlers.cert_revoke(
         adminctx, superuser, {'serials': ['b']})
     assert status == 201
     assert body['seq'] == 2
+
+
+def test_cert_revoke_explicit_issuer(adminctx, superuser, crl_registry):
+    """Caller can target a specific intermediate's CRL log."""
+    status, body = admin_handlers.cert_revoke(
+        adminctx, superuser,
+        {'serials': ['abc'], 'issuer': 'bypass-mint',
+         'reason': 'revoke offline-minted'})
+    assert status == 201
+    assert body['issuer'] == 'bypass-mint'
+    # The revocation lives in bypass-mint's log, NOT user-mint's.
+    assert crl_registry.for_issuer('bypass-mint').current_seq() == 1
+    assert crl_registry.for_issuer('user-mint').current_seq() == 0
 
 
 # ---------------------------------------------------------------------------

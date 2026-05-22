@@ -104,7 +104,7 @@ explicitly not the production end-state.
 |---|---|---|---|
 | [Commit 1](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Foundation: `Intermediate` dataclass + helpers | ✅ | Landed pre-v0.1.1 |
 | [Commit 2](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | `bootstrap_ca` refactor: Root + 4 intermediates on disk | ✅ | Landed v0.2.1. New `ca_dir/{root-cert.pem,intermediates/<role>/{cert,key}.pem}` layout; legacy `signing-*.pem` + `tls-ca-*.pem` aliases preserved for callers that haven't migrated |
-| [Commit 3](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Per-issuer CRL | 🚧 | `CRLStore` → `CRLRegistry`; `/v1/crl?issuer=X` |
+| [Commit 3](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | Per-issuer CRL | ✅ | Landed v0.2.2. `CRLRegistry` wraps per-intermediate `CRLStore`s; `/v1/crl?issuer=X` + `/v1/crl.pem?issuer=X`; authorize response carries `current_crl_seqs` map; legacy single-file CRL auto-migrates on startup |
 | [Commit 4](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | msshd chain validation + per-issuer cache state | 🚧 | msshd loads Root + intermediates; `last_crl_seqs: dict[str, int]` |
 | [Commit 4b](security.md#chain-of-trust-v2-multi-intermediate-model) | **Validation pins to intermediate, not Root** (load-bearing rule) | 🚧 | Each validator's trust store contains the SPECIFIC intermediate cert. Without this, §5 leaves can impersonate users. |
 | [Commit 5](notes-pki-hierarchy.md#implementation-plan-commit-boundaries) | `mssh-admin intermediate ...` CLI | 🚧 | `intermediate list / rotate <role>`; `cert revoke --issuer <id\|name>` |

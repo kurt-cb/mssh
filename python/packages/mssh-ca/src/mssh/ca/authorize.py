@@ -32,10 +32,10 @@ class AuthorizeContext:
     identity_trust_root_fingerprints: set[str]   # SHA256 of trusted user-CA pubkey blobs
     default_max_cert_validity_seconds: int = 3600
     timestamp_drift_seconds: int = 60
-    # CRL store. authorize includes the current CRL sequence in the
-    # response so msshd knows when it's behind and should fetch.
-    # See ca/crl.py.
-    crl: Any = None             # CRLStore | None
+    # Per-issuer CRL registry. authorize includes the current_crl_seqs
+    # map in the response so msshd knows when it's behind any
+    # intermediate. See ca/crl.py CRLRegistry.
+    crl: Any = None             # CRLRegistry | None
     # Named intermediates dict (Phase 2 of the PKI hierarchy work).
     # When populated, mint_authorization_cert can use the
     # 'user-mint' entry directly. Today this is OPTIONAL and the
@@ -57,7 +57,9 @@ def _parse_iso8601(ts: str) -> _dt.datetime:
 
 def _deny(audit: AuditLog, reason: str, detail: str, *,
           status: int = 403, extra_audit: dict | None = None,
-          current_crl_seq: int | None = None) -> tuple[int, dict]:
+          current_crl_seq: int | None = None,
+          current_crl_seqs: dict[str, int] | None = None
+          ) -> tuple[int, dict]:
     audit_entry = {
         'timestamp': _now().strftime('%Y-%m-%dT%H:%M:%SZ'),
         'type': 'authorization',
@@ -69,11 +71,13 @@ def _deny(audit: AuditLog, reason: str, detail: str, *,
         audit_entry.update(extra_audit)
     audit.write(audit_entry)
     body: dict = {'status': 'denied', 'reason': reason, 'detail': detail}
-    # Carry current_crl_seq even on denials so msshd's CRL sync still
+    # Carry CRL seqs even on denials so msshd's CRL sync still
     # advances when only denials are happening (otherwise revocations
     # stall indefinitely on small fleets where caches mostly hit).
     if current_crl_seq is not None:
         body['current_crl_seq'] = current_crl_seq
+    if current_crl_seqs is not None:
+        body['current_crl_seqs'] = current_crl_seqs
     return status, body
 
 
@@ -109,9 +113,12 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
 
     ``server_subject`` is the CN from the caller's mTLS cert. Returns (http_status, json).
     """
-    # Pre-compute the current CRL seq so every deny path can carry it.
-    # This lets msshd's CRL sync advance on denials, not just grants.
-    crl_seq = ctx.crl.current_seq() if ctx.crl is not None else None
+    # Pre-compute the current CRL seqs so every deny path can carry
+    # them. This lets msshd's CRL sync advance on denials, not just
+    # grants. Two views: the legacy singular `crl_seq` (= user-mint's
+    # value, for v0.2.0 msshd compatibility) and the new per-issuer map.
+    crl_seqs = ctx.crl.current_seqs() if ctx.crl is not None else None
+    crl_seq = (crl_seqs or {}).get('user-mint') if ctx.crl is not None else None
 
     # 1. Server identification.
     server = ctx.enrollment.find_server_by_mtls_subject(server_subject)
@@ -119,7 +126,7 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
         return _deny(
             ctx.audit, 'unknown_server',
             f'mtls subject {server_subject!r} not enrolled',
-            status=401, current_crl_seq=crl_seq)
+            status=401, current_crl_seq=crl_seq, current_crl_seqs=crl_seqs)
 
     # 2. Parse the request body.
     try:
@@ -168,7 +175,7 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
             ctx.audit, 'clock_drift',
             f'timestamp drift {drift:.1f}s exceeds limit '
             f'{ctx.timestamp_drift_seconds}s',
-            current_crl_seq=crl_seq)
+            current_crl_seq=crl_seq, current_crl_seqs=crl_seqs)
 
     # 3. Parse the identity.
     try:
@@ -179,14 +186,14 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
     if isinstance(parsed, CertIdentity):
         # Validate trust chain.
         if parsed.signature_key_fingerprint not in ctx.identity_trust_root_fingerprints:
-            return _deny(ctx.audit, 'invalid_identity_cert', current_crl_seq=crl_seq, detail=
+            return _deny(ctx.audit, 'invalid_identity_cert', current_crl_seq=crl_seq, current_crl_seqs=crl_seqs, detail=
                          'signing CA not in identity trust roots')
         now_s = int(_now().timestamp())
         if parsed.valid_after and now_s < parsed.valid_after:
-            return _deny(ctx.audit, 'invalid_identity_cert', current_crl_seq=crl_seq, detail=
+            return _deny(ctx.audit, 'invalid_identity_cert', current_crl_seq=crl_seq, current_crl_seqs=crl_seqs, detail=
                          'identity cert not yet valid')
         if parsed.valid_before and now_s > parsed.valid_before:
-            return _deny(ctx.audit, 'invalid_identity_cert', current_crl_seq=crl_seq, detail=
+            return _deny(ctx.audit, 'invalid_identity_cert', current_crl_seq=crl_seq, current_crl_seqs=crl_seqs, detail=
                          'identity cert expired')
         fingerprint = parsed.fingerprint
         subject_pubkey_blob = parsed.public_key_blob
@@ -205,7 +212,7 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
             ctx.audit, 'unknown_identity',
             f'fingerprint {fingerprint} not enrolled',
             extra_audit={'identity': {'fingerprint': fingerprint}},
-            current_crl_seq=crl_seq)
+            current_crl_seq=crl_seq, current_crl_seqs=crl_seqs)
 
     # 5. Policy evaluation.
     result = evaluate(user, server, source_ip, ts, requested_channels,
@@ -218,7 +225,7 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
                 'server': {'canonical_name': server.name},
                 'connection': {'source_ip': source_ip, 'source_port': source_port},
             },
-            current_crl_seq=crl_seq)
+            current_crl_seq=crl_seq, current_crl_seqs=crl_seqs)
 
     # 6. Mint cert.
     not_before = _now()
@@ -321,7 +328,13 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
     if inner_sshd_config is not None:
         response['inner_sshd_config'] = inner_sshd_config
     # CRL sequence — msshd uses this to detect when it's behind and
-    # needs to fetch new CRL entries. Always present (0 if no CRL).
+    # needs to fetch new CRL entries. Two fields:
+    #   current_crl_seq  — legacy singular (= user-mint seq) for
+    #                       v0.2.0 msshd compatibility
+    #   current_crl_seqs — per-issuer map, used by v0.2.2+ msshd to
+    #                       drive per-issuer CRLSync
     if ctx.crl is not None:
-        response['current_crl_seq'] = ctx.crl.current_seq()
+        seqs = ctx.crl.current_seqs()
+        response['current_crl_seqs'] = seqs
+        response['current_crl_seq'] = seqs.get('user-mint', 0)
     return 200, response

@@ -172,6 +172,110 @@ def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
+# ---------------------------------------------------------------------------
+# Per-issuer CRL registry (v0.2.2+)
+# ---------------------------------------------------------------------------
+
+# Default issuer used when callers don't specify one explicitly. Matches the
+# 'user-mint' intermediate, which is what the legacy single-signer CRL store
+# represented in v0.2.0 and earlier (the signing-cert.pem alias points at
+# user-mint, and that's what signed authz certs).
+DEFAULT_CRL_ISSUER = 'user-mint'
+
+
+class CRLRegistry:
+    """Per-issuer registry of CRLStores.
+
+    Each named intermediate gets its own append-only CRL log under
+    ``<base_dir>/<issuer>.jsonl``. Revoking a cert appends to the log
+    for the intermediate that signed it. msshd fetches per-issuer
+    feeds and tracks per-issuer last_applied sequences.
+
+    Why per-issuer: serial numbers are issuer-scoped, not globally
+    unique. Cross-issuer serial collisions would otherwise let a
+    revocation entry for one intermediate falsely match a cert
+    signed by another. See [design/notes-pki-hierarchy.md](
+    ../../../../design/notes-pki-hierarchy.md) Commit 3.
+    """
+
+    def __init__(self, base_dir: str | Path):
+        self.base_dir = Path(base_dir)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self._stores: dict[str, CRLStore] = {}
+        self._lock = threading.Lock()
+
+    def for_issuer(self, issuer: str) -> CRLStore:
+        """Return the CRLStore for ``issuer``, creating it lazily.
+
+        ``issuer`` is the intermediate's short_name ('user-mint',
+        'bypass-mint', 'host-mint', 'auth'). The full ``issuer_id``
+        (with the pubkey-fp16 suffix) is NOT used as the filename
+        because rotation would force confusing renames; we key by
+        short_name and accept that rotation creates a fresh log.
+        """
+        issuer = (issuer or DEFAULT_CRL_ISSUER).strip()
+        with self._lock:
+            if issuer not in self._stores:
+                self._stores[issuer] = CRLStore(self.base_dir / f'{issuer}.jsonl')
+            return self._stores[issuer]
+
+    def append(self, issuer: str, serials: Iterable[str], *,
+               revoked_by: str, reason: str = '') -> CRLEntry:
+        """Convenience: append to the named issuer's store."""
+        return self.for_issuer(issuer).append(
+            serials, revoked_by=revoked_by, reason=reason)
+
+    def fetch_after(self, issuer: str, after_seq: int,
+                    limit: Optional[int] = None) -> list[CRLEntry]:
+        """Convenience: fetch from one issuer's store."""
+        return self.for_issuer(issuer).fetch_after(after_seq, limit=limit)
+
+    def current_seqs(self) -> dict[str, int]:
+        """Snapshot map of issuer → current_seq for ALL known stores.
+
+        Known stores = those that have ever been opened (and so
+        materialized on disk OR in memory) PLUS any ``<issuer>.jsonl``
+        files already on disk at construction time. msshd uses this
+        to detect stale per-issuer state.
+        """
+        # Discover any .jsonl files we haven't opened yet so the
+        # response is complete on a cold start.
+        for p in self.base_dir.glob('*.jsonl'):
+            short_name = p.stem
+            if short_name not in self._stores:
+                self.for_issuer(short_name)
+        return {issuer: store.current_seq()
+                for issuer, store in self._stores.items()}
+
+    def known_issuers(self) -> list[str]:
+        """Convenience: sorted list of all known issuer short_names."""
+        return sorted(self.current_seqs().keys())
+
+
+def migrate_legacy_crl(crl_dir: str | Path,
+                        legacy_path: str | Path | None) -> bool:
+    """One-shot upgrade hook: if a v0.2.0-style single-file CRL exists
+    at ``legacy_path`` and the target ``crl_dir/user-mint.jsonl``
+    doesn't, move the file. Returns True if migration occurred.
+
+    Called at server startup from create_app. Operators upgrading
+    from v0.2.1 or earlier transparently get their CRL relocated.
+    """
+    crl_dir = Path(crl_dir)
+    if not legacy_path:
+        return False
+    legacy_path = Path(legacy_path)
+    if not legacy_path.exists():
+        return False
+    target = crl_dir / 'user-mint.jsonl'
+    if target.exists():
+        return False
+    crl_dir.mkdir(parents=True, exist_ok=True)
+    legacy_path.rename(target)
+    log.info('CRL migrated: %s → %s', legacy_path, target)
+    return True
+
+
 def build_x509_crl(store: CRLStore, *, signing_key, signing_cert,
                    validity_hours: int = 24) -> bytes:
     """Render the JSON CRL log as an X.509 v2 CRL signed by the given

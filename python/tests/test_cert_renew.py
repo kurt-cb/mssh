@@ -29,7 +29,7 @@ def adminctx(ca_dir, tmp_path):
     audit = AuditLog(ca_dir / 'audit.jsonl')
     tls_ca_key = cert_minter.load_private_key(ca_dir / 'tls-ca-key.pem')
     tls_ca_cert = cert_minter.load_certificate(ca_dir / 'tls-ca-cert.pem')
-    crl_store = _crl.CRLStore(tmp_path / 'crl.jsonl')
+    crl_store = _crl.CRLRegistry(tmp_path / 'crl')
     return AdminContext(
         enrollment=enroll, audit=audit,
         tls_ca_key=tls_ca_key, tls_ca_cert=tls_ca_cert,
@@ -154,7 +154,7 @@ def test_renew_revoked_cert_403(adminctx):
     cert, _ = _mint_tls_server(adminctx, validity_days=14)
     # Revoke it via the CRL.
     serial_hex = format(cert.serial_number, 'x')
-    adminctx.crl.append([serial_hex], revoked_by='operator',
+    adminctx.crl.append('user-mint', [serial_hex], revoked_by='operator',
                          reason='compromised')
     status, body = admin_handlers.cert_renew(adminctx, cert, {})
     assert status == 403
@@ -201,7 +201,7 @@ def test_renew_with_revoke_predecessor(adminctx):
     assert status == 200
     assert body['cert']['revoked_predecessor'] is True
     # And the serial is in the CRL.
-    entries = adminctx.crl.fetch_after(0)
+    entries = adminctx.crl.fetch_after('user-mint', 0)
     revoked_serials = set()
     for entry in entries:
         revoked_serials.update(entry.serials)
@@ -230,7 +230,7 @@ def test_renew_audits_success(adminctx, tmp_path):
 def test_renew_audits_refusal_on_revoke(adminctx):
     cert, _ = _mint_tls_server(adminctx, validity_days=14)
     serial_hex = format(cert.serial_number, 'x')
-    adminctx.crl.append([serial_hex], revoked_by='operator', reason='x')
+    adminctx.crl.append('user-mint', [serial_hex], revoked_by='operator', reason='x')
     admin_handlers.cert_renew(adminctx, cert, {})
     lines = adminctx.audit.path.read_text().splitlines()
     matching = [l for l in lines if 'cert.renew.refused' in l]

@@ -800,13 +800,19 @@ def cert_revoke(ctx: AdminContext, admin: Admin,
 
     Body:
         {
-          "serials": ["abc123", "def456"],   // required, lowercase hex
-          "reason":  "operator decision"      // optional
+          "serials": ["abc123", "def456"],    // required, lowercase hex
+          "issuer":  "user-mint",              // optional; default user-mint
+          "reason":  "operator decision"       // optional
         }
 
+    ``issuer`` is the intermediate's short_name. Defaults to user-mint
+    (matches v0.2.0 single-signer behavior). Per-issuer CRL logs since
+    v0.2.2 — serials are issuer-scoped, so the operator picks which
+    intermediate's log to append to.
+
     Every msshd in the fleet picks this up on its next authorize call
-    (the response carries the new ``current_crl_seq``; msshd fetches
-    the missing CRLs and applies them to its authz cache).
+    (the response's ``current_crl_seqs`` map advances; msshd fetches
+    the missing entries per-issuer and applies them to its authz cache).
     """
     if (err := _check('cert.revoke', admin)):
         return err
@@ -824,38 +830,45 @@ def cert_revoke(ctx: AdminContext, admin: Admin,
             return _err(400, 'bad_request', f'invalid serial: {s!r}')
         cleaned.append(s.strip().lower())
     reason = str(body.get('reason') or '')
+    issuer = str(body.get('issuer') or 'user-mint').strip()
 
     try:
-        entry = ctx.crl.append(cleaned, revoked_by=admin.name, reason=reason)
+        entry = ctx.crl.append(issuer, cleaned,
+                                revoked_by=admin.name, reason=reason)
     except OSError as e:
         return _err(500, 'internal', f'CRL append failed: {e}')
 
     _audit_admin(ctx, admin, 'cert.revoke',
-                 {'serials': cleaned, 'seq': entry.seq, 'reason': reason},
+                 {'serials': cleaned, 'seq': entry.seq,
+                  'issuer': issuer, 'reason': reason},
                  'ok')
 
     return 201, {
         'status': 'ok',
         'seq': entry.seq,
+        'issuer': issuer,
         'revoked_at': entry.revoked_at,
         'serials': cleaned,
     }
 
 
 def crl_fetch(ctx: AdminContext, admin: Admin,
-              after: int, limit: int | None) -> tuple[int, dict]:
-    """Return CRL entries with seq > ``after``, optionally bounded
-    by ``limit``. Operator-callable for diagnostic visibility; the
-    msshd hot path uses the un-authenticated ``GET /v1/crl`` mirror.
+              after: int, limit: int | None,
+              issuer: str = 'user-mint') -> tuple[int, dict]:
+    """Return CRL entries with seq > ``after`` for ``issuer``, optionally
+    bounded by ``limit``. Operator-callable for diagnostic visibility;
+    the msshd hot path uses the un-authenticated ``GET /v1/crl`` mirror.
     """
     if (err := _check('crl.read', admin)):
         return err
     if ctx.crl is None:
         return _err(500, 'internal', 'CRL store not configured')
-    entries = ctx.crl.fetch_after(int(after or 0), limit=limit)
+    entries = ctx.crl.fetch_after(issuer, int(after or 0), limit=limit)
     return 200, {
         'status': 'ok',
-        'current_seq': ctx.crl.current_seq(),
+        'issuer': issuer,
+        'current_seq': ctx.crl.for_issuer(issuer).current_seq(),
+        'current_seqs': ctx.crl.current_seqs(),
         'entries': [e.to_dict() for e in entries],
     }
 
@@ -2175,23 +2188,33 @@ def cert_renew(ctx: AdminContext, presented_cert,
         return _err(401, 'unauthorized',
                     'no mTLS client cert presented; cert is its own credential')
 
-    # 1. Revocation check. If the cert's serial is in the CRL, refuse.
+    # 1. Revocation check. If the cert's serial is in ANY issuer's
+    # CRL, refuse. Per-issuer CRLs since v0.2.2 — we don't know which
+    # intermediate signed this leaf yet (chain validation lands in
+    # Commit 4), so check all of them.
     serial_hex = format(presented_cert.serial_number, 'x')
     if ctx.crl is not None:
-        for entry in ctx.crl.fetch_after(0):
-            if serial_hex in (s.lower() for s in entry.serials):
-                ctx.audit.write({
-                    'timestamp': _now_iso(),
-                    'type': 'admin',
-                    'action': 'cert.renew.refused',
-                    'admin': {'name': '<cert>', 'role': 'cert',
-                              'mtls_subject': '<presented>'},
-                    'target': {'serial': serial_hex,
-                               'reason': 'revoked'},
-                    'result': 'refused',
-                })
-                return _err(403, 'revoked',
-                             f'cert {serial_hex} is revoked')
+        revoked_match = False
+        for issuer in ctx.crl.known_issuers() or ['user-mint']:
+            for entry in ctx.crl.fetch_after(issuer, 0):
+                if serial_hex in (s.lower() for s in entry.serials):
+                    revoked_match = True
+                    break
+            if revoked_match:
+                break
+        if revoked_match:
+            ctx.audit.write({
+                'timestamp': _now_iso(),
+                'type': 'admin',
+                'action': 'cert.renew.refused',
+                'admin': {'name': '<cert>', 'role': 'cert',
+                          'mtls_subject': '<presented>'},
+                'target': {'serial': serial_hex,
+                           'reason': 'revoked'},
+                'result': 'refused',
+            })
+            return _err(403, 'revoked',
+                         f'cert {serial_hex} is revoked')
 
     # 2. Window check.
     now = _dt.datetime.now(tz=_dt.timezone.utc)
@@ -2313,7 +2336,10 @@ def cert_renew(ctx: AdminContext, presented_cert,
             return _err(503, 'unavailable',
                          'revoke_predecessor requested but CRL not configured')
         try:
-            ctx.crl.append([serial_hex],
+            # TODO: resolve issuer from cert chain. Defaults to
+            # user-mint matching v0.2.0 single-signer behavior;
+            # proper resolution waits on Commit 4's chain validation.
+            ctx.crl.append('user-mint', [serial_hex],
                             revoked_by='<cert.renew>',
                             reason='renewed')
             revoked_old = True
