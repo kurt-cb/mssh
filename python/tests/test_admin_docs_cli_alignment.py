@@ -11,6 +11,8 @@ The test parses operations.md, extracts `mssh-admin <subcommand>`
 invocations, and runs each with `--help` to verify the command path
 exists. If the docs invocation can't be parsed by the CLI, fail with
 both the doc location and the actual CLI shape.
+
+Tests: §7.3.1, §14.2.2
 """
 from __future__ import annotations
 
@@ -23,7 +25,9 @@ import pytest
 
 
 def _operations_md_path() -> Path:
-    return Path(__file__).resolve().parents[2] / 'docs' / 'operations.md'
+    # Phase-0 doc restructure renamed operations.md to 17-operations.md
+    # to align with the design's §17 reference deployment chapter.
+    return Path(__file__).resolve().parents[2] / 'docs' / '17-operations.md'
 
 
 def _mssh_admin_bin() -> Path:
@@ -133,6 +137,8 @@ def test_every_documented_command_exists():
 
     Failure points to the offending doc invocation and shows what the
     CLI is willing to accept (so the doc fix is obvious).
+
+    Verifies §7.3.1 — docs ↔ CLI alignment gate for mssh-admin commands.
     """
     documented = _extract_documented_commands()
     assert documented, 'operations.md has no mssh-admin invocations to check?'

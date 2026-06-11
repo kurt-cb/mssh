@@ -1,5 +1,7 @@
 """LXC fixtures for mssh integration tests.
 
+Design: §17.1 — supports the LXC tier referenced by §17.3.
+
 Two-layer fixture model:
 
   ``lxc_env``        — minimal: 5 containers + CA up, no enrollments. Used by
@@ -43,10 +45,12 @@ for _name in ('lxc_helpers', 'randomized', 'log_helpers', 'msshd_helpers'):
 
 from lxc_helpers import (
     ALL_CONTAINERS, ALL_SSH_HOSTS, ALPINE_IMAGE, CA_HOST, CA_PORT,
+    CLI_BIN,
     SSHRT_ALPINE, SSHRT_U1, SSHRT_U2, SSHRT_U3, UBUNTU_IMAGE,
+    ensure_fixed_images,
     get_ip, install_snoopy_on_all, lxc, lxc_available, lxc_exec,
-    push_file, push_source, push_text, wait_for_apt_quiescent,
-    wait_for_port,
+    lxc_preflight, push_file, push_source, push_text,
+    render_preflight_banner, wait_for_apt_quiescent, wait_for_port,
 )
 from randomized import Scenario, build_scenario, render_scenario
 from log_helpers import banner, section
@@ -76,11 +80,40 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
-    skip_lxc = pytest.mark.skipif(not lxc_available(),
-                                  reason='LXC not available')
+    # Two-stage gate on LXC tests:
+    #   1. `lxc_available()` — is the CLI installed at all?
+    #   2. `lxc_preflight()` — only when the CLI is installed AND the
+    #      user is actually trying to run LXC tests (`-m lxc` in the
+    #      marker expression). The preflight launches a probe container
+    #      to verify DHCP, so we don't want to pay its ~20s cost on every
+    #      `pytest` invocation that explicitly excludes lxc.
     explicit_marker = config.getoption('-m', default='') or ''
+    running_lxc = ('lxc' in explicit_marker
+                   and 'not lxc' not in explicit_marker)
     explicit_setup_only = 'setup_only' in explicit_marker
     explicit_openssh_shim = 'openssh_shim' in explicit_marker
+
+    if not lxc_available():
+        skip_lxc = pytest.mark.skipif(
+            True, reason=f'LXC CLI ({CLI_BIN!r}) not available')
+    elif running_lxc:
+        issues = lxc_preflight()
+        if issues:
+            banner = render_preflight_banner(issues)
+            # Print to stderr so it shows up even when pytest captures
+            # individual test stderr.
+            print(banner, file=sys.stderr, flush=True)
+            skip_lxc = pytest.mark.skipif(
+                True,
+                reason=f'LXC preflight detected {len(issues)} issue(s); '
+                       f'see banner above')
+        else:
+            skip_lxc = pytest.mark.skipif(False, reason='')
+    else:
+        # Not actively running LXC tests; the @pytest.mark.lxc skip
+        # below short-circuits without running the probe.
+        skip_lxc = pytest.mark.skipif(False, reason='')
+
     skip_setup = pytest.mark.skip(
         reason='setup_only test; run explicitly with -m setup_only')
     skip_openssh = pytest.mark.skip(
@@ -207,7 +240,10 @@ def lxc_env(request, tmp_path_factory):
 
     section('Deleting any pre-existing containers')
     for c in ALL_CONTAINERS:
-        subprocess.run(['lxc', 'delete', '--force', c], capture_output=True)
+        subprocess.run([CLI_BIN, 'delete', '--force', c], capture_output=True)
+
+    section('Ensuring local fixed images are built')
+    ensure_fixed_images()
 
     section('Launching containers')
     for img, name in [
@@ -233,7 +269,7 @@ def lxc_env(request, tmp_path_factory):
         # __file__ = python/tests/lxc/conftest.py, so four .parent's.
         app_root = Path(__file__).resolve().parent.parent.parent.parent
         ubuntu_pkgs = [
-            'python3', 'python3-cryptography', 'python3-flask',
+            'python3', 'python3-pip', 'python3-cryptography', 'python3-flask',
             'python3-yaml', 'python3-click', 'python3-requests',
             'python3-asyncssh',
             'openssh-server', 'openssh-client',
@@ -258,7 +294,7 @@ def lxc_env(request, tmp_path_factory):
                      timeout=30)
         section('Installing deps (Alpine)')
         alpine_pkgs = [
-            'python3', 'py3-cryptography', 'py3-flask', 'py3-yaml',
+            'python3', 'py3-pip', 'py3-cryptography', 'py3-flask', 'py3-yaml',
             'py3-click', 'py3-requests', 'py3-asyncssh',
             'openssh', 'openssh-server', 'openrc',
             # On Alpine the `dropbear` package only ships the server +
@@ -293,6 +329,11 @@ def lxc_env(request, tmp_path_factory):
                  "yaml.safe_dump({'admins': {'bootstrap-admin': "
                  "{'role':'superuser','mtls_subject':'CN=bootstrap-admin',"
                  "'enrolled_at':'','enrolled_by':'init'}}}))\"")
+        # R-9 §13.9.7 default-deny: CAConfig.validate() now requires a
+        # non-empty identity_trust_roots. For the test lab we trust the
+        # CA's own signing intermediate (user-mint legacy alias) to
+        # validate user SSH-cert identities — though the test only
+        # exercises pubkey identities, the field must still be present.
         ca_cfg = (
             f'listen: 0.0.0.0:{CA_PORT}\n'
             'signing_key: /etc/mssh/ca/signing-key.pem\n'
@@ -300,7 +341,7 @@ def lxc_env(request, tmp_path_factory):
             'tls_cert: /etc/mssh/ca/tls-server-cert.pem\n'
             'tls_key:  /etc/mssh/ca/tls-server-key.pem\n'
             'client_ca_cert: /etc/mssh/ca/tls-ca-cert.pem\n'
-            'identity_trust_roots: []\n'
+            'identity_trust_roots: [/etc/mssh/ca/signing-cert.pem]\n'
             'enrollment: {path: /etc/mssh/ca/enrollment.yaml}\n'
             'audit: {path: /var/log/mssh/audit.jsonl}\n'
             'defaults: {max_cert_validity_seconds: 3600, '
@@ -327,18 +368,31 @@ def lxc_env(request, tmp_path_factory):
 
         state['ca_url'] = f'https://{ips[CA_HOST]}:{CA_PORT}'
 
-        # Pull bootstrap admin cert/key + TLS CA cert locally.
+        # Pull bootstrap admin cert/key + Root + auth-intermediate
+        # (a.k.a. the legacy tls-ca-cert.pem alias) locally.
+        #
+        # Trust-anchor note (R-9+): bootstrap_ca produces a Root + 4
+        # named intermediates per §2.2. The CA's TLS server cert is
+        # signed by `host-mint`, whose issuer is `root`. So the right
+        # trust anchor for verifying the CA's TLS handshake is
+        # `root-cert.pem` — NOT `tls-ca-cert.pem` (which is the legacy
+        # alias for the `auth` intermediate, used for client-mTLS
+        # validation; a different chain).
         admin_dir = tmp_path_factory.mktemp('admin-creds')
         for name in ['bootstrap-admin-cert.pem', 'bootstrap-admin-key.pem',
-                     'tls-ca-cert.pem', 'signing-cert.pem',
-                     'tls-ca-key.pem']:
+                     'root-cert.pem', 'tls-ca-cert.pem',
+                     'signing-cert.pem', 'tls-ca-key.pem']:
             subprocess.run(
-                ['lxc', 'file', 'pull',
+                [CLI_BIN, 'file', 'pull',
                  f'{CA_HOST}/etc/mssh/ca/{name}',
                  str(admin_dir / name)], check=True, capture_output=True)
         state['admin_cert'] = str(admin_dir / 'bootstrap-admin-cert.pem')
         state['admin_key'] = str(admin_dir / 'bootstrap-admin-key.pem')
-        state['ca_cert'] = str(admin_dir / 'tls-ca-cert.pem')
+        # ca_cert = TLS trust anchor for verifying the CA's server cert (root).
+        state['ca_cert'] = str(admin_dir / 'root-cert.pem')
+        # auth_trust_root = `auth` intermediate (legacy tls-ca-cert.pem alias);
+        # used by validators that pin client mTLS to the auth chain.
+        state['auth_trust_root'] = str(admin_dir / 'tls-ca-cert.pem')
         state['signing_cert'] = str(admin_dir / 'signing-cert.pem')
         state['tls_ca_key'] = str(admin_dir / 'tls-ca-key.pem')
         state['admin_dir'] = str(admin_dir)
@@ -348,7 +402,7 @@ def lxc_env(request, tmp_path_factory):
         if not keep:
             section('Cleaning up containers')
             for c in ALL_CONTAINERS:
-                subprocess.run(['lxc', 'delete', '--force', c],
+                subprocess.run([CLI_BIN, 'delete', '--force', c],
                                capture_output=True)
 
 

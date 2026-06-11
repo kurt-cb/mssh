@@ -1,4 +1,7 @@
-"""Output formatters for mssh-admin (table / json / yaml)."""
+"""Output formatters for mssh-admin (table / json / yaml).
+
+Design: §7.3.5 (human/json/quiet output formatters).
+"""
 from __future__ import annotations
 
 import json

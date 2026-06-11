@@ -1,5 +1,7 @@
 """Audit log verification.
 
+Tests: §4.3.7, §13.9.6
+
 After the matrix and security tests run, the CA's audit log should contain
 JSON-lines entries for:
 

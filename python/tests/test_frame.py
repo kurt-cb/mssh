@@ -7,6 +7,8 @@ Covers:
   - Error paths: short reads, oversize payloads, bad reserved bits
   - Empty payload (zero-length frames work)
   - Every frame-type constant is unique
+
+Tests: §14.7, §3.1
 """
 from __future__ import annotations
 

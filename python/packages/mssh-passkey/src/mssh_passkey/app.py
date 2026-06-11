@@ -12,6 +12,9 @@ Two route groups:
   /register/<id>, /approve/<id>, /  — public HTTPS, called by
                   end-user phone browsers. No auth — the
                   unguessable ceremony_id is the auth.
+
+Design: §8 mssh-passkey broker; §8.3.6 dual-listener (apache vs.
+dev front_end) — see design/mssh_design_v1.md.
 """
 
 from __future__ import annotations

@@ -1,5 +1,7 @@
 """Reusable provisioning helpers for msshd-enforce in LXC test fixtures.
 
+Design: §17.1 — supports the LXC tier referenced by §17.3.
+
 Extracted from tests/lxc/test_setup_only_msshd.py so it can be shared
 between the adhoc-lab provisioner and the `msshd_env` pytest fixture
 that runs alongside `lxc_env` to give the regular suite end-to-end

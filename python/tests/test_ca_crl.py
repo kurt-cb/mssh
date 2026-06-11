@@ -4,6 +4,8 @@ Covers:
   - CRLStore: append, fetch_after, current_seq, restart-safety
   - cert_revoke admin handler: RBAC, input validation, happy path
   - crl_fetch handler: reads current_seq + entries
+
+Tests: §4.3.5, §13.3
 """
 from __future__ import annotations
 

@@ -2,7 +2,10 @@
 
 Tests the handler-layer functions directly (the HTTP wiring in server.py
 is exercised by the existing CA integration tests; we don't need to
-spin up Flask here)."""
+spin up Flask here).
+
+Tests: §4.3.12 (admin side)
+"""
 from __future__ import annotations
 
 import pytest

@@ -8,6 +8,11 @@ msshd YAML is intentionally small — see
 [architecture.md § 11](../../design/architecture.md).
 Operators do not edit the inner sshd config; that is rendered hermetically
 by msshd from a template that ships in msshd package.
+
+Design: §14.3.1 (see design/mssh_design_v1.md) — msshd.yaml schema,
+field-by-field defaults. §13.9.7 — default-deny semantics when
+config is missing / mode-required fields are empty (enforce-mode
+validate() refuses to start, fallback degrades cleanly).
 """
 from __future__ import annotations
 
@@ -19,8 +24,9 @@ import yaml
 
 
 MODE_FALLBACK = 'fallback'
+MODE_GATED = 'gated'                    # Phase 2: §1.4.2 / §5.3.3
 MODE_ENFORCE = 'enforce'
-VALID_MODES = (MODE_FALLBACK, MODE_ENFORCE)
+VALID_MODES = (MODE_FALLBACK, MODE_GATED, MODE_ENFORCE)
 
 
 @dataclass
@@ -164,6 +170,7 @@ class MsshdConfig:
 
     @classmethod
     def load(cls, path: str | Path) -> 'MsshdConfig':
+        # §14.3.1 YAML loader: defaults applied per the schema.
         with Path(path).open() as f:
             data = yaml.safe_load(f) or {}
         fb = data.get('fallback') or {}
@@ -248,6 +255,7 @@ class MsshdConfig:
         )
 
     def validate(self) -> None:
+        # §13.9.7 default-deny: missing mode-required fields raise.
         """Cross-field validation. Raises ValueError on any problem."""
         if self.mode not in VALID_MODES:
             raise ValueError(
@@ -271,6 +279,18 @@ class MsshdConfig:
             # config — they're all unused. So no further checks.
             return
 
+        if self.mode == MODE_GATED:
+            # §1.4.2 / §5.3.3 gated mode: needs outer mTLS + CA call
+            # like enforce, plus fallback's upstream target (the
+            # operator's existing sshd) — but no inner sshd or local
+            # user-CA. Falls through to the enforce-mode checks for
+            # TLS + CA fields, then validates the fallback target.
+            if not (1 <= self.fallback.port <= 65535):
+                raise ValueError(
+                    f'gated mode requires a valid fallback.port (upstream '
+                    f'sshd target); got: {self.fallback.port}')
+            # Fall through to the shared mTLS + CA validation below.
+
         # Enforce-mode validation
         for field_name in ('server_cert', 'server_key', 'user_ca_pubkey'):
             v = getattr(self.tls, field_name)
@@ -290,17 +310,39 @@ class MsshdConfig:
             if not Path(v).exists():
                 raise ValueError(f'ca.{field_name}={v} does not exist')
 
-        lo, hi = self.inner.port_range
-        if not (1024 <= lo < hi <= 65535):
-            raise ValueError(
-                f'inner.port_range out of range: ({lo}, {hi})')
+        # R-9 §13.9.7: at least one of auth_trust_root or the legacy
+        # ca_pubkey must be present so the user-mTLS chain pins to a
+        # specific intermediate (§2.3 load-bearing rule). The legacy
+        # ca_pubkey check above already enforces the latter; this
+        # block adds the new field requirement.
+        # bypass_trust_root is checked separately when bypass
+        # injection is invoked — see enforce_listener._handle_bypass_injection.
+        if self.ca.auth_trust_root:
+            if not Path(self.ca.auth_trust_root).exists():
+                raise ValueError(
+                    f'ca.auth_trust_root={self.ca.auth_trust_root} '
+                    'does not exist')
+        if self.ca.bypass_trust_root:
+            if not Path(self.ca.bypass_trust_root).exists():
+                raise ValueError(
+                    f'ca.bypass_trust_root={self.ca.bypass_trust_root} '
+                    'does not exist')
 
-        if not self.users.allowed:
-            raise ValueError(
-                "users.allowed is empty in enforce mode — set ['*'] "
-                'to allow any user, or list specific usernames')
+        # Inner sshd + users.allowed only apply in enforce mode
+        # (gated proxies to operator's sshd; doesn't run an inner one).
+        if self.mode == MODE_ENFORCE:
+            lo, hi = self.inner.port_range
+            if not (1024 <= lo < hi <= 65535):
+                raise ValueError(
+                    f'inner.port_range out of range: ({lo}, {hi})')
+
+            if not self.users.allowed:
+                raise ValueError(
+                    "users.allowed is empty in enforce mode — set ['*'] "
+                    'to allow any user, or list specific usernames')
 
     def check_permissions(self) -> None:
+        # §13.9.7 fail-closed on lax key-file permissions.
         """Check on-disk permissions of cert/key files. Raises ValueError
         if a private key file is group- or world-readable."""
         if self.mode != MODE_ENFORCE:

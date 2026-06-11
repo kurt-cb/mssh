@@ -1,4 +1,7 @@
-"""Tests for mssh.msshd.enforce_listener helper functions."""
+"""Tests for mssh.msshd.enforce_listener helper functions.
+
+Tests: §5.3.4
+"""
 from __future__ import annotations
 
 import datetime as _dt

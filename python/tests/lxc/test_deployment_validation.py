@@ -1,5 +1,7 @@
 """Phase 1 LXC deployment validation.
 
+Tests: §17.4
+
 Confirms:
 1. The CA container starts and the Flask listener is up.
 2. The admin API responds to a request from a real mTLS client.

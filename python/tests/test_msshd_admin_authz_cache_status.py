@@ -6,6 +6,8 @@ total entries, by-source breakdown, soonest expiry, applied CRL
 sequences. Useful in incident response when an operator wants to
 see what msshd has cached without restarting it or attaching a
 debugger.
+
+Tests: §5.3.14
 """
 from __future__ import annotations
 

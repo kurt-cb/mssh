@@ -8,6 +8,8 @@ The shim's job is narrow:
   3. On miss, query CA over mTLS (failover)
   4. Validate the returned cert (signature, expiry, critical extensions)
   5. Return (status, cert_der, serial)
+
+Design: §9.3.1 (see design/mssh_design_v1.md) — entry helpers.
 """
 from __future__ import annotations
 
@@ -35,13 +37,18 @@ log = logging.getLogger('mssh.shim')
 
 # Critical extension OIDs the shim recognizes. If the CA returns a cert with a
 # critical extension not in this set, the shim rejects it (defense in depth).
-# These must match ca/cert_minter.py exactly.
+# These must match ca/cert_minter.py and msshd/policy.py exactly.
+# Design: §14.5 OID arc.
 _KNOWN_CRITICAL = {
     '1.3.6.1.4.1.55555.1.1',       # source-bind
     '1.3.6.1.4.1.55555.1.2',       # server-bind
     '1.3.6.1.4.1.55555.1.3',       # channel-policy
+    '1.3.6.1.4.1.55555.1.4',       # force-command (R-1: critical-when-present)
+    '1.3.6.1.4.1.55555.1.5',       # environment (R-1: critical-when-present)
+    '1.3.6.1.4.1.55555.1.8',       # ca-bypass marker (only on bypass certs)
     '2.5.29.19',                   # basicConstraints
-    '2.5.29.15',                   # keyUsage
+    '2.5.29.15',                   # keyUsage (R-2: critical on authz certs)
+    '2.5.29.37',                   # extendedKeyUsage (R-2: critical on authz certs)
 }
 
 

@@ -1,5 +1,7 @@
 """End-to-end msshd integration test (enforce mode).
 
+Tests: §5.3.4, §1.4.3, §17.3
+
 Provisions:
 
   - One CA container — runs ``ca.server`` over mTLS.

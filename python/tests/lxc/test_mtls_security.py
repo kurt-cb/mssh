@@ -1,5 +1,7 @@
 """mTLS security tests against the CA.
 
+Tests: §2.3, §3.1, §13.9.8
+
 Every attack path covered here ends at one of two boundaries:
 
   TLS layer rejection — the CA's listener requires a client cert signed by

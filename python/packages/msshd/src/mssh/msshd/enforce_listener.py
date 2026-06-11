@@ -22,6 +22,11 @@ This is a Phase 1B sketch: identity extraction is intentionally
 simple (we trust the mTLS subject CN as the principal). Phase 1B+
 will pull the SSH pubkey from a structured cert SAN or a richer
 client greeting.
+
+Design: §5.3.4 (see design/mssh_design_v1.md) — enforce-mode handler
+(outer mTLS, cache-first then CA call, cert validation, inner mint
+and bytes-proxy hand-off). Also §5.3.7 — bypass-cert injection path,
+when the v1 header carries a ``bypass_cert``.
 """
 from __future__ import annotations
 
@@ -134,6 +139,10 @@ class EnforceListener:
     async def _on_client(self,
                          reader: asyncio.StreamReader,
                          writer: asyncio.StreamWriter) -> None:
+        # §5.3.4 per-connection enforce-mode flow:
+        # mTLS → principal extract → v1 header read → branch
+        # (bypass-injection §5.3.7 vs normal cache-or-CA-call) →
+        # cert validate → user-CA mint → SSH proxy.
         conn_id = uuid.uuid4().hex[:8]
         peer = writer.get_extra_info('peername') or ('?', 0)
         source_ip, source_port = peer[0], peer[1]
@@ -436,6 +445,9 @@ class EnforceListener:
         peer_der: bytes,
         bypass_cert_b64: str,
     ) -> tuple[bool, str]:
+        # §5.3.7 5-step bypass-cert validation: validity window,
+        # critical bypass marker, KNOWN_CRITICAL ext check, signature
+        # against bypass-mint trust root, principal CN match.
         """Validate a bypass cert from the JSON header and inject into
         the authz cache.
 

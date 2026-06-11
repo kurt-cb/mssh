@@ -1,5 +1,8 @@
 """HTTPS+mTLS client for the mssh-passkey broker.
 
+Design: §3.6 (see design/mssh_design_v1.md) — mTLS client to the
+mssh-passkey broker.
+
 mssh-ca instantiates a PasskeyBrokerClient at startup if a
 ``passkey:`` block is present in ca-config.yaml. The client wraps
 ``requests`` with the configured client cert + CA-trust pair and
@@ -94,6 +97,7 @@ class PasskeyBrokerClient:
                         display_name: Optional[str] = None,
                         ttl_seconds: int = 300) -> BrokerCeremony:
         """POST /broker/ceremony — create register-or-approve ceremony."""
+        # §3.6 broker create-ceremony
         if ceremony_type not in ('register', 'approve'):
             raise ValueError(f'bad ceremony_type {ceremony_type!r}')
         body = {

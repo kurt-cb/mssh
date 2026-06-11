@@ -1,5 +1,8 @@
 """Unit tests for mssh.admin.state — the detector behind `mssh-admin status`
-and `mssh-admin next`."""
+and `mssh-admin next`.
+
+Tests: §7.3.6
+"""
 from __future__ import annotations
 
 from pathlib import Path

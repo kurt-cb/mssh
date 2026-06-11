@@ -1,4 +1,7 @@
-"""Tests for mssh.msshd.proxy — bidirectional byte shuffler."""
+"""Tests for mssh.msshd.proxy — bidirectional byte shuffler.
+
+Tests: §5.3.4
+"""
 from __future__ import annotations
 
 import asyncio

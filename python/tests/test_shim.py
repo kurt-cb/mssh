@@ -1,4 +1,7 @@
-"""Unit tests for the shim cache and end-to-end shim behavior (mocked CA)."""
+"""Unit tests for the shim cache and end-to-end shim behavior (mocked CA).
+
+Tests: §9.3.1, §3.2
+"""
 from __future__ import annotations
 
 import base64

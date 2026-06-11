@@ -8,6 +8,10 @@ In enforce mode (Phase 1B) the listener will terminate mTLS, validate
 the client cert, call the CA, mint an OpenSSH cert, and SSH to the
 hermetic inner sshd. That path lives in ``enforce_listener`` (to be
 added in Phase 1B); for now this module only handles fallback.
+
+Design: §5.3.1 (see design/mssh_design_v1.md) — outer TCP listener
+(fallback-mode adaptation; enforce-mode listener lives in
+enforce_listener.py per §5.3.4).
 """
 from __future__ import annotations
 
@@ -36,6 +40,7 @@ class FallbackListener:
         self._active: set[asyncio.Task] = set()
 
     async def start(self) -> None:
+        # §5.3.1 bind outer TCP socket (fallback-mode).
         self._server = await asyncio.start_server(
             self._on_client,
             host=self.cfg.listen.external_address,
@@ -72,6 +77,8 @@ class FallbackListener:
     async def _on_client(self,
                          client_reader: asyncio.StreamReader,
                          client_writer: asyncio.StreamWriter) -> None:
+        # §5.3.1 per-connection handler: connect to fallback target,
+        # bidi-shuffle bytes.
         peer = client_writer.get_extra_info('peername') or ('?', 0)
         conn_id = uuid.uuid4().hex[:8]
         log.info('[%s] accept from %s:%d (fallback)', conn_id, peer[0], peer[1])

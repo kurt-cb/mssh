@@ -5,6 +5,8 @@ itself; the tool functions are plain adapters over CAClient + the
 state detector, which is what we test here. Faster than full
 end-to-end and covers the data-marshaling that the LLM client
 ultimately consumes.
+
+Tests: §12.4.1, §12.4.3
 """
 from __future__ import annotations
 
@@ -162,6 +164,7 @@ def test_audit_search_empty_returns_message():
 
 
 def test_audit_search_renders_entries():
+    """Verifies §12.4.1 — audit_search tool renders entries in LLM-readable form."""
     entries = [
         {'timestamp': '2026-05-17T10:00:00Z', 'user': 'alice',
          'server': 'srv-acct', 'decision': 'allow'},
@@ -206,6 +209,7 @@ def test_admin_list_renders():
 
 
 def test_status_no_client_no_ca_dir_returns_init_suggestion():
+    """Verifies §12.4.3 — status tool suggests `mssh-admin init` when uninitialized."""
     out = tools.status(client=None)
     assert 'mssh-admin init' in out
 
@@ -216,6 +220,7 @@ def test_status_no_client_no_ca_dir_returns_init_suggestion():
 
 
 def test_tool_registry_contains_expected_tools():
+    """Verifies §12.4.1 — MCP tool registry exposes the expected adapter names."""
     names = set(tools.tool_names())
     assert names == {'status', 'server_list', 'user_list',
                      'user_inspect', 'audit_search', 'admin_list'}

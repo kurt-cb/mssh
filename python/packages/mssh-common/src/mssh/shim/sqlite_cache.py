@@ -11,6 +11,8 @@ CA load and duplicate the audit log.
 This module implements the same get/put interface as ``CertCache`` but
 persists each entry in a SQLite database. Atomic; safe for concurrent
 readers + a writer (SQLite's built-in WAL handles it).
+
+Design: §9.3.3 (see design/mssh_design_v1.md) — SQLite-backed cache impl.
 """
 from __future__ import annotations
 

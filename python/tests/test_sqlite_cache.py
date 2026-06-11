@@ -1,4 +1,7 @@
-"""Unit tests for shim/sqlite_cache.py."""
+"""Unit tests for shim/sqlite_cache.py.
+
+Tests: §9.3.3
+"""
 from __future__ import annotations
 
 import datetime as _dt

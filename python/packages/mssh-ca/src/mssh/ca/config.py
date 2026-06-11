@@ -1,4 +1,9 @@
-"""CA configuration loading."""
+"""CA configuration loading.
+
+Design: §14.3.2 (see design/mssh_design_v1.md) — ca-config.yaml schema
+parsing. The default-deny posture for unset/uncovered actions is the
+§13.9.7 default-deny invariant.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -76,6 +81,8 @@ class CAConfig:
 
     @classmethod
     def load(cls, path: str | Path) -> 'CAConfig':
+        # §14.3.2 ca-config.yaml parse; unset fields fall through to
+        # safe defaults per §13.9.7 default-deny.
         with Path(path).open() as f:
             data = yaml.safe_load(f) or {}
         listen = (data.get('listen') or '127.0.0.1:8443')
@@ -130,3 +137,43 @@ class CAConfig:
                 (data.get('admin_2fa') or {}).get('within_seconds') or 300),
         )
         return c
+
+    def validate(self) -> None:
+        """Cross-field validation. Raises ``ValueError`` on any problem.
+
+        R-9 §13.9.7 default-deny: security-critical paths must be
+        present and exist. Missing fields → refuse-to-start with an
+        explicit error message.
+
+        Design: §13.9.7.
+        """
+        # §13.9.7 default-deny enforcement (R-9).
+        from pathlib import Path as _Path
+
+        required_paths = {
+            'signing_key': self.signing_key,
+            'signing_cert': self.signing_cert,
+            'tls_cert': self.tls_cert,
+            'tls_key': self.tls_key,
+            'client_ca_cert': self.client_ca_cert,
+        }
+        for name, value in required_paths.items():
+            if not value:
+                raise ValueError(
+                    f'ca-config.yaml: {name} is required '
+                    f'(§13.9.7 default-deny)')
+            if not _Path(value).exists():
+                raise ValueError(
+                    f'ca-config.yaml: {name}={value} does not exist '
+                    f'(§13.9.7 default-deny)')
+
+        if not self.identity_trust_roots:
+            raise ValueError(
+                'ca-config.yaml: identity_trust_roots is empty '
+                '(§13.9.7 default-deny; cannot validate any client '
+                'identity without at least one trust root)')
+
+        if not (1 <= self.listen_port <= 65535):
+            raise ValueError(
+                f'ca-config.yaml: listen port out of range: '
+                f'{self.listen_port}')

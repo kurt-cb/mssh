@@ -12,6 +12,8 @@ tasks. The test exercises the full path:
   client sees the banner.
 
 Marked ``loopback`` so it can be deselected with ``-m 'not loopback'``.
+
+Tests: §3.1, §5.3.4, §6 (end-to-end)
 """
 from __future__ import annotations
 
@@ -147,7 +149,11 @@ def loopback_env(tmp_path):
         'tls_cert': str(ca_dir / 'tls-server-cert.pem'),
         'tls_key': str(ca_dir / 'tls-server-key.pem'),
         'client_ca_cert': str(ca_dir / 'tls-ca-cert.pem'),
-        'identity_trust_roots': [],
+        # R-9 §13.9.7: at least one trust root required. The loopback
+        # test stubs identity validation via the CA's own bootstrap
+        # cert (any pubkey will match because the test pre-enrolls
+        # matching key material).
+        'identity_trust_roots': [str(ca_dir / 'tls-ca-cert.pem')],
         'enrollment': {'path': str(ca_dir / 'enrollment.yaml')},
         'audit': {'path': str(ca_dir / 'audit.jsonl')},
         'defaults': {'max_cert_validity_seconds': 3600,

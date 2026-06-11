@@ -1,4 +1,8 @@
-"""Shim configuration loader."""
+"""Shim configuration loader.
+
+Design: §9.3.2 (see design/mssh_design_v1.md) — shared config-loader.
+Enforces §13.9.7 default-deny on missing config.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -53,6 +57,7 @@ class ShimConfig:
         )
 
     def validate(self) -> None:
+        # §13.9.7 default-deny on missing config
         if not self.ca_endpoints:
             raise ValueError('shim config requires at least one ca_endpoints entry')
         for f in ['mtls_cert', 'mtls_key', 'ca_trust_root', 'auth_trust_root']:

@@ -1,5 +1,7 @@
 """Set-up-only test for ad-hoc exploration of mssh.
 
+Tests: §17.1 (lab topology)
+
 What this test does (one big function, no assertions of substance):
 
   1. Provisions a fresh set of LXC containers with FIXED names:

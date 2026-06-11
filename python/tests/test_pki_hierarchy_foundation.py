@@ -8,6 +8,8 @@ load_intermediates, load_root_cert.
 These helpers aren't wired into the bootstrap or production code
 paths yet (that's Phase 2). Tests here exercise them directly so
 the foundation has coverage before the bootstrap refactor lands.
+
+Tests: §2.2
 """
 from __future__ import annotations
 

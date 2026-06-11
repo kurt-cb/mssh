@@ -13,6 +13,10 @@ Keeping the tool surface deliberately small in v1:
 Anything that *mutates* the CA (server_add, user_add, policy_add,
 key rotation, …) is out of scope. Mutation requires a write-grant
 mechanism described in design/future-ideas.md §12.
+
+Design: §12.4.1 (read-only diagnostics surface — list servers, users,
+admins, audit search) + §12.4.3 (TOOL_REGISTRY is the strict-subset
+capability allow-list; bypass-cert mint is NEVER allowed per §12.2).
 """
 from __future__ import annotations
 
@@ -215,6 +219,9 @@ def admin_list(*, client: CAClient) -> str:
 # Each entry: (name, description, JSON-schema for arguments, callable).
 # The callable always takes a `client` keyword (the CAClient instance)
 # plus whatever named arguments the schema declares.
+# §12.4.3 capability allow-list — strict subset of mssh-admin;
+# bypass-cert mint is NEVER allowed per §12.2. All entries here are
+# §12.4.1 read-only diagnostics.
 TOOL_REGISTRY: list[dict[str, Any]] = [
     {
         'name': 'status',

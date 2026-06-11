@@ -31,6 +31,11 @@ shrinkage in the per-connection plan apply.
 See:
 - [design/architecture.md § Hermetic inner sshd](../../design/architecture.md#hermetic-inner-sshd)
 - ca/cert_minter.py — the DER format we have to parse here
+
+Design: §5.3.4 / §4.3.3 (see design/mssh_design_v1.md) — policy-summary
+parsing on the msshd side: read the CA-issued X.509 policy extensions
+(§4.3.3 cert format) and translate to OpenSSH cert critical-options /
+msshd-side enforcement bits (§5.3.4 enforce-mode handler).
 """
 from __future__ import annotations
 
@@ -60,13 +65,17 @@ OID_CA_BYPASS       = '1.3.6.1.4.1.55555.1.8'
 # Critical extensions msshd recognises. If the CA returns a
 # cert with a critical extension NOT in this set, reject the cert
 # entirely (defense in depth) — see shim/shim.py:_KNOWN_CRITICAL.
+# Must match cert_minter.py and shim/shim.py exactly. Design: §14.5.
 KNOWN_CRITICAL = {
     OID_SOURCE_BIND,
     OID_SERVER_BIND,
     OID_CHANNEL_POLICY,
-    OID_CA_BYPASS,
+    OID_FORCE_COMMAND,             # R-1: critical-when-present
+    OID_ENVIRONMENT,               # R-1: critical-when-present
+    OID_CA_BYPASS,                 # only on bypass certs
     '2.5.29.19',                   # basicConstraints
-    '2.5.29.15',                   # keyUsage
+    '2.5.29.15',                   # keyUsage (R-2: critical on authz certs)
+    '2.5.29.37',                   # extendedKeyUsage (R-2: critical on authz certs)
 }
 
 
@@ -87,6 +96,9 @@ class CertPolicy:
 
 
 def parse_cert_policy(cert_der: bytes) -> CertPolicy:
+    # §4.3.3 read the X.509 policy extensions (mssh-source-bind,
+    # mssh-server-bind, channels, force-command, environment,
+    # max-session, 2FA, bypass marker).
     """Parse the X.509 authz cert's policy extensions into a
     ``CertPolicy``. The CA's extension encoding is hand-rolled DER —
     see ca/cert_minter.py for the writer side.
@@ -132,6 +144,7 @@ class InnerCertKwargs:
 
 
 def translate_to_inner_cert_kwargs(p: CertPolicy) -> InnerCertKwargs:
+    # §5.3.4 X.509-ext → OpenSSH cert critical-options translation.
     """Project the parts of ``CertPolicy`` that OpenSSH user certs can
     express natively into kwargs for ``UserCA.mint_user_cert``.
 

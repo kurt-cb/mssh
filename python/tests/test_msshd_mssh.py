@@ -1,5 +1,8 @@
 """Tests for mssh.client — pure-data helpers + outer-protocol-v1
-header / ack encoding."""
+header / ack encoding.
+
+Tests: §5.3.4, §3.1 (mssh↔msshd happy path)
+"""
 from __future__ import annotations
 
 import json

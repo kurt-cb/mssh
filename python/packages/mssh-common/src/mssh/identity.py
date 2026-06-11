@@ -1,5 +1,8 @@
 """Parse SSH public-key and OpenSSH-cert blobs.
 
+Design: §4.3.1 (CA authorize handler identity parsing) +
+§9.3.1 (mssh-common shim). See design/mssh_design_v1.md.
+
 The CA parses raw identity blobs forwarded by the shim. sshd does not parse
 these — it only validates the signature against the blob.
 """

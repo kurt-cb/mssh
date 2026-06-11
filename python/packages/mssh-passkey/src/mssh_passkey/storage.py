@@ -8,6 +8,9 @@ perspective and relayed as-is.
 Concurrency: SQLite with WAL mode + a coarse Python lock around
 mutating operations. Plenty for the broker's load profile
 (handfuls of ceremonies per minute).
+
+Design: §8.3.1 ceremony store; §14.6 ceremonies SQLite schema
+(see design/mssh_design_v1.md).
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+# §14.6 ceremonies SQLite schema
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ceremonies (
     ceremony_id     TEXT PRIMARY KEY,

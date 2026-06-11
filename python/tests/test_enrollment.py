@@ -1,4 +1,7 @@
-"""Unit tests for the YAML-backed enrollment store."""
+"""Unit tests for the YAML-backed enrollment store.
+
+Tests: §4.3.2, §14.4
+"""
 from __future__ import annotations
 
 import pytest

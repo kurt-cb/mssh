@@ -1,4 +1,7 @@
-"""Unit tests for the mssh-passkey ceremony store."""
+"""Unit tests for the mssh-passkey ceremony store.
+
+Tests: §8.3.1, §14.6
+"""
 
 from __future__ import annotations
 
@@ -28,6 +31,7 @@ def store(tmp_path):
 
 
 def test_create_register_then_get(store):
+    """Verifies §8.3.1 — create+get round-trips a register ceremony."""
     cer = store.create(
         ceremony_type='register',
         options_json=_opts(),
@@ -73,8 +77,11 @@ def test_create_approve_and_record_response(store):
 
 
 def test_record_response_is_idempotent(store):
-    """A second response on the same ceremony returns False and
-    doesn't overwrite the first."""
+    """Verifies §8.3.1 — record_response is idempotent on replay.
+
+    A second response on the same ceremony returns False and
+    doesn't overwrite the first.
+    """
     cer = store.create(
         ceremony_type='approve', options_json=_opts(),
         description='X', display_name=None,
@@ -144,7 +151,10 @@ def test_create_rejects_bad_ttl(store):
 
 
 def test_sweep_expired(store, monkeypatch):
-    """Create a ceremony, fast-forward past expiry, sweep finds it."""
+    """Verifies §14.6 — sweep_expired surfaces past-TTL ceremonies once.
+
+    Create a ceremony, fast-forward past expiry, sweep finds it.
+    """
     cer = store.create(
         ceremony_type='approve', options_json=_opts(),
         description='X', display_name=None,
@@ -172,6 +182,7 @@ def test_sweep_expired(store, monkeypatch):
 
 
 def test_pending_callbacks(store):
+    """Verifies §14.6 — pending_callbacks queue drains via mark_callback_delivered."""
     cer1 = store.create(
         ceremony_type='approve', options_json=_opts(),
         description='X', display_name=None,

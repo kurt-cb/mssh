@@ -1,4 +1,7 @@
-"""Tests for the external-tool RP-service flow in mssh-ca."""
+"""Tests for the external-tool RP-service flow in mssh-ca.
+
+Tests: §4.3.9, §13.6
+"""
 
 from __future__ import annotations
 
@@ -58,6 +61,7 @@ def superuser(adminctx):
 # ---- Tool CRUD --------------------------------------------------------
 
 def test_tool_add(adminctx, superuser):
+    """Verifies §4.3.9 — external-tool registration mints mTLS credentials."""
     status, body = admin_handlers.external_tool_add(adminctx, superuser, {
         'name': 'payroll',
         'rp_id': 'passkey.example.com',
@@ -101,6 +105,7 @@ def test_tool_remove(adminctx, superuser):
 
 
 def test_tool_add_forbidden_for_auditor(adminctx):
+    """Verifies §4.3.9 — auditors cannot register external tools (superuser-only)."""
     adminctx.enrollment.add_admin('aud', 'auditor', 'CN=aud')
     auditor = adminctx.enrollment.admins['aud']
     status, _ = admin_handlers.external_tool_add(adminctx, auditor, {
@@ -147,6 +152,7 @@ def test_enroll_begin_missing_user_id(adminctx, superuser):
 
 
 def test_challenge_validates_outcome_url_prefix(adminctx, superuser):
+    """Verifies §13.6 — outcome_url must match the tool's registered prefix."""
     subj = _enrol_tool(adminctx, superuser)
     # Pre-register a credential so the challenge has someone to challenge.
     from mssh.ca.enrollment import PasskeyCredential
@@ -196,7 +202,7 @@ def test_challenge_success(adminctx, superuser):
 
 
 def test_status_cross_tool_isolation(adminctx, superuser):
-    """Tool A cannot poll Tool B's ceremony status."""
+    """Verifies §13.6 — Tool A cannot poll Tool B's ceremony status (tenant isolation)."""
     _enrol_tool(adminctx, superuser, 'tool-a')
     _enrol_tool(adminctx, superuser, 'tool-b')
     # Tool A creates a ceremony.
@@ -232,4 +238,45 @@ def test_revoke_unknown_404(adminctx, superuser):
     subj = _enrol_tool(adminctx, superuser)
     status, _ = admin_handlers.external_tool_passkey_revoke(
         adminctx, subj, 'alice', 'nope')
+    assert status == 404
+
+
+# R-4: external-tool ceremony cancel route. Tests: §14.1.3, §13.6
+
+def test_r4_cancel_ceremony_own_tool(adminctx, superuser):
+    """Verifies §14.1.3 — tool can cancel its own pending ceremony."""
+    subj = _enrol_tool(adminctx, superuser)
+    from mssh.ca.enrollment import PasskeyCredential
+    adminctx.enrollment.add_external_tool_user_passkey(
+        'payroll', 'alice', PasskeyCredential(
+            credential_id='c1', public_key='pk', aaguid='', sign_count=0))
+    admin_handlers.external_tool_passkey_challenge(
+        adminctx, subj, {
+            'user_id': 'alice', 'description': 'x',
+            'outcome_url': 'https://app.example.com/cb/x'})
+    status, body = admin_handlers.external_tool_passkey_cancel(
+        adminctx, subj, 'ceremony-tool')
+    assert status == 200
+    assert body['outcome'] == 'cancelled'
+    # Pending record is dropped.
+    assert 'ceremony-tool' not in adminctx.passkey_pending_authentications
+
+
+def test_r4_cancel_ceremony_cross_tool_404(adminctx, superuser):
+    """Verifies §13.6 — tool cannot cancel another tool's ceremony.
+
+    Cross-tool DELETE returns 404 to keep ceremony existence opaque.
+    """
+    _enrol_tool(adminctx, superuser, 'tool-a')
+    _enrol_tool(adminctx, superuser, 'tool-b')
+    from mssh.ca.enrollment import PasskeyCredential
+    adminctx.enrollment.add_external_tool_user_passkey(
+        'tool-a', 'alice', PasskeyCredential(
+            credential_id='c1', public_key='pk', aaguid='', sign_count=0))
+    admin_handlers.external_tool_passkey_challenge(
+        adminctx, 'CN=external-tool:tool-a', {
+            'user_id': 'alice', 'description': 'x',
+            'outcome_url': 'https://app.example.com/cb/x'})
+    status, _ = admin_handlers.external_tool_passkey_cancel(
+        adminctx, 'CN=external-tool:tool-b', 'ceremony-tool')
     assert status == 404

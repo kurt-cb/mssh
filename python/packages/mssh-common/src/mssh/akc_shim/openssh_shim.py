@@ -60,6 +60,9 @@ Limitations of this hook (called out in tests/issues.md as well):
   ``mssh`` group and chgrp's the keys to that group with mode 640. The
   SQLite cache file must also be writeable by that user (typical owner is
   ``mssh:mssh``, mode 0700 on the parent directory).
+
+Design: §9.3.4 + §15.6 (see design/mssh_design_v1.md) — OpenSSH AKC entry
+point. The stdin/argv/stdout/exit-code shape is the §15.6 frozen contract.
 """
 from __future__ import annotations
 
@@ -143,6 +146,8 @@ def _ipv6_from_hex(hex32: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    # §9.3.4 OpenSSH AKC entry; §15.6 frozen contract for
+    # stdin/argv/stdout/exit-code
     if len(argv) < 4:
         sys.stderr.write(
             'usage: mssh-openssh-shim <username> <key-type> '

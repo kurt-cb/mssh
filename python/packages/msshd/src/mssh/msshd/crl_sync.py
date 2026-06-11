@@ -20,6 +20,11 @@ Design notes for this module:
 
 This is the "lenient" half of the dual lenient/strict policy:
 the SYNC is best-effort; the GATE (in enforce_listener) is strict.
+
+Design: §5.3.8 + §5.3.9 (see design/mssh_design_v1.md) — CRL sync
+(per-issuer page fetch + serial invalidation) and the strict-mode
+gate that forces live CA calls when the cache is far behind. See
+§13.3 for the cross-cutting revocation story.
 """
 from __future__ import annotations
 
@@ -55,6 +60,8 @@ class CRLSync:
         self._running: Optional[asyncio.Task] = None
 
     def maybe_sync(self, current_crl_seqs: dict[str, int] | int) -> None:
+        # §5.3.8 background-sync trigger: schedule if any issuer is
+        # behind. Non-blocking; safe in the hot authorize path.
         """Schedule a background sync if msshd is behind on ANY
         issuer. Cheap and non-blocking; safe to call from the hot
         authorize path.
@@ -106,6 +113,7 @@ class CRLSync:
 
     async def _do_sync(self,
                        current_seqs: dict[str, int]) -> dict[str, int]:
+        # §5.3.8 per-issuer sync loop driver (§13.3 revocation story).
         """Iterate over each stale issuer and apply its missing
         entries to the authz cache. Returns the new last_crl_seqs."""
         for issuer, current in current_seqs.items():
@@ -114,6 +122,8 @@ class CRLSync:
         return dict(self._cache.last_crl_seqs)
 
     async def _do_sync_issuer(self, issuer: str, current: int) -> int:
+        # §5.3.8 per-issuer CRL sync: page-fetch, invalidate-by-serial,
+        # persist last_crl_seqs after each page.
         """Fetch + apply loop for ONE issuer. Returns the new
         last-applied seq for that issuer."""
         start = self._cache.last_crl_seqs.get(issuer, 0)

@@ -1,5 +1,7 @@
 """Verify shell-glob wildcards in policy `servers:` actually grant access.
 
+Tests: §4.3.3
+
 Enrols a fresh user `wildcard-user` with a single key. Attaches a policy with
 `servers: ['srv-*']`. The randomized scenario already created server names
 matching that pattern (`srv-a`, `srv-b`, `srv-c`, `srv-d`), so the user should

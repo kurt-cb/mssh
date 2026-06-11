@@ -1,5 +1,9 @@
 """mssh protocol v1.1 — typed framing for the post-ack stream.
 
+Design: §3.1 + §14.7 (typed framing protocol v1.1; see
+design/mssh_design_v1.md). Shared module per §15.4 (replaceable
+broker wire-protocol surface).
+
 Replaces the v1.0 raw byte pump after the JSON ack. Each post-ack
 message is one frame:
 

@@ -6,6 +6,8 @@ Two run modes (see design/mssh-passkey-module.md § 8):
   - ``front_end: dev`` — bind two TLS listeners directly; one
     public HTTPS, one mTLS broker. Used by the adhoc-lab and for
     development.
+
+Design: §8 mssh-passkey broker (see design/mssh_design_v1.md).
 """
 
 from __future__ import annotations

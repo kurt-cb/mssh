@@ -1,5 +1,8 @@
 """Smoke test: spawn msshd in fallback mode, drive bytes
-through it to an in-process echo server, verify round-trip."""
+through it to an in-process echo server, verify round-trip.
+
+Tests: §5.3.1 (boot)
+"""
 from __future__ import annotations
 
 import asyncio

@@ -21,6 +21,11 @@ Per-connection flow:
 Design refs:
 - [architecture.md §6 + §7](../../design/architecture.md)
 - OpenSSH cert format: PROTOCOL.certkeys
+
+Design: §5.3.13 (see design/mssh_design_v1.md) — local user-CA: load /
+generate the Ed25519 user-CA keypair on msshd, write the public key
+to the inner sshd's TrustedUserCAKeys, mint short-lived per-connection
+OpenSSH user certs carrying force_command / source_address policy.
 """
 from __future__ import annotations
 
@@ -88,6 +93,7 @@ class UserCA:
 
     @classmethod
     def load(cls, priv_key_path: str | Path) -> 'UserCA':
+        # §5.3.13 user-CA load — perms-strict (mode & 077 == 0) or fail.
         """Load the user-CA private key from disk. Verifies that the
         on-disk perms are restrictive (mode & 077 == 0)."""
         p = Path(priv_key_path)
@@ -137,6 +143,8 @@ class UserCA:
         source_address: Sequence[str] | None = None,
         ttl_seconds: int = DEFAULT_USER_CERT_TTL_SECONDS,
     ) -> MintedUserCert:
+        # §5.3.13 ephemeral cert mint: fresh keypair, sign OpenSSH user
+        # cert with policy-translated critical-options.
         """Mint a short-lived OpenSSH user cert for ``principal``.
 
         Returns ``(user_private_key, cert)``. The cert is signed by

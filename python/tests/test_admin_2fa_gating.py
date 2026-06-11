@@ -5,6 +5,8 @@ Companion to test_passkey_admin_flow.py — that file tests the
 passkey helper in isolation; this one tests the per-action gating
 on actual handlers (cert_revoke, admin_add, admin_remove, user_remove)
 and the CLI's poll-and-retry loop.
+
+Tests: §13.5, §4.3.8
 """
 
 from __future__ import annotations

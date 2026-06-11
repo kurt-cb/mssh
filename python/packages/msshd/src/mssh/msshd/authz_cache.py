@@ -33,6 +33,10 @@ This module has no I/O dependencies beyond the filesystem and is
 synchronous — all calls are fast in-memory operations plus an
 atomic disk write on mutations. Concurrency is single-thread by
 construction (msshd is asyncio-on-one-thread).
+
+Design: §5.3.5 + §5.3.6 (see design/mssh_design_v1.md) — authz cache
+lookup + FIFO eviction. Cross-cutting story: §13.1 cache lifecycle.
+Persistence schema: §14.6 on-disk JSON layout.
 """
 from __future__ import annotations
 
@@ -62,13 +66,20 @@ class CachedGrant:
     """A grant in the authz cache, plus its provenance.
 
     Composes the ``AuthorizationGrant`` dataclass — the wire-level
-    grant is unchanged — and adds ``source`` (provenance tag) and
-    ``injected_at`` (operator-visible timestamp).
+    grant is unchanged — and adds ``source`` (provenance tag),
+    ``injected_at`` (operator-visible timestamp), and (R-7) the
+    ``last_used_at`` diagnostic timestamp.
+
+    Design: §5.3.5 + §14.6 (authz_cache.json schema).
     """
     principal: str
     grant: AuthorizationGrant
     source: str                          # 'ca' or 'bypass'
     injected_at: _dt.datetime
+    # R-7 §14.6: diagnostic; updated on every successful get().
+    # Default to injected_at on first put so the field is never
+    # absent in the on-disk record.
+    last_used_at: _dt.datetime | None = None
 
     def is_expired(self, now: _dt.datetime | None = None) -> bool:
         now = now or _now()
@@ -118,8 +129,14 @@ class AuthzCache:
     # ----------------------------------------------------------------
 
     def get(self, principal: str) -> Optional[CachedGrant]:
+        # §5.3.5 cache lookup; lazy-expire on access.
         """Return a non-expired cached grant for ``principal`` or
-        ``None``. Expired entries are evicted on access."""
+        ``None``. Expired entries are evicted on access.
+
+        R-7 §14.6: updates the entry's ``last_used_at`` timestamp on
+        every successful hit (in-memory only; persisted on next put
+        or invalidate to avoid disk-write storms).
+        """
         entry = self._entries.get(principal)
         if entry is None:
             return None
@@ -130,17 +147,21 @@ class AuthzCache:
             del self._entries[principal]
             self._persist()
             return None
+        entry.last_used_at = _now()       # R-7
         return entry
 
     def put(self, principal: str, grant: AuthorizationGrant,
             *, source: str) -> CachedGrant:
+        # §5.3.5 put; enforce caps then persist atomically (§14.6).
         """Insert or replace the entry for ``principal``. ``source``
         must be ``'ca'`` or ``'bypass'``."""
         if source not in _VALID_SOURCES:
             raise ValueError(
                 f'source must be one of {_VALID_SOURCES}, got {source!r}')
+        now = _now()
         entry = CachedGrant(principal=principal, grant=grant,
-                            source=source, injected_at=_now())
+                            source=source, injected_at=now,
+                            last_used_at=now)   # R-7
         prev = self._entries.get(principal)
         self._entries[principal] = entry
         # Eviction caps (no-op if both are 0). Per-principal first,
@@ -161,6 +182,8 @@ class AuthzCache:
         return entry
 
     def _enforce_caps(self) -> None:
+        # §5.3.6 FIFO eviction by injected_at — per-principal cap
+        # (forward-compat) then global cap.
         """Apply per-principal then global caps. FIFO by injected_at.
         Called from put(); no-op if both caps are 0."""
         # Per-principal cap. With today's dict-keyed-by-principal
@@ -207,6 +230,8 @@ class AuthzCache:
                 del self._entries[victim.principal]
 
     def invalidate(self, principal: str) -> bool:
+        # §13.1 CA-deny invalidation: drop cached grant regardless of
+        # source — CA is the oracle when reachable.
         """Drop the entry for ``principal``. Returns True if anything
         was removed.
 
@@ -223,6 +248,8 @@ class AuthzCache:
         return False
 
     def invalidate_by_serial(self, serial: str) -> int:
+        # §13.3 CRL apply: drop revoked-by-serial entries regardless
+        # of source tag (called from §5.3.8 CRL sync loop).
         """Drop any cache entry whose grant has the given cert
         ``serial``. Returns the number of entries removed (0 or 1
         in practice; structured as a count for safety).
@@ -299,6 +326,9 @@ class AuthzCache:
                     'protocol_version':  e.grant.protocol_version,
                     'source':       e.source,
                     'injected_at':  e.injected_at.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                    # R-7 §14.6: diagnostic; may be absent in pre-R-7 files.
+                    'last_used_at': (e.last_used_at.strftime('%Y-%m-%dT%H:%M:%SZ')
+                                     if e.last_used_at else None),
                 }
                 for e in self._entries.values()
             ],
@@ -359,11 +389,17 @@ class AuthzCache:
                 if source not in _VALID_SOURCES:
                     skipped += 1
                     continue
+                # R-7 §14.6: last_used_at may be absent in pre-R-7 files;
+                # fall back to injected_at.
+                last_used_raw = raw.get('last_used_at')
+                injected_at = _parse_iso(raw['injected_at'])
                 entry = CachedGrant(
                     principal=str(raw['principal']),
                     grant=grant,
                     source=source,
-                    injected_at=_parse_iso(raw['injected_at']),
+                    injected_at=injected_at,
+                    last_used_at=(_parse_iso(last_used_raw)
+                                  if last_used_raw else injected_at),
                 )
                 if entry.is_expired(now):
                     skipped += 1

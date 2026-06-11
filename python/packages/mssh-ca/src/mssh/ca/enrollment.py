@@ -2,6 +2,9 @@
 
 Schema follows mssh-detailed-ca-admin.md. Atomic writes (write-temp +
 rename) so concurrent reads never see a partial file.
+
+Design: §4.3.2 (see design/mssh_design_v1.md) — on-disk enrollment store.
+The persisted YAML shape mirrors §14.4 (enrollment.yaml schema).
 """
 from __future__ import annotations
 
@@ -163,6 +166,7 @@ class Enrollment:
     # ---- persistence ----
 
     def load(self) -> None:
+        # §4.3.2 load; YAML shape per §14.4
         with self._lock:
             with self.path.open() as f:
                 data = yaml.safe_load(f) or {}
@@ -219,6 +223,7 @@ class Enrollment:
             }
 
     def save(self) -> None:
+        # §4.3.2 atomic save; YAML shape per §14.4
         with self._lock:
             out: dict[str, Any] = {}
             if self.servers:
@@ -566,6 +571,7 @@ class Enrollment:
 
     def add_policy(self, username: str, policy_fields: dict[str, Any],
                    created_by: str = '') -> Policy:
+        # §4.3.2 policy attach; require_2fa enum per §13.5
         with self._lock:
             if username not in self.users:
                 raise EnrollmentError(f'user not found: {username}')

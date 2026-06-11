@@ -1,4 +1,11 @@
-"""mssh-admin CLI entry point (click-based)."""
+"""mssh-admin CLI entry point (click-based).
+
+Design: §7.3.1 (full CLI command tree; full enum in §14.2.2) +
+§7.3.2 (2FA 202-Accepted polling loop in ``_handle_2fa_call``) +
+§7.3.3 (cert auto-renewal helper, ``cert_renew_cmd``) +
+§7.3.4 (PKI ceremony helpers — intermediate rotate / mint-external,
+per §2.5).
+"""
 from __future__ import annotations
 
 import os
@@ -90,6 +97,7 @@ def _handle_2fa_call(client, fn, *args, **kwargs):
     on approval retry the original request — the second call hits the
     2FA cache and proceeds.
     """
+    # §7.3.2 202-Accepted polling loop
     resp = _handle_call(fn, *args, **kwargs)
     if not isinstance(resp, dict) or resp.get('status') != 'pending_2fa':
         return resp
@@ -136,6 +144,7 @@ def _handle_2fa_call(client, fn, *args, **kwargs):
 @click.pass_context
 def cli(ctx, config_path, ca_url, admin_cert, admin_key, ca_cert, output_format):
     """mssh-admin — management CLI for mssh."""
+    # §7.3.1 CLI command tree root (full enum in §14.2.2)
     ctx.ensure_object(dict)
     ctx.obj['_config'] = _load_cli_config(config_path)
     ctx.obj['ca_url'] = ca_url
@@ -161,6 +170,7 @@ def cli(ctx, config_path, ca_url, admin_cert, admin_key, ca_cert, output_format)
                    'Default: DNS:localhost, IP:127.0.0.1.')
 def init(ca_dir, bootstrap_admin, tls_server_cn, tls_server_san):
     """Initialize a fresh CA: signing key + bootstrap admin cert."""
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
     ca_dir = Path(ca_dir)
     if any(ca_dir.glob('*.pem')) and ca_dir.exists():
         raise click.UsageError(f'{ca_dir} already contains certs; refusing to overwrite')
@@ -249,6 +259,7 @@ def _build_state_client(ctx, ca_dir):
 @click.pass_context
 def status(ctx, ca_dir, no_legacy_detect):
     """Show current deployment state — what's set up, what's not."""
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
     from . import state as _state
     ca_dir_path = Path(ca_dir) if ca_dir else None
     client = _build_state_client(ctx, ca_dir_path)
@@ -263,6 +274,7 @@ def status(ctx, ca_dir, no_legacy_detect):
 @click.pass_context
 def next_cmd(ctx, ca_dir, no_legacy_detect):
     """Show only the next step in adoption — what to do right now."""
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
     from . import state as _state
     ca_dir_path = Path(ca_dir) if ca_dir else None
     client = _build_state_client(ctx, ca_dir_path)
@@ -278,6 +290,7 @@ def next_cmd(ctx, ca_dir, no_legacy_detect):
 @cli.group()
 def server():
     """Server enrollment commands."""
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
 
 
 @server.command('add')
@@ -376,6 +389,7 @@ def server_groups(ctx, name, add, remove, set_groups):
 @cli.group()
 def user():
     """User enrollment commands."""
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
 
 
 @user.command('add')
@@ -513,6 +527,7 @@ def user_passkey_revoke_cmd(ctx, admin_name, credential_id):
 @cli.group()
 def policy():
     """Policy commands."""
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
 
 
 @policy.command('add')
@@ -569,6 +584,7 @@ def policy_remove(ctx, policy_id):
 @cli.group()
 def admin():
     """Admin user commands (superuser-only operations)."""
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
 
 
 @admin.command('add')
@@ -618,6 +634,7 @@ def admin_list(ctx):
 @click.option('--limit', default=100, type=int)
 @click.pass_context
 def audit(ctx, type_, decision, username, srv, limit):
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
     c = _make_client(ctx)
     out = _handle_call(c.audit, type=type_, decision=decision,
                        username=username, server=srv, limit=limit)
@@ -631,6 +648,7 @@ def audit(ctx, type_, decision, username, srv, limit):
 @cli.group('template')
 def template_group():
     """Manage CA-side inner sshd config templates."""
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
 
 
 def _resolve_scope(scope: str, name: str | None) -> tuple[str, str | None]:
@@ -839,6 +857,7 @@ def bypass_cert_group():
     Lets the operator reach msshd hosts whose CA is currently
     unreachable. See archive/design/notes-bypass-cache.md.
     """
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
 
 
 def _read_ssh_pubkey_blob(path: str) -> bytes:
@@ -925,6 +944,7 @@ def bypass_cert_mint_cmd(ctx, username, pubkey_path, valid_days,
 @cli.group('cert')
 def cert_group():
     """Manage authz certs minted by this CA (revoke, §5 mint, …)."""
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
 
 
 @cert_group.command('mint')
@@ -1092,6 +1112,7 @@ def cert_renew_cmd(ctx, cert_path, key_path, ca_cert_path, ca_url,
           --out-cert /etc/grafana/tls.crt --out-key /etc/grafana/tls.key \\
           --threshold-days 14 --on-renew "systemctl reload grafana"
     """
+    # §7.3.3 cert auto-renewal helper
     from datetime import datetime, timezone
     from cryptography import x509
 
@@ -1224,6 +1245,7 @@ def cert_revoke_cmd(ctx, serials, reason, issuer):
 def intermediate_group():
     """Inspect / rotate the named intermediates (user-mint, bypass-mint,
     host-mint, auth). See design/notes-pki-hierarchy.md."""
+    # §7.3.1 CLI command tree (full enum in §14.2.2); §7.3.4 PKI ceremony helpers
 
 
 @intermediate_group.command('list')
@@ -1262,6 +1284,7 @@ def intermediate_rotate_cmd(ctx, role, force):
     leaves expire. Until distributed, leaves freshly minted by the
     new key will fail to validate against the old trust store.
     """
+    # §7.3.4 PKI ceremony helpers; per §2.5
     if not force:
         raise click.UsageError(
             'intermediate rotate is destructive — pass --force to confirm. '
@@ -1310,6 +1333,7 @@ def intermediate_mint_external_cmd(ctx, name, path_length, validity_days,
             --name partner-corp --path-length 1 \\
             --out-cert partner-corp.crt --out-key partner-corp.key
     """
+    # §7.3.4 PKI ceremony helpers; per §2.5
     c = _make_client(ctx)
     out = _handle_2fa_call(c, c.intermediate_mint_external, name,
                             path_length=path_length,
@@ -1339,6 +1363,7 @@ def intermediate_list_external_cmd(ctx):
 @cli.group('crl')
 def crl_group():
     """View the CA's CRL (revocation log)."""
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
 
 
 @crl_group.command('list')
@@ -1367,6 +1392,7 @@ def openvpn_group():
     client; revocation goes through ``mssh-admin cert revoke <serial>``
     (OpenVPN server polls the CA's CRL).
     """
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
 
 
 @openvpn_group.command('issue')
@@ -1456,25 +1482,43 @@ def wireguard_group():
     periodically to refresh ``/etc/wireguard/<server>.conf`` and
     reload the WireGuard daemon — revocation propagates that way.
     """
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
 
 
 @wireguard_group.command('server-init')
 @click.option('--name', required=True,
               help='Server (interface) name, e.g. wg0.')
-@click.option('--network', required=True,
-              help='Address pool in CIDR form, e.g. 10.20.0.0/24. '
+@click.option('--network', default='',
+              help='IPv4 address pool in CIDR form, e.g. 10.20.0.0/24. '
                    'First usable IP becomes the server\'s address; '
-                   'subsequent peers take the next free addresses.')
+                   'subsequent peers take the next free addresses. '
+                   'Independently optional (v0.4.0+) — pass --network, '
+                   '--network-v6, or both; at least one required.')
+@click.option('--network-v6', default='',
+              help='IPv6 address pool, e.g. fd00:98:123::/64 (ULA). '
+                   'Server takes ::1; peers share host numbers with v4 '
+                   'when dual-stack. Independently optional.')
 @click.option('--endpoint', required=True,
               help='Public endpoint peers connect to, '
                    'e.g. vpn.example.com:51820.')
 @click.option('--listen-port', type=int, default=51820, show_default=True)
 @click.pass_context
-def wireguard_server_init_cmd(ctx, name, network, endpoint, listen_port):
-    """Create a new WireGuard server (interface)."""
+def wireguard_server_init_cmd(ctx, name, network, network_v6,
+                               endpoint, listen_port):
+    """Create a new WireGuard server (interface).
+
+    v0.4.0+ supports dual-stack: pass --network for v4-only, --network-v6
+    for v6-only, or both for dual-stack. The server takes host number 1
+    in each family; peers take the next free number.
+    """
+    if not network and not network_v6:
+        raise click.UsageError(
+            'at least one of --network or --network-v6 is required')
     c = _make_client(ctx)
     out = _handle_call(c.wireguard_server_init,
-                       name, network, endpoint,
+                       name, endpoint,
+                       network=network,
+                       network_v6=network_v6,
                        listen_port=listen_port)
     click.echo(f'created WireGuard server {name!r} '
                f'(pubkey {out["server"]["public_key_b64"][:12]}...)',
@@ -1594,6 +1638,7 @@ def external_tool_group():
     See [design/ca-integration.md § Passkey RP service for external
     tools].
     """
+    # §7.3.1 CLI command tree (full enum in §14.2.2)
 
 
 @external_tool_group.command('add')

@@ -7,6 +7,8 @@ Validates:
   - Trust-store-exclusion property: validators that pin to an
     internal intermediate refuse leaves signed by external-X
   - RBAC + audit + 503 in legacy single-signer mode
+
+Tests: §2.6, §15.3
 """
 from __future__ import annotations
 
@@ -277,7 +279,10 @@ def test_msshd_bypass_pinning_refuses_external_signed_leaf(adminctx,
     listener._bypass_trust_root_pubkey = bypass_mint.cert.public_key()
 
     import asyncio
-    ok, reason = asyncio.get_event_loop().run_until_complete(
+    # Python 3.10+: get_event_loop() no longer auto-creates one in
+    # threads that don't already have a running loop. Use asyncio.run()
+    # to spin up a fresh loop for the coroutine call.
+    ok, reason = asyncio.run(
         listener._handle_bypass_injection(
             conn_id='t', mtls_principal='alice', peer_der=b'',
             bypass_cert_b64=cert_b64))

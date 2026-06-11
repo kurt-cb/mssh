@@ -1,4 +1,7 @@
-"""In-memory cert cache keyed on (fingerprint, source_ip)."""
+"""In-memory cert cache keyed on (fingerprint, source_ip).
+
+Design: §9.3.3 (see design/mssh_design_v1.md) — local cache helpers.
+"""
 from __future__ import annotations
 
 import datetime as _dt

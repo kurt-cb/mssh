@@ -1,4 +1,7 @@
-"""Unit tests for the admin handlers (RBAC, server/user/policy CRUD)."""
+"""Unit tests for the admin handlers (RBAC, server/user/policy CRUD).
+
+Tests: §4.3.6, §14.1.2
+"""
 from __future__ import annotations
 
 import base64

@@ -1,5 +1,7 @@
 """OpenSSH patches (0002 + 0003) — end-to-end test.
 
+Tests: §15.6
+
 Verifies the two upstream-targeted patches in
 ``openssh-patches/patches/`` (at the repo root):
 

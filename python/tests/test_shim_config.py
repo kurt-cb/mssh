@@ -1,4 +1,7 @@
-"""Unit tests for shim/config.py."""
+"""Unit tests for shim/config.py.
+
+Tests: §9.3.2, §13.9.7
+"""
 from __future__ import annotations
 
 import pytest

@@ -1,5 +1,7 @@
 """Cross-template equivalence — catches Bug #8.
 
+Tests: §4.3.12, §5.3.10
+
 The lab has two inner-sshd_config templates that have to agree on
 auth-critical directives:
 

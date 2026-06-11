@@ -9,6 +9,9 @@ The same detector serves both `status` (show everything) and `next`
 (show only the first thing to do). Adding a phase to the adoption
 journey is a single new ``StateNode`` here; the CLI doesn't need to
 change.
+
+Design: §7.3.6 (~/.mssh-admin/ local state and adoption-journey
+detector backing `status` / `next`).
 """
 from __future__ import annotations
 

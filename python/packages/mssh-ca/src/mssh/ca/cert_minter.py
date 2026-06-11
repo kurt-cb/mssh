@@ -1,5 +1,9 @@
 """Generate keys and mint X.509 certs.
 
+Design: §4.3.4 (see design/mssh_design_v1.md) — cert minter.
+See also: §2.2 intermediate hierarchy, §2.4 cert profiles,
+§14.5 OID arc, §14.8 profile templates.
+
 Three responsibilities:
 
 1. **CA bootstrap.** Generates the root CA + 4 named intermediates +
@@ -40,6 +44,7 @@ from cryptography.x509 import oid
 
 
 # OID arc for mssh's custom critical extensions on authz certs.
+# §14.5 OID registry — all extension OIDs in this file are defined there.
 _OID_BASE = '1.3.6.1.4.1.55555.1'
 OID_SOURCE_BIND     = x509.ObjectIdentifier(f'{_OID_BASE}.1')
 OID_SERVER_BIND     = x509.ObjectIdentifier(f'{_OID_BASE}.2')
@@ -253,6 +258,24 @@ def _issue_leaf(subject_cn: str, leaf_key,
         eku.append(oid.ExtendedKeyUsageOID.CLIENT_AUTH)
     if code_signing:
         eku.append(oid.ExtendedKeyUsageOID.CODE_SIGNING)
+    # Key Usage selection driven by the EKU set:
+    #   - serverAuth or clientAuth → digital signature + key encipherment
+    #     (the latter for legacy RSA key-exchange paths; OpenVPN with
+    #     --remote-cert-tls server checks digital_signature + keyEncipherment
+    #     unless ECDHE-only is forced)
+    #   - code-signing → digital signature alone
+    is_tls_leaf = server_auth or client_auth
+    ku = x509.KeyUsage(
+        digital_signature=True,
+        key_encipherment=is_tls_leaf,
+        content_commitment=False,
+        data_encipherment=False,
+        key_agreement=False,
+        key_cert_sign=False,
+        crl_sign=False,
+        encipher_only=False,
+        decipher_only=False,
+    )
     builder = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -263,6 +286,7 @@ def _issue_leaf(subject_cn: str, leaf_key,
         .not_valid_after(not_after)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None),
                        critical=True)
+        .add_extension(ku, critical=True)
         .add_extension(x509.ExtendedKeyUsage(eku), critical=False)
         .add_extension(
             x509.SubjectKeyIdentifier.from_public_key(leaf_key.public_key()),
@@ -413,6 +437,7 @@ def bootstrap_ca(ca_dir: str | Path, *, key_type: str = 'ec',
 
     See design/notes-pki-hierarchy.md for the design rationale.
     """
+    # §4.3.4 CA bootstrap; intermediates per §2.2
     ca_dir = Path(ca_dir)
     ca_dir.mkdir(parents=True, exist_ok=True)
     (ca_dir / 'intermediates').mkdir(exist_ok=True)
@@ -684,6 +709,8 @@ def issue_client_cert(common_name: str,
 
     See design/notes-pki-hierarchy.md for the migration plan.
     """
+    # §4.3.4 leaf mTLS client cert; profile per §14.8 client template;
+    # signed by 'auth' intermediate per §2.2
     if signing is None:
         if tls_ca_key is None or tls_ca_cert is None:
             raise TypeError(
@@ -736,6 +763,8 @@ def issue_server_cert(common_name: str,
         sans=..., root_cert=root)``. ``cert_pem`` is leaf + intermediate;
         ``ca_cert_pem`` is the root if supplied.
     """
+    # §4.3.4 leaf TLS server cert; profile per §14.8 server template;
+    # signed by 'host-mint' intermediate per §2.2
     if signing is None:
         if tls_ca_key is None or tls_ca_cert is None:
             raise TypeError(
@@ -850,6 +879,7 @@ def mint_authorization_cert(
     max_session_seconds: int | None = None,
     two_fa_evidence: str | None = None,
     ca_bypass: bool = False,
+    crl_url: str | None = None,        # R-2: CRLDP embedded if set
 ) -> tuple[x509.Certificate, str]:
     """Mint an X.509 authorization cert.
 
@@ -865,6 +895,8 @@ def mint_authorization_cert(
 
     Returns (cert, serial_hex).
     """
+    # §4.3.4 authz cert mint; profile per §14.8 authz template;
+    # OIDs per §14.5; intermediate roles per §2.2
     if signing is None:
         if signing_key is None or signing_cert is None:
             raise TypeError(
@@ -891,24 +923,69 @@ def mint_authorization_cert(
         .not_valid_after(not_after)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None),
                        critical=True)
+        # R-2: standard X.509 hardening — restrict the cert to its
+        # intended role (client-auth + digital-signature) so it
+        # cannot be presented as e.g. a server cert.
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True)
+        .add_extension(
+            x509.ExtendedKeyUsage([oid.ExtendedKeyUsageOID.CLIENT_AUTH]),
+            critical=True)
         # Critical policy extensions
         .add_extension(_utf8_ext(OID_SOURCE_BIND, source_bind), critical=True)
         .add_extension(_utf8_ext(OID_SERVER_BIND, server_bind), critical=True)
         .add_extension(_seq_utf8_ext(OID_CHANNEL_POLICY, sorted(channels)),
                        critical=True)
+        # R-2: SAN carries the alternative principal binding as an
+        # rfc822 name so external validators (non-mssh) can recognise
+        # the cert holder without parsing custom OIDs.
+        .add_extension(
+            x509.SubjectAlternativeName(
+                [x509.RFC822Name(f'{subject_username}@mssh')]),
+            critical=False)
+        # R-2: SKI helps chain walkers locate the leaf's pubkey.
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(pub),
+            critical=False)
         # AKI helps clients walk the chain to find the issuer cert.
         .add_extension(
             x509.AuthorityKeyIdentifier.from_issuer_public_key(
                 signing.key.public_key()),
             critical=False)
     )
-    if force_command:
+    # R-2: CRLDistributionPoints lets external validators discover
+    # revocation without a custom protocol. URL points at the CA's
+    # /v1/crl.pem with the issuer query parameter.
+    if crl_url:
         builder = builder.add_extension(
-            _utf8_ext(OID_FORCE_COMMAND, force_command), critical=False)
+            x509.CRLDistributionPoints([
+                x509.DistributionPoint(
+                    full_name=[x509.UniformResourceIdentifier(crl_url)],
+                    relative_name=None, reasons=None, crl_issuer=None),
+            ]),
+            critical=False)
+    if force_command:
+        # R-1: critical-when-present; a validator that ignores the
+        # extension would silently let the user out of the force-command.
+        # KNOWN_CRITICAL on the consumer side allows it.
+        builder = builder.add_extension(
+            _utf8_ext(OID_FORCE_COMMAND, force_command), critical=True)
     if environment:
+        # R-1: critical-when-present (same reason as FORCE_COMMAND).
         kv = [f'{k}={v}' for k, v in sorted(environment.items())]
         builder = builder.add_extension(
-            _seq_utf8_ext(OID_ENVIRONMENT, kv), critical=False)
+            _seq_utf8_ext(OID_ENVIRONMENT, kv), critical=True)
     if max_session_seconds is not None:
         builder = builder.add_extension(
             _int_ext(OID_MAX_SESSION, max_session_seconds), critical=False)
@@ -916,8 +993,11 @@ def mint_authorization_cert(
         builder = builder.add_extension(
             _utf8_ext(OID_2FA_EVIDENCE, two_fa_evidence), critical=False)
     if ca_bypass:
+        # R-1: marker-only extension; format is ASN.1 NULL per §14.5.
+        # Was UTF8String 'true' before; switched to NULL because the
+        # presence of the marker is the signal — no value is meaningful.
         builder = builder.add_extension(
-            _utf8_ext(OID_CA_BYPASS, 'true'), critical=True)
+            _null_ext(OID_CA_BYPASS), critical=True)
 
     cert = builder.sign(private_key=signing.key,
                         algorithm=_sig_hash_for(signing.key))
@@ -940,6 +1020,13 @@ def _seq_utf8_ext(oid_: x509.ObjectIdentifier,
 
 def _int_ext(oid_: x509.ObjectIdentifier, value: int) -> x509.UnrecognizedExtension:
     return x509.UnrecognizedExtension(oid_, _der_int(value))
+
+
+def _null_ext(oid_: x509.ObjectIdentifier) -> x509.UnrecognizedExtension:
+    # ASN.1 NULL: tag 0x05, zero-length body. Used for marker-only
+    # extensions whose presence is the signal (e.g. OID_CA_BYPASS).
+    # Design: §14.5 (OID_CA_BYPASS format = NULL).
+    return x509.UnrecognizedExtension(oid_, b'\x05\x00')
 
 
 def _der_tag(tag: int, body: bytes) -> bytes:

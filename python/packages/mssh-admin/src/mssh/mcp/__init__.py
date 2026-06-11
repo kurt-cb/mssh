@@ -15,4 +15,6 @@ credentials works for both interfaces.
 Write tools (server_add, user_add, policy_add, key-rotate, …) are
 deliberately out of scope for v1 — those carry a trust delegation that
 needs its own design conversation (see design/future-ideas.md §12).
+
+Design: §12 (mssh-mcp).
 """

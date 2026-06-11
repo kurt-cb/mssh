@@ -3,6 +3,8 @@
 These don't hit a real CA; they stub CAClient with a fake that
 returns canned shapes matching the real API. Goal is to verify
 every route renders with status 200 and the expected scaffolding.
+
+Tests: §11, §11.3.1, §11.3.2, §11.3.4
 """
 
 from __future__ import annotations
@@ -87,6 +89,7 @@ def client():
 
 
 def test_dashboard(client):
+    """Verifies §11.3.1 — dashboard renders host/user counts and sidebar."""
     r = client.get('/')
     assert r.status_code == 200
     body = r.data.decode()
@@ -99,6 +102,7 @@ def test_dashboard(client):
 
 
 def test_users_list_and_expand_panel(client):
+    """Verifies §11.3.2 — users page lists users with expandable detail panel."""
     r = client.get('/users')
     assert r.status_code == 200
     body = r.data.decode()
@@ -113,6 +117,7 @@ def test_users_list_and_expand_panel(client):
 
 
 def test_hosts_list_and_actions(client):
+    """Verifies §11.3.2 — hosts page lists servers with mTLS subject + actions."""
     r = client.get('/hosts')
     assert r.status_code == 200
     body = r.data.decode()
@@ -133,6 +138,7 @@ def test_groups_aggregation(client):
 
 
 def test_audit_renders(client):
+    """Verifies §11.3.4 — audit page renders granted/denied entries."""
     r = client.get('/audit')
     assert r.status_code == 200
     body = r.data.decode()
@@ -141,6 +147,7 @@ def test_audit_renders(client):
 
 
 def test_audit_filters_propagate(client):
+    """Verifies §11.3.4 — audit filter form preserves user-supplied values."""
     r = client.get('/audit?decision=denied&user=alice&limit=5')
     assert r.status_code == 200
     # Verify the form remembers what was queried

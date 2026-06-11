@@ -17,6 +17,12 @@ Lifecycle:
     spawn; sshd does not pick its own).
 
 This module is asyncio-friendly: ``start`` and ``stop`` are coroutines.
+
+Design: §5.3.10 + §5.3.11 (see design/mssh_design_v1.md) — hermetic
+inner sshd lifecycle. §5.3.10 covers the long-lived single-instance
+mode (InnerSshd); §5.3.11 covers per-connection mode
+(PerConnectionInnerSshd). §5.3.12 — emergency-template fallback
+posture (the banner / template-find logic).
 """
 from __future__ import annotations
 
@@ -89,6 +95,8 @@ def _render_banner(template_path: str, values: dict[str, str]) -> str:
 
 
 def _find_template() -> Path:
+    # §5.3.12 hermetic template discovery (env override → /etc/mssh →
+    # repo-walk). Missing template raises — fail-closed at startup.
     """Locate the hermetic sshd_config.template file.
 
     Checked in priority order:
@@ -157,6 +165,8 @@ class InnerSshd:
         return self._port
 
     async def start(self) -> None:
+        # §5.3.10 long-lived inner sshd boot: keys + banner + hermetic
+        # config render + sshd -D spawn + bind wait.
         if self._proc is not None and self._proc.returncode is None:
             raise InnerSshdError('already running')
 
@@ -382,6 +392,8 @@ class PerConnectionInnerSshd:
 
     async def acquire_session(self, session_id: str,
                               rendered_config: str) -> int:
+        # §5.3.11 per-connection inner-sshd spawn: cap check, port
+        # alloc, LOCAL_* marker subst, sshd -t sanity, spawn, wait.
         """Spawn a per-session sshd. Returns the port it bound.
 
         ``rendered_config`` is the per-session sshd_config text the CA
@@ -455,6 +467,7 @@ class PerConnectionInnerSshd:
 
     async def release_session(self, session_id: str, *,
                               grace: float = 2.0) -> None:
+        # §5.3.11 per-connection teardown.
         """Terminate this session's sshd + rmtree its tempdir."""
         sp = self._sessions.pop(session_id, None)
         if sp is None:

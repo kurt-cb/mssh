@@ -1,5 +1,7 @@
 """OpenSSH shim prototype — end-to-end test against unmodified ``sshd``.
 
+Tests: §9.3.4, §15.6
+
 This is the spike that answers "can mssh plug into stock OpenSSH
 without a sshd patch?". It wires our ``shim/openssh_shim.py`` into
 ``sshd_config``'s ``AuthorizedKeysCommand`` directive and runs three SSH

@@ -1,5 +1,9 @@
 """WebAuthn relying-party logic for mssh-ca.
 
+Design: §4.3.8 (admin-2FA RP) + §4.3.9 (external-tool RP).
+See design/mssh_design_v1.md. References: §13.5 (2FA layer
+contract), §13.6 (WebAuthn ceremony semantics).
+
 mssh-ca is the WebAuthn RP for two flows:
   - mssh-admin 2FA — challenging mssh-ca's own admins
   - external-tool RP — challenging end-users of separate apps
@@ -165,6 +169,7 @@ def verify_registration(*, response_json: str,
     Raises ValueError with an actionable message on failure
     (challenge mismatch, signature invalid, AAGUID not allowed,
     etc.)."""
+    # §4.3.8/§4.3.9 registration ceremony per §13.6 WebAuthn contract
     from webauthn import verify_registration_response
     from webauthn.helpers.exceptions import InvalidRegistrationResponse
 
@@ -254,6 +259,8 @@ def verify_authentication(*, response_json: str,
                             ) -> AuthenticationOutcome:
     """Verify the browser's assertion response. Raises ValueError
     on any failure."""
+    # §4.3.8/§4.3.9 assertion ceremony; §13.5 2FA-evidence consumer;
+    # §13.6 WebAuthn signature + counter validation
     import json as _json
     from webauthn import verify_authentication_response
     from webauthn.helpers.exceptions import InvalidAuthenticationResponse

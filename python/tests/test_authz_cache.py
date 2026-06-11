@@ -5,6 +5,8 @@ The msshd-side bypass-injection wiring (the bit inside
 enforce_listener._handle_bypass_injection) is exercised in the LXC
 integration suite where there's a real CA + mTLS handshake; here we
 just cover the cache module on its own.
+
+Tests: §5.3.5, §5.3.6, §13.1, §13.9.3, §14.6
 """
 from __future__ import annotations
 
@@ -310,3 +312,70 @@ def test_cap_lowered_on_construction_evicts_immediately(tmp_path):
     # First write trims down to 2.
     c2.put('newcomer', _grant('new'), source=SOURCE_CA)
     assert len(c2._entries) == 2
+
+
+# R-7 §14.6 tests — last_used_at tracking + persistence
+
+def test_r7_put_sets_last_used_at_to_injected_at(tmp_path):
+    """Verifies §14.6 — put() initializes last_used_at to injected_at."""
+    c = AuthzCache()
+    c.put('alice', _grant('srv1'), source=SOURCE_CA)
+    entry = c._entries['alice']
+    assert entry.last_used_at is not None
+    assert entry.last_used_at == entry.injected_at
+
+
+def test_r7_get_updates_last_used_at(tmp_path):
+    """Verifies §14.6 — get() bumps last_used_at on each successful hit."""
+    import time
+    c = AuthzCache()
+    c.put('alice', _grant('srv1'), source=SOURCE_CA)
+    first_use = c._entries['alice'].last_used_at
+    time.sleep(0.01)
+    c.get('alice')
+    second_use = c._entries['alice'].last_used_at
+    assert second_use > first_use
+
+
+def test_r7_last_used_at_round_trips_through_persistence(tmp_path):
+    """Verifies §14.6 — last_used_at survives serialize → load.
+
+    Note: on-disk format is second-precision (per §14.6 ISO-8601 'Z'
+    format), so the round-trip drops sub-second components.
+    """
+    p = tmp_path / 'cache.json'
+    c1 = AuthzCache(persist_path=p)
+    c1.put('alice', _grant('srv1'), source=SOURCE_CA)
+    original = c1._entries['alice'].last_used_at.replace(microsecond=0)
+    c2 = AuthzCache(persist_path=p)
+    assert c2._entries['alice'].last_used_at == original
+
+
+def test_r7_load_pre_r7_file_falls_back_to_injected_at(tmp_path):
+    """Verifies §14.6 — files written before R-7 (no last_used_at field)
+    load cleanly with last_used_at defaulted to injected_at.
+    """
+    import base64, datetime as _dt
+    # Hand-craft a pre-R-7 entry (no last_used_at key).
+    p = tmp_path / 'cache.json'
+    grant = _grant('srv1')
+    body = {
+        'version': 1,
+        'last_crl_seq': 0,
+        'last_crl_seqs': {},
+        'entries': [{
+            'principal': 'alice',
+            'cert_der_b64': base64.b64encode(grant.cert_der).decode('ascii'),
+            'serial': grant.serial,
+            'not_after': grant.not_after.strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'inner_sshd_config': '',
+            'protocol_version': '',
+            'source': SOURCE_CA,
+            'injected_at': '2026-05-22T12:00:00Z',
+            # NO last_used_at key (pre-R-7 file).
+        }],
+    }
+    p.write_text(json.dumps(body))
+    c = AuthzCache(persist_path=p)
+    entry = c._entries['alice']
+    assert entry.last_used_at == entry.injected_at

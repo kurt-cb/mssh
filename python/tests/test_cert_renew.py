@@ -1,9 +1,11 @@
-"""Tests for §25 cert renewal handler.
+"""Tests for §4.3.10 + §13.4 cert renewal handler.
 
 The renewal endpoint takes the cert being renewed as the mTLS
 client cert (passed as the ``presented_cert`` arg in unit-test
 land). These tests use real x509 certs minted via the cert_minter
 helpers, then call ``admin_handlers.cert_renew`` directly.
+
+Tests: §4.3.10, §13.4
 """
 
 from __future__ import annotations

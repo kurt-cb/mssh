@@ -9,6 +9,8 @@ bootstrap_ca now produces:
     that haven't migrated to load_intermediates()
 
 See design/notes-pki-hierarchy.md.
+
+Tests: §2.2
 """
 
 from __future__ import annotations

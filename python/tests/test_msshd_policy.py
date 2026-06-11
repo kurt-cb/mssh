@@ -3,7 +3,10 @@ and translating extensions to OpenSSH critical-options.
 
 The CA-minting machinery is in ca.cert_minter; we reuse it here so the
 tests stay tied to whatever the CA actually emits (no hand-rolled
-fixtures that can drift)."""
+fixtures that can drift).
+
+Tests: §5.3.4, §4.3.3
+"""
 from __future__ import annotations
 
 import datetime as _dt

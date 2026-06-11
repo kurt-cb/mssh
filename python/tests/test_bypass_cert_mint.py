@@ -9,6 +9,8 @@
 
 The actual msshd-side injection (mTLS handshake + header parsing +
 cache write) is exercised in the LXC integration suite.
+
+Tests: §13.2, §4.3.6
 """
 from __future__ import annotations
 

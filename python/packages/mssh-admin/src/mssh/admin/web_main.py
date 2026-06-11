@@ -3,6 +3,10 @@
 Starts the Flask admin portal bound to 127.0.0.1 by default. See
 design/future-ideas.md §26 for the deployment model (mssh local-port-
 forward to this listener; never expose it on a public address).
+
+Design: §11 (mssh-admin-web) + §11.3.4 (auth model — relies on the
+mssh-mediated localhost tunnel for caller identity; the portal itself
+binds to 127.0.0.1 only).
 """
 
 from __future__ import annotations

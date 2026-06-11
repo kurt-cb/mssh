@@ -1,5 +1,7 @@
 """Emergency-cert / break-glass test.
 
+Tests: §5.3.12, §16.2
+
 Models the design's "stolen credential is useless if you can't reach the CA"
 property in reverse: when the CA is genuinely unreachable, an
 administrator-provisioned, long-lived authorization cert (the emergency

@@ -1,1 +1,4 @@
-"""mssh-admin management CLI."""
+"""mssh-admin management CLI.
+
+Design: §7 (mssh-admin CLI).
+"""

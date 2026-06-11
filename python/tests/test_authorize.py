@@ -1,4 +1,7 @@
-"""Unit tests for the authorize handler (logic-only, no HTTP)."""
+"""Unit tests for the authorize handler (logic-only, no HTTP).
+
+Tests: §4.3.1, §3.2
+"""
 from __future__ import annotations
 
 import base64
@@ -81,6 +84,67 @@ def test_grant_writes_audit(ctx, test_key):
     handle_authorize(ctx, 'CN=srv1', _body(test_key))
     entries = ctx.audit.read_all()
     assert any(e.get('decision') == 'granted' for e in entries)
+
+
+# R-3 envelope normalization tests. Tests: §14.1, §14.1.1
+
+def test_r3_granted_response_carries_envelope(ctx, test_key):
+    """Verifies §14.1 — granted response carries request_id, ca_server_id,
+    issued_at, result, protocol_version envelope fields."""
+    _basic_setup(ctx, test_key)
+    status, body = handle_authorize(ctx, 'CN=srv1', _body(test_key))
+    assert status == 200
+    # Envelope fields (R-3 additions).
+    assert body['result'] == 'granted'
+    assert body['request_id']
+    assert len(body['request_id']) == 32      # uuid4 hex
+    assert body['ca_server_id'] == 'mssh-ca'
+    assert body['issued_at']
+    assert body['protocol_version']
+    # Legacy field still emitted for back-compat (R-3 additive).
+    assert body['status'] == 'granted'
+
+
+def test_r3_granted_response_wraps_credentials(ctx, test_key):
+    """Verifies §14.1.1 — granted response wraps cert material in credentials:.
+
+    Both flat keys (legacy) and credentials wrapper (canonical) emitted.
+    """
+    _basic_setup(ctx, test_key)
+    status, body = handle_authorize(ctx, 'CN=srv1', _body(test_key))
+    assert status == 200
+    # Canonical credentials wrapper (R-3).
+    cred = body['credentials']
+    assert cred['cert'] == body['cert']             # both flat + wrapped
+    assert cred['serial'] == body['serial']
+    assert cred['not_after'] == body['not_after']
+    assert cred['policy_summary'] == body['policy_summary']
+    # cert_pem is operator-facing addition.
+    assert cred['cert_pem']
+    assert cred['cert_pem'].startswith('-----BEGIN CERTIFICATE-----')
+
+
+def test_r3_denied_response_carries_envelope_and_denied_reason(ctx, test_key):
+    """Verifies §14.1 — denied responses carry envelope + denied_reason.
+
+    Both legacy `reason` and canonical `denied_reason` are emitted.
+    """
+    # No policy → policy_mismatch deny.
+    ctx.enrollment.add_server('srv1', 'CN=srv1', ['prod'])
+    ctx.enrollment.add_user('alice')
+    ctx.enrollment.add_user_key('alice',
+        KeyBinding(test_key.fingerprint, 'pubkey', 'ssh-ed25519'))
+    status, body = handle_authorize(ctx, 'CN=srv1', _body(test_key))
+    assert status == 403
+    # Envelope (R-3).
+    assert body['result'] == 'denied'
+    assert body['request_id']
+    assert body['ca_server_id']
+    assert body['issued_at']
+    # Both legacy + canonical deny-reason keys.
+    assert body['status'] == 'denied'
+    assert body['reason']                            # legacy
+    assert body['denied_reason'] == body['reason']   # canonical (R-3)
 
 
 def test_source_cidr_deny_path(ctx, test_key):

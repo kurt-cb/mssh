@@ -8,6 +8,8 @@ Covers:
   - CRLSync.sync_now: catch-up loop, applies revocations, advances
     last_crl_seq, stops on error
   - CRLSync handles empty pages / CA giving up
+
+Tests: §5.3.8, §5.3.9, §13.3, §13.9.4
 """
 from __future__ import annotations
 
@@ -49,7 +51,9 @@ def test_invalidate_by_serial_drops_matching_entry():
 
 
 def test_invalidate_by_serial_is_source_agnostic():
-    """A revoked bypass cert is dropped exactly the same as a revoked
+    """Verifies §13.3 — CRL invalidation is source-agnostic (bypass and CA entries treated the same).
+
+    A revoked bypass cert is dropped exactly the same as a revoked
     CA-grant cert. CRL applies don't care about source."""
     c = AuthzCache()
     c.put('alice', _grant('abc123'), source=SOURCE_BYPASS)
@@ -147,6 +151,7 @@ def _make_entry(seq: int, serials: list[str]) -> dict:
 
 @pytest.mark.asyncio
 async def test_sync_invalidates_revoked_serial(tmp_path):
+    """Verifies §5.3.8 — sync_now drops cached entry matching a CRL revocation."""
     c = AuthzCache()
     c.put('alice', _grant('abc'), source=SOURCE_CA)
 
@@ -163,7 +168,9 @@ async def test_sync_invalidates_revoked_serial(tmp_path):
 
 @pytest.mark.asyncio
 async def test_sync_pages_through_multiple_fetches(tmp_path):
-    """sync_now keeps fetching until last_applied catches up to
+    """Verifies §5.3.8 — paged catch-up loop walks (last, current] in fetch_limit chunks.
+
+    sync_now keeps fetching until last_applied catches up to
     current_crl_seq, in fetch_limit-sized chunks."""
     c = AuthzCache()
     c.put('alice', _grant('abc'), source=SOURCE_CA)

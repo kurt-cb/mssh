@@ -2,6 +2,8 @@
 
 Stubs the broker client (no real HTTP) and uses the `webauthn`
 library's stable testing primitives where applicable.
+
+Tests: §4.3.8, §13.5
 """
 
 from __future__ import annotations
@@ -69,6 +71,7 @@ def target_admin(adminctx):
 # ---- 503 when broker not configured -----------------------------------
 
 def test_passkey_503_when_unconfigured(ca_dir, tmp_path):
+    """Verifies §13.5 — passkey endpoints return 503 when broker not configured."""
     enroll = Enrollment(ca_dir / 'enrollment.yaml')
     audit = AuditLog(ca_dir / 'audit.jsonl')
     tls_ca_key = cert_minter.load_private_key(ca_dir / 'tls-ca-key.pem')
@@ -91,6 +94,7 @@ def test_passkey_503_when_unconfigured(ca_dir, tmp_path):
 
 def test_enroll_begin_calls_broker_and_returns_url(adminctx, superuser,
                                                      target_admin):
+    """Verifies §4.3.8 — enroll-begin contacts broker and returns ceremony URL."""
     status, body = admin_handlers.passkey_admin_enroll(
         adminctx, superuser, {'admin_name': target_admin})
     assert status == 201
@@ -113,7 +117,7 @@ def test_enroll_begin_unknown_admin_404(adminctx, superuser):
 
 
 def test_enroll_begin_requires_superuser(adminctx, target_admin):
-    """Auditor cannot enroll passkeys."""
+    """Verifies §4.3.8 — auditors cannot enroll passkeys (superuser-only)."""
     adminctx.enrollment.add_admin('audit', 'auditor', 'CN=audit')
     auditor = adminctx.enrollment.admins['audit']
     status, body = admin_handlers.passkey_admin_enroll(
@@ -145,6 +149,7 @@ def test_list_returns_registered_credentials(adminctx, superuser, target_admin):
 
 
 def test_revoke_invalidates_2fa_cache(adminctx, superuser, target_admin):
+    """Verifies §4.3.8 — revoking a passkey invalidates the 2FA cache entry."""
     adminctx.enrollment.add_admin_passkey(target_admin, PasskeyCredential(
         credential_id='abc123', public_key='pk', aaguid='', sign_count=0))
     adminctx.passkey_2fa_cache[target_admin] = '2099-01-01T00:00:00Z'
@@ -222,8 +227,11 @@ def test_check_2fa_returns_challenge_on_miss(adminctx, superuser, target_admin):
 
 
 def test_check_2fa_cache_hit(adminctx, superuser):
-    """When the admin has a recent verified 2FA, the check returns
-    None (skip the challenge)."""
+    """Verifies §13.5 — recent 2FA verification skips the passkey challenge.
+
+    When the admin has a recent verified 2FA, the check returns
+    None (skip the challenge).
+    """
     from datetime import datetime, timezone
     now_iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     adminctx.passkey_2fa_cache['boot'] = now_iso
@@ -253,8 +261,11 @@ def test_check_2fa_503_when_broker_unconfigured(ca_dir):
 
 
 def test_check_2fa_admin_has_no_credentials_403(adminctx, superuser):
-    """If the admin needs 2FA but has no enrolled passkey, refuse —
-    they can't satisfy it."""
+    """Verifies §13.5 — 2FA required but no enrolled passkey returns 403.
+
+    If the admin needs 2FA but has no enrolled passkey, refuse —
+    they can't satisfy it.
+    """
     policy = Policy(id='p1', require_2fa='passkey')
     out = admin_handlers.passkey_check_2fa(adminctx, superuser, policy)
     assert out is not None

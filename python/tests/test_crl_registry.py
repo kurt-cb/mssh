@@ -4,6 +4,8 @@ The CRLRegistry wraps multiple CRLStores keyed by intermediate
 short_name. Per-issuer logs let revocation entries from one
 intermediate not interfere with serial lookups in another (serials
 are issuer-scoped, not globally unique).
+
+Tests: §4.3.5, §13.3, §2.5
 """
 from __future__ import annotations
 

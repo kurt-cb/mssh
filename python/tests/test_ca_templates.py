@@ -1,4 +1,7 @@
-"""Unit tests for mssh.ca.templates — the template store + resolver."""
+"""Unit tests for mssh.ca.templates — the template store + resolver.
+
+Tests: §4.3.12
+"""
 from __future__ import annotations
 
 from pathlib import Path

@@ -1,5 +1,8 @@
 """Certificate Revocation List (CRL) for the mssh CA.
 
+Design: §4.3.5 (see design/mssh_design_v1.md) — per-issuer CRL registry.
+See also: §13.3 revocation propagation, §14.6 on-disk CRL schema.
+
 Sequence-based, append-only CRL log. Each entry is one revocation
 event:
 
@@ -92,6 +95,8 @@ class CRLStore:
         but generally meaningless — operators normally pass at least
         one serial.
         """
+        # §4.3.5 CRL append; on-disk JSONL per §14.6;
+        # bump drives §13.3 propagation to msshd caches
         seq_serials = [str(s).strip().lower() for s in serials if s]
         with self._lock:
             new_seq = self._current_seq + 1
@@ -127,6 +132,8 @@ class CRLStore:
                     limit: Optional[int] = None) -> list[CRLEntry]:
         """Return entries with ``seq > after_seq``, optionally bounded
         by ``limit``. Entries are returned in seq-ascending order."""
+        # §4.3.5 CRL fetch; §13.3 propagation feed read by msshd
+        # crl_sync
         if not self.path.exists():
             return []
         out: list[CRLEntry] = []
@@ -205,6 +212,7 @@ class CRLRegistry:
         self._lock = threading.Lock()
 
     def for_issuer(self, issuer: str) -> CRLStore:
+        # §4.3.5 per-issuer store; rotation creates fresh log per §14.6
         """Return the CRLStore for ``issuer``, creating it lazily.
 
         ``issuer`` is the intermediate's short_name ('user-mint',

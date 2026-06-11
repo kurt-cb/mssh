@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -33,13 +34,106 @@ SSHRT_ALPINE  = 'mssh-lxc-alpine'
 ALL_SSH_HOSTS = [SSHRT_U1, SSHRT_U2, SSHRT_U3, SSHRT_ALPINE]
 ALL_CONTAINERS = [CA_HOST] + ALL_SSH_HOSTS
 
+
+# ---------------------------------------------------------------------------
+# Container CLI binary auto-detection (incus vs lxc)
+# ---------------------------------------------------------------------------
+#
+# Both incus and LXD ship a CLI with the same surface (`init`, `launch`,
+# `exec`, `file push`, `delete`, `publish`, `image info`, ...). LXD's
+# public version is EOL; new installs are increasingly incus. On some
+# hosts `lxc` is aliased to `incus`; on others both are present;
+# on others only one is.
+#
+# `_resolve_cli_bin()` picks whichever binary `which` finds first:
+#   1. `incus` (preferred — LXD public is EOL).
+#   2. `lxc` (works as either the LXD CLI or an incus alias).
+# If neither is in $PATH the test will fail at first invocation with a
+# clean FileNotFoundError.
+import shutil as _shutil
+
+
+def _resolve_cli_bin() -> str:
+    """Return the container-CLI binary name to invoke."""
+    if _shutil.which('incus'):
+        return 'incus'
+    if _shutil.which('lxc'):
+        return 'lxc'
+    # Fall back to 'lxc' so subprocess.run produces a clean
+    # FileNotFoundError downstream rather than crashing module import.
+    return 'lxc'
+
+
+CLI_BIN: str = _resolve_cli_bin()
+
+
 # Upstream image sources used by ensure_fixed_images() to build the local
-# `mssh-*-fixed` aliases. The official `ubuntu:22.04` cloud image runs
-# cloud-init + apt-daily.timer + unattended-upgrades on first boot and is
-# the reason a fresh container can fail wait_for_apt_quiescent. The local
-# fixed image is prebaked with those services disabled.
-UBUNTU_IMAGE_UPSTREAM = 'ubuntu:22.04'
-ALPINE_IMAGE_UPSTREAM = 'images:alpine/3.21'
+# `mssh-*-fixed` aliases. The Ubuntu jammy image runs cloud-init +
+# apt-daily.timer + unattended-upgrades on first boot and is the reason a
+# fresh container can fail wait_for_apt_quiescent. The local fixed image is
+# prebaked with those services disabled.
+#
+# Image-path note (2026-05-22): the upstream image references differ
+# between LXD and incus deployments:
+#   - LXD ships an `ubuntu:` remote pointing at
+#     cloud-images.ubuntu.com; `ubuntu:22.04` resolves there.
+#   - Incus does NOT configure `ubuntu:` by default, but both LXD and
+#     incus ship the `images:` remote (images.linuxcontainers.org)
+#     where the same image lives at `images:ubuntu/22.04`.
+# `_resolve_upstream_image()` probes each candidate via `lxc image info`
+# and caches the first one that works, so test code stays portable
+# without depending on which container backend the host has.
+_UBUNTU_CANDIDATES = ('images:ubuntu/22.04', 'ubuntu:22.04')
+_ALPINE_CANDIDATES = ('images:alpine/3.21',)
+
+
+def _resolve_upstream_image(candidates: tuple[str, ...]) -> str:
+    """Probe candidate image paths and return the first that resolves.
+
+    Falls back to the first candidate if none probe positive (callers
+    will get a clean error from `lxc launch` rather than a stale-
+    candidate cache).
+    """
+    for cand in candidates:
+        r = subprocess.run([CLI_BIN, 'image', 'info', cand],
+                           capture_output=True, timeout=10)
+        if r.returncode == 0:
+            return cand
+    return candidates[0]
+
+
+_UBUNTU_IMAGE_UPSTREAM_CACHED: str | None = None
+_ALPINE_IMAGE_UPSTREAM_CACHED: str | None = None
+
+
+def _ubuntu_upstream() -> str:
+    global _UBUNTU_IMAGE_UPSTREAM_CACHED
+    if _UBUNTU_IMAGE_UPSTREAM_CACHED is None:
+        _UBUNTU_IMAGE_UPSTREAM_CACHED = _resolve_upstream_image(_UBUNTU_CANDIDATES)
+    return _UBUNTU_IMAGE_UPSTREAM_CACHED
+
+
+def _alpine_upstream() -> str:
+    global _ALPINE_IMAGE_UPSTREAM_CACHED
+    if _ALPINE_IMAGE_UPSTREAM_CACHED is None:
+        _ALPINE_IMAGE_UPSTREAM_CACHED = _resolve_upstream_image(_ALPINE_CANDIDATES)
+    return _ALPINE_IMAGE_UPSTREAM_CACHED
+
+
+# Backward-compat string constants. Eagerly resolved at import time so
+# old callers that pulled the value at module load still see the right
+# string. If neither `lxc` nor `incus` is installed the resolution is a
+# no-op and the constants hold the first candidate (which will fail at
+# `lxc launch` time with a clear error).
+def _safe_resolve(cands: tuple[str, ...]) -> str:
+    try:
+        return _resolve_upstream_image(cands)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return cands[0]
+
+
+UBUNTU_IMAGE_UPSTREAM = _safe_resolve(_UBUNTU_CANDIDATES)
+ALPINE_IMAGE_UPSTREAM = _safe_resolve(_ALPINE_CANDIDATES)
 
 # Local image aliases the tests reference. Built once by ensure_fixed_images()
 # and reused across runs. Rebuild with MSSH_REBUILD_FIXED=1 in the env.
@@ -59,7 +153,7 @@ CA_PORT = 8443
 def lxc(*args: str, timeout: int = 180,
         check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ['lxc', *args], check=check, capture_output=True,
+        [CLI_BIN, *args], check=check, capture_output=True,
         text=True, timeout=timeout,
     )
 
@@ -68,7 +162,7 @@ def lxc_exec(container: str, *cmd: str, check: bool = True,
              timeout: int = 120,
              input_text: str | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ['lxc', 'exec', container, '--', *cmd],
+        [CLI_BIN, 'exec', container, '--', *cmd],
         check=check, capture_output=True, text=True,
         timeout=timeout, input=input_text,
     )
@@ -80,7 +174,11 @@ def push_text(container: str, content: str, remote_path: str,
         f.write(content)
         local = f.name
     try:
-        subprocess.run(['lxc', 'file', 'push', local,
+        # --create-dirs: incus on a stopped container fails the push
+        # when the parent dir doesn't exist (different from LXD's
+        # default behavior). The flag is a no-op when the dir does
+        # exist, so it's safe to always pass.
+        subprocess.run([CLI_BIN, 'file', 'push', '--create-dirs', local,
                         f'{container}{remote_path}'],
                        check=True, capture_output=True)
     finally:
@@ -93,7 +191,8 @@ def push_text(container: str, content: str, remote_path: str,
 
 def push_file(container: str, local_path: str | Path, remote_path: str,
               mode: str | None = None, owner: str | None = None) -> None:
-    subprocess.run(['lxc', 'file', 'push', str(local_path),
+    subprocess.run([CLI_BIN, 'file', 'push', '--create-dirs',
+                    str(local_path),
                     f'{container}{remote_path}'],
                    check=True, capture_output=True)
     if mode:
@@ -104,7 +203,7 @@ def push_file(container: str, local_path: str | Path, remote_path: str,
 
 def pull_file(container: str, remote_path: str,
               local_path: str | Path) -> None:
-    subprocess.run(['lxc', 'file', 'pull',
+    subprocess.run([CLI_BIN, 'file', 'pull',
                     f'{container}{remote_path}', str(local_path)],
                    check=True, capture_output=True)
 
@@ -112,7 +211,7 @@ def pull_file(container: str, remote_path: str,
 def get_ip(container: str, max_wait: int = 120) -> str:
     deadline = time.monotonic() + max_wait
     while time.monotonic() < deadline:
-        r = subprocess.run(['lxc', 'list', container, '--format', 'json'],
+        r = subprocess.run([CLI_BIN, 'list', container, '--format', 'json'],
                            capture_output=True, text=True)
         data = json.loads(r.stdout or '[]')
         if data:
@@ -296,22 +395,201 @@ def push_source(container: str, app_root: Path) -> None:
 
 def lxc_available() -> bool:
     try:
-        r = subprocess.run(['lxc', 'version'], capture_output=True, timeout=5)
+        r = subprocess.run([CLI_BIN, 'version'], capture_output=True, timeout=5)
         return r.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
 # ---------------------------------------------------------------------------
+# Preflight: catch developer-environment gotchas BEFORE the session-scoped
+# fixture spends 4 minutes provisioning containers only to fail.
+# ---------------------------------------------------------------------------
+#
+# These checks address the "lxc/incus is installed but the host is
+# configured in a way that breaks container DHCP / networking" class of
+# problems. Examples:
+#
+#   - On Fedora/RHEL: firewalld's default zone has `lxdbr0` outside its
+#     known-interfaces list, so the trailing `reject with icmpx
+#     admin-prohibited` blocks UDP/67 DHCP DISCOVER from the container
+#     to the host's dnsmasq. Containers boot with IPv6 only, no IPv4,
+#     and `get_ip()` times out 4 minutes into the fixture.
+#   - The `lxc` binary is present but unconfigured (no `incus admin init`
+#     / `lxd init` run), so launches fail with "no storage pool".
+#
+# None of these are mssh runtime concerns — they only affect developers
+# running the integration suite. So the preflight surfaces a clear
+# remediation message and skips the lxc-marked tests cleanly, rather
+# than burning fixture time on a doomed run.
+
+
+@dataclass
+class _PreflightIssue:
+    """One LXC-setup issue surfaced by `lxc_preflight()`."""
+    title: str
+    detail: str
+    remediation: str
+
+    def render(self) -> str:
+        return (f'  • {self.title}\n'
+                f'    Why: {self.detail}\n'
+                f'    Fix: {self.remediation}\n')
+
+
+def _preflight_cli_binary() -> _PreflightIssue | None:
+    if _shutil.which(CLI_BIN) is None:
+        return _PreflightIssue(
+            title=f'{CLI_BIN!r} not found in PATH',
+            detail='LXC tests need either the `incus` or `lxc` CLI '
+                   '(incus preferred; LXD public is EOL).',
+            remediation='Fedora:  sudo dnf install incus      and    '
+                        'sudo systemctl enable --now incus\n'
+                        '    Debian:  sudo apt install incus\n'
+                        '    Or set MSSH_CONTAINER_CLI=<bin> to override.')
+    return None
+
+
+def _preflight_cli_init() -> _PreflightIssue | None:
+    """`incus admin init` (or `lxd init`) populated a storage pool +
+    default profile + lxdbr0 bridge. Without it, `lxc launch` fails."""
+    try:
+        r = subprocess.run([CLI_BIN, 'network', 'show', 'lxdbr0'],
+                           capture_output=True, text=True, timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None                  # _preflight_cli_binary covers this
+    if r.returncode != 0:
+        return _PreflightIssue(
+            title='Default bridge `lxdbr0` is not present',
+            detail=f'{CLI_BIN} network show lxdbr0 → exit {r.returncode}.',
+            remediation=f'Run:  sudo {CLI_BIN} admin init      '
+                        f'(accept defaults).')
+    return None
+
+
+def _preflight_dhcp_on_bridge(probe_timeout: int = 20) -> _PreflightIssue | None:
+    """Launch a throwaway container and confirm it gets an IPv4 address
+    within `probe_timeout` seconds. Catches the firewalld-on-Fedora
+    case where UDP/67 DHCP is blocked on lxdbr0.
+
+    Returns None on success; otherwise a clear remediation message.
+    """
+    probe = 'mssh-preflight-dhcp'
+    # Best-effort cleanup of any stale probe container.
+    subprocess.run([CLI_BIN, 'delete', '--force', probe],
+                   capture_output=True)
+    try:
+        r = subprocess.run(
+            [CLI_BIN, 'launch', UBUNTU_IMAGE_UPSTREAM, probe,
+             '--config', 'security.privileged=true'],
+            capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            return _PreflightIssue(
+                title=f'{CLI_BIN} launch failed during preflight',
+                detail=r.stderr.strip() or r.stdout.strip(),
+                remediation='Verify storage pool / profile config: '
+                            f'`{CLI_BIN} profile show default`.')
+        # Poll for an IPv4 address.
+        import time as _time
+        deadline = _time.time() + probe_timeout
+        last_state = ''
+        while _time.time() < deadline:
+            j = subprocess.run(
+                [CLI_BIN, 'list', probe, '--format', 'json'],
+                capture_output=True, text=True, timeout=10)
+            if j.returncode == 0:
+                try:
+                    info = json.loads(j.stdout)
+                    if info and info[0].get('state'):
+                        net = info[0]['state'].get('network') or {}
+                        for _ifname, nif in net.items():
+                            for addr in nif.get('addresses') or []:
+                                if (addr.get('family') == 'inet'
+                                        and addr.get('scope') == 'global'):
+                                    return None  # ✓ DHCP works
+                        last_state = (info[0]['state'].get('status') or '')
+                except (ValueError, KeyError):
+                    pass
+            _time.sleep(1)
+        # Timed out without an IPv4 — likely firewalld on Fedora.
+        is_fedora = Path('/etc/fedora-release').exists()
+        if is_fedora:
+            fix = ('Fedora / firewalld is blocking UDP/67 (DHCP DISCOVER) '
+                   'on lxdbr0:\n'
+                   '      sudo firewall-cmd --zone=trusted '
+                   '--change-interface=lxdbr0 --permanent\n'
+                   '      sudo firewall-cmd --reload\n'
+                   '    Or, more narrowly, allow DHCP on the bridge:\n'
+                   "      sudo firewall-cmd --permanent --zone=public "
+                   "--add-rich-rule='rule family=\"ipv4\" source "
+                   "address=\"10.31.237.0/24\" port port=\"67\" "
+                   "protocol=\"udp\" accept'")
+        else:
+            fix = ('Check your firewall / nftables config — DHCP '
+                   '(UDP/67) traffic to the host on lxdbr0 must reach '
+                   'the bridge\'s dnsmasq.')
+        return _PreflightIssue(
+            title=f'Probe container booted but never got an IPv4 '
+                  f'(waited {probe_timeout}s, last_state={last_state!r})',
+            detail='IPv6 SLAAC typically works (multicast, not routed). '
+                   'IPv4 needs DHCP DISCOVER → dnsmasq on the host. The '
+                   'host firewall is the usual culprit.',
+            remediation=fix)
+    finally:
+        subprocess.run([CLI_BIN, 'delete', '--force', probe],
+                       capture_output=True)
+
+
+def lxc_preflight(skip_dhcp_probe: bool = False) -> list[_PreflightIssue]:
+    """Return a list of LXC-setup issues that would break the test
+    fixture. Empty list = environment looks healthy. Each issue carries
+    a clear remediation string.
+
+    `skip_dhcp_probe`: set True to skip the (~20s) container launch
+    used to test DHCP. Useful when the caller already knows DHCP works
+    or doesn't want to spend the time.
+    """
+    issues: list[_PreflightIssue] = []
+    if (bin_issue := _preflight_cli_binary()):
+        issues.append(bin_issue)
+        return issues                # everything else depends on the CLI
+    if (init_issue := _preflight_cli_init()):
+        issues.append(init_issue)
+        # don't return — DHCP probe may also have something to say
+    if not skip_dhcp_probe and not issues:
+        if (dhcp_issue := _preflight_dhcp_on_bridge()):
+            issues.append(dhcp_issue)
+    return issues
+
+
+def render_preflight_banner(issues: list[_PreflightIssue]) -> str:
+    """Format preflight issues as a single banner string for skip
+    messages / fixture errors.
+    """
+    if not issues:
+        return ''
+    lines = [
+        '',
+        '─' * 70,
+        f'  LXC test preflight detected {len(issues)} issue(s):',
+        '',
+    ]
+    for issue in issues:
+        lines.append(issue.render())
+    lines.append('─' * 70)
+    return '\n'.join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Fixed base images: prebake Ubuntu + Alpine into local aliases
 # ---------------------------------------------------------------------------
 #
-# The official `ubuntu:22.04` cloud image runs cloud-init on first boot,
-# which in turn fires apt-get update, writes netplan config, sets up the
-# default `ubuntu` user, and triggers unattended-upgrades. None of that is
-# load-bearing for these test containers — LXD provides networking, we
-# never log in as `ubuntu`, and we run our own apt-get. But cloud-init's
-# first-boot apt activity is what races wait_for_apt_quiescent.
+# The Ubuntu jammy cloud image runs cloud-init on first boot, which in
+# turn fires apt-get update, writes netplan config, sets up the default
+# `ubuntu` user, and triggers unattended-upgrades. None of that is
+# load-bearing for these test containers — LXD/incus provides networking,
+# we never log in as `ubuntu`, and we run our own apt-get. But
+# cloud-init's first-boot apt activity is what races wait_for_apt_quiescent.
 #
 # The fix: `lxc init` (not `launch`) so the container exists but isn't
 # started, push `/etc/cloud/cloud-init.disabled` into the rootfs along
@@ -330,13 +608,13 @@ def lxc_available() -> bool:
 
 def _image_exists(alias: str) -> bool:
     """Return True if a local image with the given alias is present."""
-    r = subprocess.run(['lxc', 'image', 'info', alias],
+    r = subprocess.run([CLI_BIN, 'image', 'info', alias],
                        capture_output=True, text=True)
     return r.returncode == 0
 
 
 def _build_ubuntu_fixed() -> None:
-    """Prebake `mssh-ubuntu-fixed` from `ubuntu:22.04`.
+    """Prebake `mssh-ubuntu-fixed` from `images:ubuntu/22.04` (LXD/incus portable).
 
     Disables cloud-init *in the rootfs before first start* so first-boot
     apt-get activity never happens. Then masks the remaining periodic
@@ -344,7 +622,7 @@ def _build_ubuntu_fixed() -> None:
     ~1 minute one-time cost — the cloud-init wait is gone.
     """
     tmp = 'mssh-prebake-ubuntu'
-    subprocess.run(['lxc', 'delete', '--force', tmp], capture_output=True)
+    subprocess.run([CLI_BIN, 'delete', '--force', tmp], capture_output=True)
 
     # `lxc init` creates the container without starting it. We modify the
     # rootfs before any service can run, so cloud-init never fires its
@@ -474,7 +752,7 @@ PREF
         # loop-on-ext4 slows the pack. 20-minute ceiling is generous.
         lxc('publish', tmp, '--alias', UBUNTU_FIXED_ALIAS, timeout=1200)
     finally:
-        subprocess.run(['lxc', 'delete', '--force', tmp], capture_output=True)
+        subprocess.run([CLI_BIN, 'delete', '--force', tmp], capture_output=True)
 
 
 def _build_alpine_fixed() -> None:
@@ -485,7 +763,7 @@ def _build_alpine_fixed() -> None:
     bake in test tools.
     """
     tmp = 'mssh-prebake-alpine'
-    subprocess.run(['lxc', 'delete', '--force', tmp], capture_output=True)
+    subprocess.run([CLI_BIN, 'delete', '--force', tmp], capture_output=True)
 
     print(f'  launching {ALPINE_IMAGE_UPSTREAM} as {tmp}',
           file=sys.stderr, flush=True)
@@ -509,7 +787,7 @@ def _build_alpine_fixed() -> None:
               file=sys.stderr, flush=True)
         lxc('publish', tmp, '--alias', ALPINE_FIXED_ALIAS, timeout=600)
     finally:
-        subprocess.run(['lxc', 'delete', '--force', tmp], capture_output=True)
+        subprocess.run([CLI_BIN, 'delete', '--force', tmp], capture_output=True)
 
 
 def ensure_fixed_images(rebuild: bool = False) -> None:
@@ -522,7 +800,7 @@ def ensure_fixed_images(rebuild: bool = False) -> None:
     """
     if rebuild or os.environ.get('MSSH_REBUILD_FIXED') == '1':
         for alias in (UBUNTU_FIXED_ALIAS, ALPINE_FIXED_ALIAS):
-            subprocess.run(['lxc', 'image', 'delete', alias],
+            subprocess.run([CLI_BIN, 'image', 'delete', alias],
                            capture_output=True)
 
     if not _image_exists(UBUNTU_FIXED_ALIAS):
@@ -572,7 +850,7 @@ def pull_diagnostics(containers: list[str],
 
     for container in containers:
         # Skip containers that aren't running (e.g. failed before launch).
-        r = subprocess.run(['lxc', 'info', container],
+        r = subprocess.run([CLI_BIN, 'info', container],
                            capture_output=True, text=True)
         if r.returncode != 0:
             continue

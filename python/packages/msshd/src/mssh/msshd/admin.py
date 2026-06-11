@@ -11,6 +11,10 @@ Subcommands:
 
 Future (Phase 1B):
   init / rotate-ca / verify (placeholders today).
+
+Design: §5.3.14 (see design/mssh_design_v1.md) — msshd-admin server-side
+diagnostic CLI (lint, status, authz-cache status). Reads only on-disk
+state; never contacts the CA.
 """
 from __future__ import annotations
 
@@ -86,6 +90,7 @@ def _state_dir() -> str:
 
 
 def cmd_authz_cache_status(args: argparse.Namespace) -> int:
+    # §5.3.14 authz-cache diagnostic: read §14.6 persistence JSON.
     """Inspect the persisted authz cache. Useful for incident response
     (which principals are cached, how many bypass entries vs CA-grant
     entries, what CRL state msshd has applied)."""
@@ -166,6 +171,7 @@ def cmd_authz_cache_status(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # §5.3.14 msshd-admin entry: subcommand dispatch.
     ap = argparse.ArgumentParser(prog='msshd-admin')
     ap.add_argument('--config', default='/etc/mssh/msshd.yaml',
                     help='path to msshd.yaml')

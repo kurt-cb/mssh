@@ -1,4 +1,7 @@
-"""Unit tests for cli/key_parser.py."""
+"""Unit tests for cli/key_parser.py.
+
+Tests: §7.3.1 (CLI key parsing)
+"""
 from __future__ import annotations
 
 import pytest

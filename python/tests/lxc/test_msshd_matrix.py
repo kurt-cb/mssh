@@ -1,5 +1,7 @@
 """End-to-end msshd-enforce coverage via the user matrix.
 
+Tests: §1.4, §13.8 (adoption journey)
+
 Parallel to the existing matrix/clients-in-containers tests (which run
 against debug_sshd on port 2222), these tests use the `msshd_env`
 fixture to drive real mssh client → msshd-enforce → CA → ephemeral

@@ -1,5 +1,9 @@
 """Flask app + mTLS listener.
 
+Design: §4.3.13 (see design/mssh_design_v1.md) — server entrypoint and
+Flask app wiring. Routes here delegate to authorize.py (§4.3.1),
+admin.py (§4.3.6), etc.
+
 For PoC: a single Flask app, mTLS enforced via Werkzeug's ``ssl_context``.
 Client cert is extracted from the request environ (``SSL_CLIENT_CERT`` in PEM
 or the raw cert from the WSGI handler) — we use the underlying ``ssl`` socket.
@@ -107,6 +111,8 @@ def _cn_from_cert(cert: x509.Certificate) -> str | None:
 # ---------------------------------------------------------------------------
 
 def create_app(config: CAConfig) -> Flask:
+    # §4.3.13 server bootstrap; loads enrollment (§4.3.2), audit
+    # (§4.3.7), CRL registry (§4.3.5), intermediates (§2.2)
     app = Flask(__name__)
     app.config['CA_CONFIG'] = config
 
@@ -139,6 +145,7 @@ def create_app(config: CAConfig) -> Flask:
         default_max_cert_validity_seconds=config.default_max_cert_validity_seconds,
         timestamp_drift_seconds=config.timestamp_drift_seconds,
         crl=crl_store,
+        crl_url=(config.crl_url or None),        # R-2
     )
     # WireGuard catalog (optional). Loaded lazily; None means
     # WireGuard endpoints respond 503.
@@ -206,11 +213,18 @@ def create_app(config: CAConfig) -> Flask:
 
 
 def register_routes(app: Flask) -> None:
+    # §4.3.13 route table; §3.2 v1/authorize wire, §4.3.6 v1/admin/*
     @app.before_request
     def _attach_caller():
         g.client_cert = _extract_client_cert(request)
         g.client_subject = (_cn_from_cert(g.client_cert)
                              if g.client_cert is not None else None)
+        # §12.4.2 origin tag: lowercased + allowlisted. Any value
+        # other than the recognised set is dropped to avoid an
+        # attacker setting it to something spoofy. v1 recognised:
+        # 'mcp' (set by mssh-mcp's CA client per §12.4.2).
+        raw_origin = (request.headers.get('X-MSSH-Origin') or '').strip().lower()
+        g.client_origin = raw_origin if raw_origin in {'mcp'} else ''
 
     @app.errorhandler(Exception)
     def _on_error(e: Exception):
@@ -600,6 +614,17 @@ def register_routes(app: Flask) -> None:
             app.config['ADMIN_CTX'], subj, user_id, credential_id)
         return jsonify(payload), status
 
+    # R-4: ceremony cancel route per §14.1.3 + §13.6.
+    @app.delete('/v1/external/passkey/ceremony/<ceremony_id>')
+    def _ext_cancel(ceremony_id):
+        subj = g.client_subject
+        if not subj:
+            return jsonify({'status': 'error', 'reason': 'unauthorized',
+                            'detail': 'no mTLS client cert'}), 401
+        status, payload = admin_handlers.external_tool_passkey_cancel(
+            app.config['ADMIN_CTX'], subj, ceremony_id)
+        return jsonify(payload), status
+
     # ---- §5 WireGuard catalog ----
     @app.post('/v1/admin/wireguard/server')
     def _wg_server_init():
@@ -749,8 +774,7 @@ def register_routes(app: Flask) -> None:
     # The presented mTLS client cert IS the credential. CA validates
     # it chains to its own TLS hierarchy, isn't revoked, is in the
     # renewable window, and mints a fresh leaf with the same identity.
-    # See design/ca-integration.md § "cert renew" and design/future-
-    # ideas.md §25.
+    # Design: §4.3.10 (CA endpoint) + §13.4 (auto-renewal cross-cutting).
     @app.post('/v1/cert/renew')
     def _cert_renew():
         body = request.get_json(silent=True) or {}
@@ -847,6 +871,7 @@ def _make_request_handler():
 # ---------------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
+    # §4.3.13 CLI entry; mTLS listener wiring per §14.3.2 config schema
     p = argparse.ArgumentParser(prog='mssh-ca')
     p.add_argument('--config', required=True, help='Path to CA config file')
     p.add_argument('--debug', action='store_true')
@@ -857,6 +882,9 @@ def main(argv: list[str] | None = None) -> int:
         format='%(asctime)s %(name)s %(levelname)s %(message)s',
     )
     cfg = CAConfig.load(args.config)
+    # R-9 §13.9.7: refuse to start when a security-critical field is
+    # missing or points at a path that doesn't exist.
+    cfg.validate()
     app = create_app(cfg)
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

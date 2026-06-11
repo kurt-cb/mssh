@@ -3,6 +3,9 @@
 Background thread that periodically marks pending ceremonies past
 their TTL as ``expired`` and schedules callback delivery so the
 back-end client learns about the timeout.
+
+Design: §8.3.5 TTL expiry sweeper (30s tick) — see
+design/mssh_design_v1.md.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ class ExpirySweeper(threading.Thread):
         self._stop.set()
 
     def run(self) -> None:
+        # §8.3.5 30s tick
         while not self._stop.is_set():
             try:
                 expired = self.store.sweep_expired()

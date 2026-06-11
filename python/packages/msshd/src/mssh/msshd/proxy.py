@@ -11,6 +11,9 @@ shape is the same; only how each side is established differs.
 This module is intentionally protocol-agnostic — Variant B channel-aware
 proxying (parse SSH_MSG_CHANNEL_OPEN frames) will live in a separate
 ``channel_filter.py`` and slot in between the two streams.
+
+Design: §5.3.4 (see design/mssh_design_v1.md) — byte-level outer/inner
+proxy used by both fallback-mode and (raw-bytes leg of) enforce-mode.
 """
 from __future__ import annotations
 
@@ -83,6 +86,7 @@ async def bidirectional_proxy(
     *,
     conn_id: str = '?',
 ) -> tuple[int, int]:
+    # §5.3.4 bidirectional byte-shuffler — outer ↔ inner.
     """Shuffle bytes both ways between (client_reader/writer) and
     (server_reader/writer) until one side EOFs. Returns
     (client_to_server_bytes, server_to_client_bytes).

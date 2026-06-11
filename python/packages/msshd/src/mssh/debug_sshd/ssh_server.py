@@ -8,6 +8,10 @@ the X.509 critical extensions and enforces them on the session
 (source-bind, server-bind, channel-policy).
 
 For production use, see msshd (the Tier-1 wrap-and-proxy daemon).
+
+Design: §10.3 (see design/mssh_design_v1.md) — debug AsyncSSH server
+that drives the shim flow standalone, for CA-path debugging in
+isolation from the msshd wrap-and-proxy machinery.
 """
 from __future__ import annotations
 
@@ -165,6 +169,7 @@ class _SshrtAuthServer(asyncssh.SSHServer):
             return False
 
     def _validate_public_key_inner(self, username, key) -> bool:
+        # §10.3 publickey-auth path: enrolled-key match then shim.authorize().
         """Accept the key if (a) it matches an enrolled key for ``username`` and
         (b) the shim authorizes the connection.
 
@@ -293,6 +298,8 @@ async def _handle_session(process: asyncssh.SSHServerProcess) -> None:
 
 
 async def _handle_session_inner(process: asyncssh.SSHServerProcess) -> None:
+    # §10.3 authorized-session handler: exec mode or PTY shell as the
+    # unix user (debug-only; production path is msshd).
     """Handle one authorized session: emit banner, then exec command or shell."""
     conn = process.channel.get_connection()
     username = conn.get_extra_info('mssh_auth_username') or process.get_extra_info('username') or '?'

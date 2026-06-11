@@ -1,5 +1,7 @@
 """Rogue-host tests.
 
+Tests: §2.3, §16.1
+
 Models an attacker who controls a Unix box on the same network as the CA but
 is *not* enrolled. Attempts to:
 

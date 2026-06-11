@@ -2,6 +2,8 @@
 
 Exercises the admin-handler layer directly — no HTTP. Reuses the
 `ca_dir` fixture from conftest (a populated bootstrap directory).
+
+Tests: §4.3.6, §4.3.11, §14.1.2
 """
 from __future__ import annotations
 

@@ -8,6 +8,8 @@ Two main pieces:
      a §5 user-mint-signed leaf must NOT be accepted as a bypass cert.
   2. AuthzCache.last_crl_seqs is per-issuer; the legacy singular
      `last_crl_seq` is an alias for the user-mint entry.
+
+Tests: §2.3 (load-bearing)
 """
 from __future__ import annotations
 

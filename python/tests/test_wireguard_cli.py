@@ -2,6 +2,8 @@
 
 Covers the CLI-side behavior: file output paths, mode 0600 on the
 client config (which contains a private key), JSON/table emission.
+
+Tests: §7.3.1, §13.7
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ def _stub(monkeypatch, **canned) -> MagicMock:
 
 
 def test_cli_server_init(monkeypatch):
+    """Verifies §7.3.1 — wireguard server-init CLI emits server metadata."""
     _stub(monkeypatch, wireguard_server_init={
         'status': 'ok',
         'server': {
@@ -44,6 +47,7 @@ def test_cli_server_init(monkeypatch):
 
 
 def test_cli_peer_issue_writes_secure_config(tmp_path, monkeypatch):
+    """Verifies §13.7 — peer-issue CLI writes client config with mode 0600."""
     _stub(monkeypatch, wireguard_peer_issue={
         'status': 'ok',
         'peer': {
@@ -78,6 +82,7 @@ def test_cli_peer_issue_writes_secure_config(tmp_path, monkeypatch):
 
 
 def test_cli_server_show_writes_to_file(tmp_path, monkeypatch):
+    """Verifies §13.7 — server-show CLI writes server config with mode 0600."""
     _stub(monkeypatch, wireguard_server_show={
         'status': 'ok',
         'server': {

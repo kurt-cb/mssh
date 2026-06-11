@@ -1,5 +1,16 @@
 """mssh — client CLI for msshd hosts.
 
+Design: §6 (see design/mssh_design_v1.md)
+
+Submodules within §6:
+  §6.3.1 Config resolution        — search order, ~/.mssh/ layout
+  §6.3.2 TLS handshake + session-RPC — TLS 1.3 + mTLS + typed framing v1.1
+  §6.3.3 Endpoint failover         — serial attempt; no cross-identity retry
+  §6.3.4 Bypass-cert injection     — --inject-bypass-cert flag
+  §6.3.5 Local-port forwarding -L  — 🚧 v1 target (depends on §11.3.5)
+
+Wire protocol: §3.1 mssh↔msshd. Typed framing schema: §14.7.
+
 Speaks the outer-protocol-v1 (JSON header + raw byte stream) over a
 TLS 1.3 + mTLS tunnel directly to msshd. No openssh-client dependency,
 no openssl subprocess. Pure Python (uses ``ssl.SSLContext`` which
@@ -133,14 +144,18 @@ def resolve_identity(config: dict[str, str], *,
                      key_override: str | None = None,
                      ca_override: str | None = None) -> Identity:
     """Resolve cert/key/ca paths from CLI / env / config / defaults."""
+    # §6.3.1 config resolution; layout in §14.3.3
     cert = _expand(cert_override
                    or os.environ.get('MSSH_CERT')
                    or config.get('cert', DEFAULT_CERT))
     key = _expand(key_override
                   or os.environ.get('MSSH_KEY')
                   or config.get('key', DEFAULT_KEY))
+    # MSSH_TRUST is an R-10 forward-compat alias for MSSH_CA. Either
+    # spelling resolves to the same path; CLI override wins regardless.
     ca = _expand(ca_override
                  or os.environ.get('MSSH_CA')
+                 or os.environ.get('MSSH_TRUST')
                  or config.get('ca', DEFAULT_CA))
     return Identity(cert=cert, key=key, ca=ca)
 
@@ -259,6 +274,8 @@ def run_session(target: Target, ident: Identity, *,
     """Open the mTLS session, do the v1 handshake, pump stdin/stdout
     until either side closes. Returns 0 on clean close; non-zero on
     handshake / network error."""
+    # §6.3.2 TLS 1.3 + mTLS + session-RPC header
+    # §6.3.3 serial endpoint attempt; no automatic identity retry
     ctx = _build_ssl_context(ident)
     # 5s connect timeout. Without this, an unreachable IP hangs for the
     # kernel TCP timeout (~2 min). Users assume mssh is hung.
@@ -413,6 +430,7 @@ def _pump_framed(sock: ssl.SSLSocket, *, interactive: bool) -> int:
       - stdin EOF                   → STDIN_EOF frame, stop watching stdin
       - SIGWINCH (interactive)      → WINSIZE frame
     """
+    # §14.7 typed framing v1.1
     stdin_fd = sys.stdin.fileno() if sys.stdin.isatty() or interactive else 0
     stdout_fd = sys.stdout.fileno()
     stderr_fd = sys.stderr.fileno()
@@ -686,6 +704,7 @@ def run_bypass_injection(target: Target, ident: Identity,
     paths so the operator sees what was injected (and when it expires)
     or why it was rejected.
     """
+    # §6.3.4 --inject-bypass-cert; bypass_cert in JSON header per §14.7
     import base64 as _b64
     try:
         cert_pem = Path(bypass_cert_path).read_bytes()

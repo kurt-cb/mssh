@@ -14,6 +14,8 @@ have caught Bug #5 at PR time.
 
 If someone removes `encoding=None` for any reason, this test fails
 loudly with a pointer to the bug.
+
+Tests: §5.3.4
 """
 from __future__ import annotations
 

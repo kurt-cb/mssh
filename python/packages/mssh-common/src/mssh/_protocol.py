@@ -1,5 +1,7 @@
 """Wire-protocol versions exposed to all mssh packages.
 
+Design: §3.2 (msshd↔CA wire) + §14.1 (REST envelope `protocol_version`).
+
 Lives in mssh-common so every wheel can ``from mssh._protocol import
 PROTOCOL_VERSION`` without needing to import the others.
 

@@ -9,6 +9,8 @@ helpers that are independently testable:
 
 Process-spawn and sshd-binary tests live in the LXC suite where
 there's a real openssh-server installed.
+
+Tests: §5.3.11, §4.3.12
 """
 from __future__ import annotations
 

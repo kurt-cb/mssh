@@ -4,6 +4,9 @@ No mTLS — the unguessable ceremony_id is the auth boundary. These
 routes serve the registration + approval HTML pages and accept
 the browser's response, store it, and let the callback worker
 relay it to the back-end client.
+
+Design: §8.3.3 public HTTPS /register/<id> + /approve/<id> pages
+(see design/mssh_design_v1.md).
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ def landing():
 
 @bp_public.get('/register/<ceremony_id>')
 def register_page(ceremony_id: str):
+    # §8.3.3 vanilla JS WebAuthn driver served here
     cer = _store().get(ceremony_id)
     if cer is None or cer.ceremony_type != 'register':
         return render_template('error.html',
@@ -85,6 +89,7 @@ def register_respond(ceremony_id: str):
 
 @bp_public.get('/approve/<ceremony_id>')
 def approve_page(ceremony_id: str):
+    # §8.3.3 vanilla JS WebAuthn driver served here
     cer = _store().get(ceremony_id)
     if cer is None or cer.ceremony_type != 'approve':
         return render_template('error.html',

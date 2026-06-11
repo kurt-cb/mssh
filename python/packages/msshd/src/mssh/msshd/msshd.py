@@ -8,6 +8,9 @@ Phase 1B: enforce mode. TLS-terminating listener + CA call + cert mint
 
 Invocation:
     python -m mssh.msshd --config /etc/mssh/msshd.yaml
+
+Design: §5.3.1 (see design/mssh_design_v1.md) — msshd boot sequence,
+mode selector dispatch (fallback vs enforce).
 """
 from __future__ import annotations
 
@@ -19,7 +22,7 @@ import signal
 import sys
 from pathlib import Path
 
-from .config import MODE_ENFORCE, MODE_FALLBACK, MsshdConfig
+from .config import MODE_ENFORCE, MODE_FALLBACK, MODE_GATED, MsshdConfig
 from .listener import FallbackListener
 
 
@@ -43,6 +46,7 @@ def _setup_logging(cfg: MsshdConfig) -> None:
 
 
 async def _run(cfg: MsshdConfig) -> int:
+    # §5.3.1 mode-selector dispatch: fallback vs enforce.
     if cfg.mode == MODE_FALLBACK:
         listener = FallbackListener(cfg)
         await listener.start()
@@ -65,6 +69,9 @@ async def _run(cfg: MsshdConfig) -> int:
                 pass
         return 0
 
+    if cfg.mode == MODE_GATED:
+        return await _run_gated(cfg)
+
     if cfg.mode == MODE_ENFORCE:
         return await _run_enforce(cfg)
 
@@ -72,7 +79,68 @@ async def _run(cfg: MsshdConfig) -> int:
     return 2
 
 
+async def _run_gated(cfg: MsshdConfig) -> int:
+    # §5.3.3 gated-mode boot: CA client + authz cache + CRL sync +
+    # GatedListener. No user-CA, no inner sshd (the operator's existing
+    # sshd is the auth endpoint).
+    from mssh._protocol import PROTOCOL_VERSION
+    from mssh._version import __version__ as MSSHD_VERSION
+    from .authz_cache import AuthzCache
+    from .ca import MsshdCAClient
+    from .crl_sync import CRLSync
+    from .gated_listener import GatedListener
+
+    state_dir = os.environ.get('MSSHD_STATE_DIR', '/var/lib/mssh')
+
+    try:
+        ca_client = MsshdCAClient(cfg)
+    except Exception as e:
+        log.error('CA client init failed: %s', e)
+        return 4
+
+    authz_cache = AuthzCache(
+        persist_path=os.path.join(state_dir, 'authz_cache.json'),
+        max_per_principal=cfg.performance.authz_cache_max_per_principal,
+        max_total=cfg.performance.authz_cache_max_total,
+    )
+    crl_sync = CRLSync(authz_cache, ca_client,
+                       fetch_limit=cfg.ca.crl_fetch_limit)
+
+    listener = GatedListener(
+        cfg, ca_client=ca_client, authz_cache=authz_cache,
+        crl_sync=crl_sync,
+        inner_sshd_kind='operator-sshd',   # informational only
+        inner_sshd_version='',
+        msshd_version=MSSHD_VERSION,
+        protocol_version=PROTOCOL_VERSION,
+    )
+    try:
+        await listener.start()
+    except Exception as e:
+        log.error('gated listener failed to start: %s', e)
+        return 5
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop_event.set)
+    serve_task = asyncio.create_task(listener.serve_forever())
+    try:
+        await stop_event.wait()
+        log.info('shutdown signal received')
+    finally:
+        await listener.stop()
+        serve_task.cancel()
+        try:
+            await serve_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    return 0
+
+
 async def _run_enforce(cfg: MsshdConfig) -> int:
+    # §5.3.1 enforce-mode boot: user-CA load, inner sshd, CA client,
+    # authz cache, CRL sync, EnforceListener.
     # Lazy imports — enforce mode pulls in asyncssh + cryptography
     # heavy paths only when needed.
     from mssh._protocol import PROTOCOL_VERSION
@@ -192,6 +260,7 @@ async def _run_enforce(cfg: MsshdConfig) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # §5.3.1 entry: parse args, load+validate config, run asyncio loop.
     ap = argparse.ArgumentParser(prog='msshd')
     ap.add_argument('--config', default='/etc/mssh/msshd.yaml',
                     help='path to msshd.yaml')

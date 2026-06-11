@@ -1,5 +1,9 @@
 """CA-side renderer for the inner sshd config template.
 
+Design: §4.3.12 (see design/mssh_design_v1.md) — per-connection
+inner-sshd config render. Consumer side (LOCAL_* substitution +
+final write + sshd validation) is §5.3.11.
+
 The CA produces the rendered ``sshd_config`` per session. msshd substitutes
 ``{LOCAL_*}`` markers (its own paths) and writes the result; it has no
 opinion about the rest of the config. This module is the rendering core.
@@ -266,6 +270,8 @@ def render(
     Raises: TemplateError on any unknown marker, any required marker
       without a value, any value with the wrong shape, etc.
     """
+    # §4.3.12 render; FROMCA_* substituted here, LOCAL_* deferred to
+    # msshd per §5.3.11
     fromca_values = fromca_values or {}
     local_values = local_values or {}
     leave = leave_unsubstituted or set()
@@ -325,6 +331,7 @@ def render(
 # ---------------------------------------------------------------------------
 
 def fromca_values_from_evaluation(eval_result) -> dict[str, str]:
+    # §4.3.12 policy → FROMCA_* projection
     """Map a ``policy.EvaluationResult`` to a FROMCA_* substitution dict.
 
     Centralizes the channels / environment / force_command → sshd_config

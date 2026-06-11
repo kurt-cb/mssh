@@ -1,5 +1,8 @@
 """Unit tests for the per-server banner template rendering in
-``mssh.msshd.inner._render_banner``."""
+``mssh.msshd.inner._render_banner``.
+
+Tests: §5.3.15
+"""
 from __future__ import annotations
 
 from pathlib import Path

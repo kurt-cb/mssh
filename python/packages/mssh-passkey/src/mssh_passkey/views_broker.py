@@ -4,6 +4,9 @@ All routes here expect the request to carry ``X-Client-CN`` set by
 Apache2 (production) or our in-process TLS handler (dev). The CN
 must match one of ``allowed_client_cns`` in config. Requests
 without a populated header are refused.
+
+Design: §8.3.2 mTLS-gated /broker/ceremony[/<id>] API
+(see design/mssh_design_v1.md).
 """
 
 from __future__ import annotations
@@ -50,6 +53,7 @@ def create_ceremony():
     Response (201):
       {ceremony_id, url, expires_at}
     """
+    # §8.3.2 POST /broker/ceremony; mTLS-gated via X-Client-CN
     cn, err = _auth_or_401()
     if err:
         return err
@@ -86,12 +90,15 @@ def get_ceremony(ceremony_id: str):
     Returned without `options_json` (the back-end client already
     has it) — only the outcome + response + delivery state.
     """
-    _, err = _auth_or_401()
+    # §3.6 cross-RP isolation (R-5): caller's CN must match
+    # ceremony.created_by. Mismatch returns 404 (not 403) to keep
+    # ceremony existence opaque from a different RP.
+    cn, err = _auth_or_401()
     if err:
         return err
 
     cer = _store().get(ceremony_id)
-    if cer is None:
+    if cer is None or cer.created_by != cn:
         return jsonify({'status': 'error', 'reason': 'not_found',
                         'detail': f'no ceremony {ceremony_id!r}'}), 404
     return jsonify({
@@ -109,12 +116,13 @@ def get_ceremony(ceremony_id: str):
 @bp_broker.delete('/ceremony/<ceremony_id>')
 def cancel_ceremony(ceremony_id: str):
     """Back-end client cancels a pending ceremony."""
-    _, err = _auth_or_401()
+    # §3.6 cross-RP isolation (R-5): same posture as get_ceremony.
+    cn, err = _auth_or_401()
     if err:
         return err
 
     cer = _store().get(ceremony_id)
-    if cer is None:
+    if cer is None or cer.created_by != cn:
         return jsonify({'status': 'error', 'reason': 'not_found',
                         'detail': f'no ceremony {ceremony_id!r}'}), 404
     if cer.outcome is not None:

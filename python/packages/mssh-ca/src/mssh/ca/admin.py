@@ -1,5 +1,9 @@
 """Admin API handlers.
 
+Design: §4.3.6 (see design/mssh_design_v1.md) — the /v1/admin/*
+surface. The role-permission table here implements the §14.1.2 RBAC
+matrix; each action key maps directly to a row in that table.
+
 Role-permission table mirrors mssh-detailed-rest-api.md. Each handler
 takes a parsed request body, the admin's enrollment record, and the
 ``AdminContext``; returns ``(http_status, json_body)``.
@@ -28,6 +32,7 @@ log = logging.getLogger('mssh.ca.admin')
 
 
 # Role permissions: maps action key -> set of allowed roles.
+# §14.1.2 RBAC matrix — single source of truth for admin authz
 _PERMISSIONS = {
     'server.add':       {'superuser', 'server-admin'},
     'server.remove':    {'superuser', 'server-admin'},
@@ -80,6 +85,7 @@ _PERMISSIONS = {
 
 
 def role_permits(role: str, action: str) -> bool:
+    # §14.1.2 RBAC check; unknown action → default-deny per §13.9.7
     return role in _PERMISSIONS.get(action, set())
 
 
@@ -168,10 +174,56 @@ def _forbidden(action: str, admin: Admin) -> tuple[int, dict]:
     }
 
 
-def _check(action: str, admin: Admin) -> tuple[int, dict] | None:
+def _check(action: str, admin: Admin,
+           origin: str | None = None) -> tuple[int, dict] | None:
+    # §12.4.3 CA-side defense in depth: when origin='mcp', enforce
+    # the MCP capability allow-list regardless of the admin's role.
+    # MCP is OFF by default (§12.2); even when on, mutating/admin
+    # actions like bypass-cert mint, admin.add, cert.revoke etc.
+    # remain refused by the CA even if the MCP-side allow-list is
+    # tampered with. Audit tag: §12.4.2 (origin: mcp in audit records).
+    if origin is None:
+        # Inside a Flask request context, pull from g.client_origin
+        # (set by server.py's _attach_caller before-request hook).
+        # Outside a request context (tests, internal callers),
+        # default to '' (no origin restriction).
+        try:
+            from flask import g
+            origin = getattr(g, 'client_origin', '') or ''
+        except (ImportError, RuntimeError):
+            origin = ''
+    if origin == 'mcp' and action not in MCP_ALLOWED_ACTIONS:
+        return 403, {
+            'status': 'error',
+            'result': 'denied',
+            'reason': 'mcp_capability_denied',
+            'denied_reason': 'mcp_capability_denied',
+            'detail': (f'action {action!r} is not in the MCP allow-list; '
+                       f'CA refuses mcp-origin calls for it (§12.4.3)'),
+        }
     if not role_permits(admin.role, action):
         return _forbidden(action, admin)
     return None
+
+
+# §12.4.3 CA-side capability allow-list. MCP-origin calls are refused
+# for any action NOT in this set, even if the admin's role would allow
+# it. The MCP-side TOOL_REGISTRY (mssh-admin/mcp/tools.py) is the
+# primary gate; this is defense in depth. Strict subset of mssh-admin;
+# all bypass/mutating/destructive actions are excluded per §12.2.
+MCP_ALLOWED_ACTIONS = frozenset({
+    'server.list',
+    'user.list',
+    'admin.list',
+    'audit.read',
+    'crl.read',
+    'intermediate.list',
+    'intermediate.external.list',
+    'external_tool.list',
+    'policy.read',                  # forward-compat; not currently a separate action
+    'template.list',
+    'template.show',
+})
 
 
 def _err(status: int, reason: str, detail: str) -> tuple[int, dict]:
@@ -682,6 +734,7 @@ def template_effective(ctx: AdminContext, admin: Admin,
 
 def bypass_cert_mint(ctx: AdminContext, admin: Admin,
                      body: dict) -> tuple[int, dict]:
+    # §4.3.6 admin surface; delegates to §4.3.4 bypass-mint path
     """Mint a CA-bypass authz cert for an enrolled user.
 
     The cert is a normal X.509 authz cert with the OID_CA_BYPASS
@@ -769,6 +822,7 @@ def bypass_cert_mint(ctx: AdminContext, admin: Admin,
                           and force_command else None,
             max_session_seconds=max_session_seconds,
             ca_bypass=True,
+            crl_url=ctx.crl_url,                # R-2
         )
     except Exception as e:                                      # noqa: BLE001
         return _err(500, 'internal', f'mint failed: {e}')
@@ -801,6 +855,8 @@ def bypass_cert_mint(ctx: AdminContext, admin: Admin,
 
 def cert_revoke(ctx: AdminContext, admin: Admin,
                 body: dict) -> tuple[int, dict]:
+    # §4.3.6 admin endpoint; appends to §4.3.5 CRL; drives §13.3
+    # revocation propagation
     """Append a CRL entry revoking the given cert serial(s).
 
     Body:
@@ -861,10 +917,14 @@ def cert_revoke(ctx: AdminContext, admin: Admin,
 # Intermediates (v0.2.4+ — Commit 5 of PKI hierarchy work)
 # ---------------------------------------------------------------------------
 
-_PERMISSIONS['intermediate.list'] = {'superuser', 'auditor'}
+_PERMISSIONS['intermediate.list'] = {
+    'superuser', 'server-admin', 'user-admin', 'auditor',
+}                                                  # R-4: broadened per §14.1.2
 _PERMISSIONS['intermediate.rotate'] = {'superuser'}
 _PERMISSIONS['intermediate.external.mint'] = {'superuser'}
-_PERMISSIONS['intermediate.external.list'] = {'superuser', 'auditor'}
+_PERMISSIONS['intermediate.external.list'] = {
+    'superuser', 'server-admin', 'user-admin', 'auditor',
+}                                                  # R-4: broadened per §14.1.2
 
 
 def intermediate_list(ctx: AdminContext, admin: Admin
@@ -1359,7 +1419,12 @@ def wireguard_server_init(ctx: AdminContext, admin: Admin,
                           body: dict) -> tuple[int, dict]:
     """POST /v1/admin/wireguard/server  — create a WireGuard interface.
 
-    Body: {name, network (CIDR), listen_port, endpoint ("host:port")}.
+    Body: {name, network? (CIDR), network_v6? (CIDR), listen_port,
+    endpoint ("host:port")}.
+
+    ``network`` and ``network_v6`` are independently optional; at
+    least one is required (v0.4.0+). When both are set the server
+    runs dual-stack.
     """
     if (err := _check('wireguard.server.init', admin)):
         return err
@@ -1370,10 +1435,13 @@ def wireguard_server_init(ctx: AdminContext, admin: Admin,
 
     name = (body.get('name') or '').strip()
     network = (body.get('network') or '').strip()
+    network_v6 = (body.get('network_v6') or '').strip()
     endpoint = (body.get('endpoint') or '').strip()
-    if not name or not network or not endpoint:
+    if not name or not endpoint:
+        return _err(400, 'bad_request', 'name and endpoint are required')
+    if not network and not network_v6:
         return _err(400, 'bad_request',
-                    'name, network, and endpoint are required')
+                    'at least one of network or network_v6 is required')
     try:
         listen_port = int(body.get('listen_port') or 51820)
     except (TypeError, ValueError):
@@ -1381,6 +1449,7 @@ def wireguard_server_init(ctx: AdminContext, admin: Admin,
 
     try:
         srv = wg.server_init(name=name, network=network,
+                             network_v6=network_v6,
                              listen_port=listen_port, endpoint=endpoint,
                              created_by=admin.name)
     except _wg.WireGuardConflict as e:
@@ -1390,14 +1459,17 @@ def wireguard_server_init(ctx: AdminContext, admin: Admin,
 
     _audit_admin(ctx, admin, 'wireguard.server.init',
                  {'name': name, 'network': network,
+                  'network_v6': network_v6,
                   'listen_port': listen_port, 'endpoint': endpoint}, 'ok')
     return 201, {'status': 'ok',
                  'server': {
                      'name': srv.name, 'network': srv.network,
+                     'network_v6': srv.network_v6,
                      'listen_port': srv.listen_port,
                      'endpoint': srv.endpoint,
                      'public_key_b64': srv.public_key_b64,
                      'server_address': srv.server_address,
+                     'server_address_v6': srv.server_address_v6,
                      'created_at': srv.created_at,
                  }}
 
@@ -1446,9 +1518,11 @@ def wireguard_server_show(ctx: AdminContext, admin: Admin,
         'status': 'ok',
         'server': {
             'name': srv.name, 'network': srv.network,
+            'network_v6': srv.network_v6,
             'listen_port': srv.listen_port, 'endpoint': srv.endpoint,
             'public_key_b64': srv.public_key_b64,
             'server_address': srv.server_address,
+            'server_address_v6': srv.server_address_v6,
             'created_at': srv.created_at, 'created_by': srv.created_by,
             'peer_count': len(peers),
         },
@@ -1468,9 +1542,11 @@ def wireguard_server_list(ctx: AdminContext, admin: Admin
     return 200, {'status': 'ok',
                  'servers': [{
                      'name': s.name, 'network': s.network,
+                     'network_v6': s.network_v6,
                      'listen_port': s.listen_port, 'endpoint': s.endpoint,
                      'public_key_b64': s.public_key_b64,
                      'server_address': s.server_address,
+                     'server_address_v6': s.server_address_v6,
                      'created_at': s.created_at,
                  } for s in servers]}
 
@@ -1519,13 +1595,15 @@ def wireguard_peer_issue(ctx: AdminContext, admin: Admin,
 
     _audit_admin(ctx, admin, 'wireguard.peer.issue',
                  {'name': name, 'server': server_name,
-                  'address': peer.address}, 'ok')
+                  'address': peer.address,
+                  'address_v6': peer.address_v6}, 'ok')
 
     return 201, {
         'status': 'ok',
         'peer': {
             'name': peer.name, 'server': peer.server_name,
             'address': peer.address,
+            'address_v6': peer.address_v6,
             'public_key_b64': peer.public_key_b64,
             'issued_at': peer.issued_at,
         },
@@ -1706,6 +1784,8 @@ def passkey_admin_callback(ctx: AdminContext,
     outcome. Validates origin via mTLS upstream (Apache2 or the
     Flask server's TLS handler). Body shape comes from
     mssh_passkey/callback.py."""
+    # §4.3.6 admin endpoint; §4.3.8 admin-2FA ceremony complete;
+    # consumes §3.6 broker outcome, persists evidence per §13.5
     ceremony_id = body.get('ceremony_id') or ''
     outcome = body.get('outcome') or ''
     response_json = body.get('response_json')
@@ -2366,6 +2446,45 @@ def external_tool_passkey_status(ctx: AdminContext,
     }
 
 
+# R-4: external-tool ceremony cancel route (§14.1.3). Tool cancels its
+# own pending ceremony — used when the operator/user backs out before
+# completing the WebAuthn flow. Implemented as a DELETE on the broker
+# (which then sends an outcome callback to the tool's outcome_url).
+def external_tool_passkey_cancel(ctx: AdminContext,
+                                   calling_subject: str,
+                                   ceremony_id: str) -> tuple[int, dict]:
+    """Tool cancels a pending ceremony it owns.
+
+    Per-tool isolation: ceremonies owned by another tool return 404,
+    not 403, to keep ceremony existence opaque across tools.
+    """
+    # §4.3.9 / §3.5 — external-tool passkey cancel
+    tool, err = _tool_or_401(ctx, calling_subject)
+    if err:
+        return err
+    broker, err = _passkey_or_503(ctx)
+    if err:
+        return err
+    pending = (ctx.passkey_pending_registrations.get(ceremony_id)
+               or ctx.passkey_pending_authentications.get(ceremony_id))
+    if pending is None or pending.get('tool_name') != tool.name:
+        return _err(404, 'not_found',
+                    f'no ceremony {ceremony_id}')
+    try:
+        broker.cancel_ceremony(ceremony_id)
+    except Exception as e:
+        return _err(502, 'broker_error', f'mssh-passkey: {e}')
+    # Drop the pending record so a re-poll returns 404 immediately.
+    ctx.passkey_pending_registrations.pop(ceremony_id, None)
+    ctx.passkey_pending_authentications.pop(ceremony_id, None)
+    return 200, {
+        'status': 'ok',
+        'result': 'ok',                                # R-3 canonical
+        'ceremony_id': ceremony_id,
+        'outcome': 'cancelled',
+    }
+
+
 # Callback fan-out for external-tool flow.
 # When the broker callback arrives at passkey_admin_callback() and
 # the pending entry has flow='external-tool', we still verify the
@@ -2389,7 +2508,7 @@ def external_tool_passkey_status(ctx: AdminContext,
 
 
 # ---------------------------------------------------------------------------
-# §25: cert renewal (auto-renew for any CA-issued cert)
+# §4.3.10 + §13.4: cert renewal (auto-renew for any CA-issued cert)
 # ---------------------------------------------------------------------------
 #
 # Wire shape: POST /v1/cert/renew. The caller authenticates with the

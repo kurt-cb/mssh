@@ -1,5 +1,8 @@
 """CRLDP coverage: leaves carry the extension when ctx.crl_url is set,
-and the X.509 CRL emission round-trips through cryptography."""
+and the X.509 CRL emission round-trips through cryptography.
+
+Tests: §13.7, §4.3.11
+"""
 from __future__ import annotations
 
 import pytest

@@ -12,6 +12,11 @@ module:
   4. Pumps bytes between the outer stream and the inner SSH session.
 
 Protocol: see design/architecture.md §3.
+
+Design: §5.3.4 (see design/mssh_design_v1.md) — AsyncSSH-based proxy
+where msshd acts as the SSH client to the inner sshd; carries the
+v1/v1.1 outer protocol header, ack, banner, framed/raw bidir traffic,
+and the EXIT/SIGNAL/CLOSE shutdown frames.
 """
 from __future__ import annotations
 
@@ -147,6 +152,8 @@ async def proxy_to_inner_ssh(
     forced_env: Optional[dict[str, str]] = None,
     prefetched_header: Optional[dict] = None,
 ) -> None:
+    # §5.3.4 outer-protocol v1 driver: header → ack → asyncssh connect
+    # to inner sshd → dispatch exec vs interactive → bidir pump.
     """Drive asyncssh against the inner sshd.
 
     If ``prefetched_header`` is None, this function reads the v1
@@ -295,6 +302,8 @@ async def _run_session(conn: asyncssh.SSHClientConnection,
                        env: dict[str, str],
                        framed: bool,
                        conn_id: str) -> None:
+    # §5.3.4 session driver: create asyncssh session, pump v1/v1.1
+    # inbound (raw or framed), emit EXIT/SIGNAL/CLOSE frames on close.
     # asyncssh's create_session signature:
     #   create_session(session_factory, command=None, *, request_pty='auto',
     #                  term_type=None, term_size=(cols, rows), env=...)

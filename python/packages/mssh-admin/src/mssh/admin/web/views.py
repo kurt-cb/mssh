@@ -2,7 +2,12 @@
 
 Each route fetches data via the configured CAClient and renders a
 Bootstrap-5 template. v1 is read-only with cert-export actions for
-users + servers; mutating CRUD lives in a follow-on (§26 v2).
+users + servers; mutating CRUD lives in a follow-on (§11.3.3 v2).
+
+Design: §11.3.1 (read-only views: index/users/groups/hosts/audit) +
+§11.3.2 (mTLS re-issue cert-export action) + §11.3.3 (mutating CRUD —
+🚧 future work, currently stubbed) + §11.3.4 (auth model: trust the
+mssh-mediated localhost tunnel).
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ def register_views(app: Flask) -> None:
 @bp.route('/')
 def index():
     """Dashboard — counts + green/red status from the CA."""
+    # §11.3.1 read-only view
     try:
         servers = _client().server_list()
         users = _client().user_list()
@@ -57,6 +63,7 @@ def index():
 
 @bp.route('/users')
 def users():
+    # §11.3.1 read-only view
     try:
         users = _client().user_list()
     except CAClientError as e:
@@ -71,6 +78,7 @@ def users():
 def groups():
     """Server groups — derived from server enrollments (CA stores
     groups per-server, not as a first-class entity yet)."""
+    # §11.3.1 read-only view
     try:
         servers = _client().server_list()
         users = _client().user_list()
@@ -104,6 +112,7 @@ def groups():
 
 @bp.route('/hosts')
 def hosts():
+    # §11.3.1 read-only view
     try:
         servers = _client().server_list()
     except CAClientError as e:
@@ -117,6 +126,7 @@ def hosts():
 def audit():
     """Audit log — last 100 entries by default; filterable via
     query-string params (?decision=denied&user=alice)."""
+    # §11.3.1 read-only view
     filters = {}
     if 'decision' in request.args:
         filters['decision'] = request.args['decision']
@@ -147,6 +157,8 @@ def api_server_mtls(name: str):
     groups, since the CA's add endpoint is also the issue path. The
     CA's signing key stays untouched.
     """
+    # §11.3.2 mTLS re-issue (mutates CA enrollment as a side effect of
+    # delete+add; broader mutating CRUD is §11.3.3 🚧)
     try:
         servers = _client().server_list()
         existing = next((s for s in servers if s['name'] == name), None)
@@ -182,6 +194,8 @@ def api_user_pki(username: str):
     script. Real flow lands when [§25](../../../design/future-ideas.md#25-mssh-admin-pki--first-class-user-facing-pki-ceremony)
     (mssh-admin pki) lands.
     """
+    # §11.3.3 🚧 mutating CRUD — stubbed; returns 501 until the
+    # user-facing PKI ceremony lands.
     return jsonify({
         'error': 'not_implemented',
         'detail': (

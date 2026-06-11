@@ -2,6 +2,9 @@
 
 Pulls together identity parsing, policy evaluation, cert minting, audit logging.
 The Flask layer in ``server.py`` wires this to HTTP; this module is pure logic.
+
+Design: §4.3.1 (see design/mssh_design_v1.md)
+See also: §3.2 wire protocol, §4.3.3 policy engine, §4.3.4 cert minter.
 """
 from __future__ import annotations
 
@@ -18,6 +21,7 @@ from . import templates as _templates
 from .audit import AuditLog
 from .cert_minter import mint_authorization_cert
 from .enrollment import Enrollment
+from .envelope import envelope as _envelope
 from ..identity import (CertIdentity, IdentityParseError, PubkeyIdentity,
                               parse_identity)
 from .policy import evaluate
@@ -43,6 +47,11 @@ class AuthorizeContext:
     # design/notes-pki-hierarchy.md.
     intermediates: Any = None   # dict[str, Intermediate] | None
     root_cert: Any = None       # x509.Certificate | None — trust anchor
+    # R-2: CRL Distribution Points URL embedded in minted authz certs.
+    # When set, the URL is included as a CRLDistributionPoints
+    # extension on every authz cert. Operators typically point this
+    # at the CA's /v1/crl.pem endpoint.
+    crl_url: str | None = None
 
 
 def _now() -> _dt.datetime:
@@ -70,7 +79,17 @@ def _deny(audit: AuditLog, reason: str, detail: str, *,
     if extra_audit:
         audit_entry.update(extra_audit)
     audit.write(audit_entry)
-    body: dict = {'status': 'denied', 'reason': reason, 'detail': detail}
+    # R-3: emit canonical envelope (§14.1) alongside legacy keys.
+    # Legacy: status + reason. Canonical: result + denied_reason +
+    # request_id + ca_server_id + issued_at.
+    body: dict = {
+        **_envelope(result='denied'),
+        'status': 'denied',          # legacy
+        'result': 'denied',          # canonical (envelope() sets it; explicit for clarity)
+        'reason': reason,            # legacy
+        'denied_reason': reason,     # canonical
+        'detail': detail,
+    }
     # Carry CRL seqs even on denials so msshd's CRL sync still
     # advances when only denials are happening (otherwise revocations
     # stall indefinitely on small fleets where caches mostly hit).
@@ -113,6 +132,8 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
 
     ``server_subject`` is the CN from the caller's mTLS cert. Returns (http_status, json).
     """
+    # §4.3.1 authorize handler; consumes §3.2 wire format, calls
+    # §4.3.3 policy engine then §4.3.4 cert minter
     # Pre-compute the current CRL seqs so every deny path can carry
     # them. This lets msshd's CRL sync advance on denials, not just
     # grants. Two views: the legacy singular `crl_seq` (= user-mint's
@@ -242,6 +263,7 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
         channels=result.merged_channels,
         force_command=result.merged_force_command,
         environment=result.merged_environment or None,
+        crl_url=ctx.crl_url,                # R-2
     )
     cert_der = cert.public_bytes(serialization.Encoding.DER)
     cert_b64 = base64.b64encode(cert_der).decode('ascii')
@@ -311,20 +333,45 @@ def handle_authorize(ctx: AuthorizeContext, server_subject: str,
         audit_entry['inner_sshd_config_error'] = inner_sshd_config_error
     ctx.audit.write(audit_entry)
 
+    # R-3: emit canonical envelope (§14.1) alongside legacy keys.
+    # Legacy fields kept flat at the top level; canonical wraps the
+    # cert material in `credentials:` per §14.1.1 design.
+    policy_summary = {
+        'channels': result.merged_channels,
+        'source_bound': True,
+        'server_bind': server.name,
+        'force_command': result.merged_force_command,
+        'environment': result.merged_environment,
+    }
+    not_after_str = not_after.strftime('%Y-%m-%dT%H:%M:%SZ')
     response: dict[str, Any] = {
-        'status': 'granted',
+        **_envelope(result='granted'),
+        'status': 'granted',                # legacy
+        'result': 'granted',                # canonical (envelope sets it too)
+        # Legacy flat keys (consumer-visible today; kept until v1.x cleanup).
         'cert': cert_b64,
         'serial': serial_hex,
-        'not_after': not_after.strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'not_after': not_after_str,
         'protocol_version': PROTOCOL_VERSION,
-        'policy_summary': {
-            'channels': result.merged_channels,
-            'source_bound': True,
-            'server_bind': server.name,
-            'force_command': result.merged_force_command,
-            'environment': result.merged_environment,
+        'policy_summary': policy_summary,
+        # Canonical §14.1 envelope: credentials wrapper.
+        'credentials': {
+            'cert': cert_b64,
+            'cert_pem': None,               # populated below if available
+            'serial': serial_hex,
+            'not_after': not_after_str,
+            'policy_summary': policy_summary,
         },
     }
+    # Provide PEM form of the cert in `credentials.cert_pem` for
+    # operator-facing consumers (mssh-admin) that want a copy-pasteable
+    # blob. msshd uses `credentials.cert` (base64 DER).
+    try:
+        from cryptography.hazmat.primitives import serialization as _ser
+        response['credentials']['cert_pem'] = cert.public_bytes(
+            _ser.Encoding.PEM).decode('ascii')
+    except Exception:                              # noqa: BLE001
+        pass
     if inner_sshd_config is not None:
         response['inner_sshd_config'] = inner_sshd_config
     # CRL sequence — msshd uses this to detect when it's behind and

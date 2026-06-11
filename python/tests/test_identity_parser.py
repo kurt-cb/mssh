@@ -1,4 +1,7 @@
-"""Unit tests for ca/identity_parser.py."""
+"""Unit tests for ca/identity_parser.py.
+
+Tests: §4.3.1 (identity parsing on CA side; also msshd-side helpers)
+"""
 from __future__ import annotations
 
 import base64

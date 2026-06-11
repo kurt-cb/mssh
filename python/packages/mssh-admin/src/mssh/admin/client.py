@@ -1,4 +1,8 @@
-"""mTLS HTTP client for the admin API."""
+"""mTLS HTTP client for the admin API.
+
+Design: §7.3.6 (CA client wrapper used by every mssh-admin subcommand)
++ §9.3.1 (the admin API surface this client targets).
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -19,12 +23,17 @@ class CAClient:
     """Admin API mTLS client. Bypasses HTTP_PROXY env vars."""
 
     def __init__(self, base_url: str, admin_cert: str, admin_key: str,
-                 ca_cert: str, timeout: float = 10.0):
+                 ca_cert: str, timeout: float = 10.0,
+                 origin: str | None = None):
+        # Phase 2 §12.4.2 origin tagging — when set (e.g. 'mcp' for
+        # mssh-mcp's CA client), every request carries X-MSSH-Origin
+        # so the CA audits + capability-gates accordingly (§13.9.2).
         self.base_url = base_url
         self.admin_cert = admin_cert
         self.admin_key = admin_key
         self.ca_cert = ca_cert
         self.timeout = timeout
+        self.origin = origin
         self._session = requests.Session()
         self._session.trust_env = False
 
@@ -32,12 +41,17 @@ class CAClient:
                  json: dict[str, Any] | None = None,
                  params: dict[str, Any] | None = None) -> dict[str, Any]:
         url = self.base_url.rstrip('/') + path
+        # §12.4.2 X-MSSH-Origin: mcp header on MCP-originated calls.
+        headers = {}
+        if self.origin:
+            headers['X-MSSH-Origin'] = self.origin
         resp = self._session.request(
             method=method, url=url,
             json=json, params=params,
             cert=(self.admin_cert, self.admin_key),
             verify=self.ca_cert,
             timeout=self.timeout,
+            headers=headers or None,
         )
         try:
             body = resp.json()
@@ -219,13 +233,22 @@ class CAClient:
         return self._request('POST', '/v1/admin/openvpn/issue', json=body)
 
     # ---- §5 WireGuard catalog ----
-    def wireguard_server_init(self, name: str, network: str,
+    def wireguard_server_init(self, name: str,
                               endpoint: str, *,
+                              network: str = '',
+                              network_v6: str = '',
                               listen_port: int = 51820) -> dict[str, Any]:
-        return self._request('POST', '/v1/admin/wireguard/server', json={
-            'name': name, 'network': network,
+        # v0.4.0+: network + network_v6 are independently optional;
+        # at least one is required (CA enforces).
+        body: dict[str, Any] = {
+            'name': name,
             'listen_port': listen_port, 'endpoint': endpoint,
-        })
+        }
+        if network:
+            body['network'] = network
+        if network_v6:
+            body['network_v6'] = network_v6
+        return self._request('POST', '/v1/admin/wireguard/server', json=body)
 
     def wireguard_server_remove(self, name: str) -> dict[str, Any]:
         return self._request('DELETE', f'/v1/admin/wireguard/server/{name}')
@@ -294,7 +317,7 @@ class CAClient:
     def external_tool_list(self) -> dict[str, Any]:
         return self._request('GET', '/v1/admin/external-tool/list')
 
-    # ---- §25 cert renew ----
+    # ---- §4.3.10 + §13.4 cert renew ----
     def cert_renew(self, *,
                    revoke_predecessor: bool = False) -> dict[str, Any]:
         """POST /v1/cert/renew.

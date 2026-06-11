@@ -1,4 +1,9 @@
-"""mTLS HTTP client used by the shim, with failover across ca_endpoints."""
+"""mTLS HTTP client used by the shim, with failover across ca_endpoints.
+
+Design: §9.3.1 (see design/mssh_design_v1.md) — mTLS HTTPS client;
+structured error types; retry/backoff. Wire protocol: §3.2 msshd↔CA,
+§3.3 mssh-admin↔CA. Full request/response schema: §14.1.
+"""
 from __future__ import annotations
 
 import logging
@@ -35,7 +40,7 @@ class CAClient:
         self.endpoints = list(endpoints)
         self.mtls_cert = mtls_cert
         self.mtls_key = mtls_key
-        self.ca_trust_root = ca_trust_root
+        self.ca_trust_root = ca_trust_root  # §2.3 chain pinning
         self.connect_timeout = connect_timeout
         self.read_timeout = read_timeout
         # The CA is on a private network; never route shim ↔ CA through
@@ -44,6 +49,7 @@ class CAClient:
         self._session.trust_env = False
 
     def authorize(self, request_body: dict) -> AuthorizeResult:
+        # §3.2 authorize call (full schema §14.1.1)
         last_err: Exception | None = None
         for endpoint in self.endpoints:
             url = endpoint.rstrip('/') + '/v1/authorize'
@@ -82,6 +88,7 @@ class CAClient:
         Returns the parsed JSON body. Failover behaviour mirrors
         authorize(): try each endpoint in turn, surface
         CAClientFailedOver if all fail."""
+        # §3.2 + §13.3 CRL fetch
         last_err: Exception | None = None
         for endpoint in self.endpoints:
             url = endpoint.rstrip('/') + '/v1/crl'

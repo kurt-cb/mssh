@@ -6,6 +6,8 @@ admin-side handlers. Covers:
     legacy aliases in sync; new issuer_id reflected
   - RBAC: list is auditor-or-superuser; rotate is superuser only
   - 503 when CA is in legacy single-signer mode (no ca_dir)
+
+Tests: §2.5, §7.3.4
 """
 from __future__ import annotations
 
@@ -85,9 +87,14 @@ def test_list_auditor_allowed(adminctx, auditor):
     assert status == 200
 
 
-def test_list_user_admin_forbidden(adminctx, user_admin):
+def test_list_user_admin_allowed(adminctx, user_admin):
+    """Verifies §14.1.2 — intermediate.list RBAC allows user-admin.
+
+    R-4 broadened the allow-list to {superuser, server-admin, user-admin,
+    auditor} to match the design's published RBAC matrix.
+    """
     status, _ = admin_handlers.intermediate_list(adminctx, user_admin)
-    assert status == 403
+    assert status == 200
 
 
 def test_list_503_when_no_ca_dir(adminctx, superuser):

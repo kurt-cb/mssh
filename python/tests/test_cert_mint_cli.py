@@ -3,6 +3,8 @@
 These cover the client-side formatting bits: SAN normalization, .ovpn
 assembly, PEM/PKCS#12 file output layout. The CA-side handlers are
 tested separately in test_cert_mint_admin.py.
+
+Tests: §7.3.1, §14.2.2
 """
 from __future__ import annotations
 

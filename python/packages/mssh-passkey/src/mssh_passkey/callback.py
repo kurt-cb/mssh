@@ -13,6 +13,12 @@ Retry schedule (cumulative wall-clock):
 After 5 failed attempts, the ceremony's callback_status is set to
 ``failed_max_retries`` and the worker stops trying. Operators
 investigate via the broker's pending-callback view.
+
+Design: §8.3.4 callback delivery worker (see design/mssh_design_v1.md).
+Retry schedule: §8.3.4 / §14.3.4 callback.retry_schedule_seconds
+[0, 5, 30, 120, 600] s.
+Hardening: §13.9.1 anti-bogus-callback / anti-compromised-broker
+defenses are receiver-side; this worker is a relay.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from .storage import Ceremony, CeremonyStore
 
 log = logging.getLogger('mssh_passkey.callback')
 
+# §8.3.4 retry schedule [0,5,30,120,600]s
 _BACKOFF_SECONDS = (0, 5, 30, 120, 600)
 
 
@@ -67,6 +74,7 @@ def _deliver(cer: Ceremony, cbk: CallbackConfig) -> bool:
 def deliver_with_retry(cer: Ceremony, store: CeremonyStore,
                        cbk: CallbackConfig) -> None:
     """Run the retry schedule for one ceremony."""
+    # §8.3.4 retry schedule [0,5,30,120,600]s
     for delay in _BACKOFF_SECONDS:
         if delay:
             time.sleep(delay)

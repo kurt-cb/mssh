@@ -1,4 +1,8 @@
-"""YAML config loader for mssh-passkey."""
+"""YAML config loader for mssh-passkey.
+
+Design: §14.3.4 broker config schema; §13.9.7 default-deny on
+allowed_client_cns (see design/mssh_design_v1.md).
+"""
 
 from __future__ import annotations
 

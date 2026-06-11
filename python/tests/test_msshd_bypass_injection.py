@@ -16,6 +16,8 @@ JSON header and writes it into the authz cache. Covered here:
 The method only consumes self.authz_cache; the rest of the
 EnforceListener doesn't matter, so we construct a minimal stub
 listener that exposes just the cache.
+
+Tests: §5.3.7, §13.2, §13.9.5
 """
 from __future__ import annotations
 
@@ -141,6 +143,7 @@ def _mint_bypass_cert(test_key, *, principal: str = 'alice',
 
 @pytest.mark.asyncio
 async def test_bypass_injection_happy_path(test_key):
+    """Verifies §5.3.7 — valid bypass cert populates the authz cache tagged 'bypass'."""
     cache = AuthzCache()
     listener = _make_listener(cache)
     cert_b64 = _mint_bypass_cert(test_key, principal='alice')
@@ -246,7 +249,9 @@ async def test_bypass_injection_missing_marker(test_key):
 
 @pytest.mark.asyncio
 async def test_bypass_injection_principal_mismatch(test_key):
-    """Cert minted for alice but presented by bob → reject. Prevents
+    """Verifies §13.9.5 — bypass cert minted for alice rejected when presented by bob.
+
+    Cert minted for alice but presented by bob → reject. Prevents
     a stolen bypass cert from being injected by an attacker who has
     a different mTLS cert."""
     cache = AuthzCache()
@@ -319,7 +324,9 @@ async def test_bypass_injection_refused_when_trust_root_unset(test_key):
 
 @pytest.mark.asyncio
 async def test_bypass_injection_refused_on_wrong_trust_root(test_key):
-    """Cert signed by signer A; listener trusts signer B → reject.
+    """Verifies §13.9.5 — chain-to-trust-root mismatch is rejected.
+
+    Cert signed by signer A; listener trusts signer B → reject.
     Detects forged certs that carry the bypass marker but weren't
     actually signed by mssh-ca."""
     cache = AuthzCache()

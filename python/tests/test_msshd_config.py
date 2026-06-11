@@ -1,4 +1,7 @@
-"""Tests for mssh.msshd.config."""
+"""Tests for mssh.msshd.config.
+
+Tests: §14.3.1, §13.9.7
+"""
 from __future__ import annotations
 
 import os
@@ -55,6 +58,7 @@ def test_listen_port_out_of_range(tmp_path):
 
 
 def test_enforce_missing_tls(tmp_path):
+    """Verifies §13.9.7 — enforce mode refuses to start without TLS config."""
     cfg_path = _write(tmp_path, 'w.yaml',
         'mode: enforce\n'
         'users: {allowed: [alice]}\n')
@@ -86,6 +90,7 @@ def test_enforce_full_valid(tmp_path):
 
 
 def test_enforce_empty_users(tmp_path):
+    """Verifies §13.9.7 — empty users.allowed list is rejected (default-deny)."""
     for f in ('server.crt', 'server.key', 'user-ca.pub',
               'mtls.crt', 'mtls.key', 'mtls-ca.pub'):
         (tmp_path / f).write_text('dummy')
@@ -106,6 +111,7 @@ def test_enforce_empty_users(tmp_path):
 
 
 def test_check_permissions_world_readable_key(tmp_path):
+    """Verifies §13.9.7 — world-readable private key fails permission check."""
     for f in ('server.crt', 'server.key', 'user-ca.pub',
               'mtls.crt', 'mtls.key', 'mtls-ca.pub'):
         (tmp_path / f).write_text('dummy')

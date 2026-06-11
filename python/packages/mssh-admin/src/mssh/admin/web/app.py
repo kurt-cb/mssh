@@ -2,8 +2,12 @@
 
 Threading model: Flask's built-in werkzeug dev server is fine for v1
 (single admin in front of localhost). A production WSGI server is
-out of scope until per-admin attribution lands (§26 identity-
+out of scope until per-admin attribution lands (§11.3.3 identity-
 propagation open question).
+
+Design: §11 (mssh-admin-web) + §11.3.4 (auth model — operator
+identity arrives via the mssh-mediated localhost tunnel, not a
+browser session).
 """
 
 from __future__ import annotations

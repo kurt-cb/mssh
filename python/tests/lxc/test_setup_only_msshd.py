@@ -1,5 +1,7 @@
 """Set-up-only test for the Tier-1 (msshd) adoption journey.
 
+Tests: §1.4, §13.8 (mode flips)
+
 Walks the same containers through three states and leaves them at the
 final state with helper scripts to flip between modes:
 

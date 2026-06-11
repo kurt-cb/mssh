@@ -5,6 +5,9 @@ Accepts:
   - OpenSSH cert file ("ssh-ed25519-cert-v01@openssh.com AAAA...")
   - authorized_keys entries (options prefix before the key type)
   - Bare base64 blob (recover type from the embedded SSH wire format)
+
+Design: §7.3.1 (parsing user key arguments for `mssh-admin user add` —
+covers --type pubkey / openssh-cert / x509-cert).
 """
 from __future__ import annotations
 

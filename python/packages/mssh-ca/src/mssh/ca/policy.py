@@ -1,4 +1,9 @@
-"""Policy evaluation: source CIDR, time window, server match, channel grant."""
+"""Policy evaluation: source CIDR, time window, server match, channel grant.
+
+Design: §4.3.3 (see design/mssh_design_v1.md)
+The require_2fa attribute on Policy ties this module to §13.5
+(2FA layer); principal expansion semantics follow the same section.
+"""
 from __future__ import annotations
 
 import datetime as _dt
@@ -87,6 +92,7 @@ def evaluate(
     default_max_validity_seconds: int,
 ) -> EvaluationResult:
     """Run the full evaluation pipeline. Returns a result with deny_reason set on failure."""
+    # §4.3.3 policy evaluation; require_2fa flag per §13.5
     matching: list[Policy] = []
     last_reason = 'no_matching_policy'
     last_detail = (

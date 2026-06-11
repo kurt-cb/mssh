@@ -15,6 +15,10 @@ Override the config path with --config (or env MSSH_ADMIN_CONFIG).
 Status: v1 — read-only. Write tools (server_add, user_add, etc.)
 are out of scope. See design/future-ideas.md §12 for the trust
 model that would gate write access.
+
+Design: §12.1 (mssh-mcp transport / upstream MCP I/O) + §12.3 (entry
+point + tool dispatch) + §14.3.6 (config loader: same shape as the
+CLI's ~/.mssh-admin/config).
 """
 from __future__ import annotations
 
@@ -39,6 +43,7 @@ DEFAULT_CONFIG_PATH = Path.home() / '.mssh-admin' / 'config'
 
 
 def _load_admin_config(path: Path) -> dict:
+    # §14.3.6 config loader — same ~/.mssh-admin/config shape as the CLI
     if not path.exists():
         return {}
     return yaml.safe_load(path.read_text()) or {}
@@ -63,11 +68,13 @@ def _build_client(cfg: dict) -> CAClient | None:
         admin_cert=cfg['admin_cert'],
         admin_key=cfg['admin_key'],
         ca_cert=cfg['ca_cert'],
+        origin='mcp',                         # §12.4.2 audit tagging
     )
 
 
 async def _run_stdio(server, config_path: Path) -> None:
     """Start the MCP server on stdio."""
+    # §12.1 upstream MCP I/O — stdio transport
     from mcp.server.stdio import stdio_server
     async with stdio_server() as (read, write):
         await server.run(
@@ -96,6 +103,11 @@ def _make_mcp_server(client: CAClient | None, config_path: Path):
 
     @app.call_tool()
     async def call_tool(name: str, arguments: dict | None):
+        # §12.4.3 capability allow-list: only registry-declared tools are
+        # callable — strict subset of mssh-admin; bypass-cert mint, admin
+        # add/remove, cert revoke etc. are NEVER exposed per §12.2.
+        # §12.4.2 hardening: any future "origin: mcp" audit tagging hooks
+        # here, at the single dispatch point.
         t = tools.find_tool(name)
         if t is None:
             return [mcp_types.TextContent(

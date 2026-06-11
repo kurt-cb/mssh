@@ -12,6 +12,10 @@ Thin adapter around ``shim.ca_client.CAClient`` that:
 
 The actual mTLS / failover / proxy-handling logic lives in
 ``shim.ca_client.CAClient`` — no point duplicating it.
+
+Design: §3.2 (see design/mssh_design_v1.md) — msshd → mssh-ca mTLS
+HTTPS client (request body schema + grant/deny/error response shape).
+Uses the §9.3.1 shim CAClient for transport-level mTLS + failover.
 """
 from __future__ import annotations
 
@@ -105,6 +109,8 @@ class MsshdCAClient:
         msshd_version: str = '',
         last_crl_seq: int = 0,
     ) -> AuthorizationResult:
+        # §3.2 build POST /v1/authorize body, dispatch via shim CAClient
+        # in an executor, parse grant/deny/error.
         """Call POST /v1/authorize. ``identity_blob`` is the raw SSH
         wire-format pubkey or OpenSSH cert bytes.
 
@@ -155,6 +161,7 @@ class MsshdCAClient:
 
     async def fetch_crl(self, *, after: int, limit: int,
                          issuer: str = 'user-mint') -> dict:
+        # §3.2 GET /v1/crl — sequence-based CRL fetch in pages.
         """GET /v1/crl?after=N&limit=K&issuer=X against the same CA
         endpoint list. Returns the parsed JSON body: {status, issuer,
         current_seq, current_seqs, entries: [...]}.

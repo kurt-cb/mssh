@@ -1,5 +1,7 @@
 """Cross-distro, multi-client connectivity matrix.
 
+Tests: §6, §3.1 (end-to-end across containers)
+
 For every (source-container, target-server) pair we run **two** SSH clients
 from inside the source container — the OpenSSH ``ssh`` binary and the
 Dropbear ``dbclient`` binary — and verify the outcome matches the policy

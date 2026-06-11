@@ -2,6 +2,8 @@
 
 Stubs Apache2's X-Client-CN header to exercise mTLS-gated routes
 without standing up real TLS.
+
+Tests: §8.3.2, §8.3.3, §8.3.4, §8.3.5
 """
 
 from __future__ import annotations
@@ -57,12 +59,14 @@ def mtls_headers():
 # ---- broker auth ---------------------------------------------------------
 
 def test_broker_requires_x_client_cn(client):
+    """Verifies §8.3.2 — broker rejects requests missing X-Client-CN (mTLS)."""
     r = client.post('/broker/ceremony', json={})
     assert r.status_code == 401
     assert 'X-Client-CN' in r.get_json()['detail']
 
 
 def test_broker_refuses_unknown_cn(client):
+    """Verifies §8.3.2 — broker refuses unknown client CNs (allowlist)."""
     r = client.post('/broker/ceremony', json={},
                     headers={'X-Client-CN': 'attacker'})
     assert r.status_code == 401
@@ -72,6 +76,7 @@ def test_broker_refuses_unknown_cn(client):
 # ---- /broker/ceremony POST ----------------------------------------------
 
 def test_create_ceremony_register(client, mtls_headers):
+    """Verifies §8.3.3 — register ceremony creation returns public URL."""
     body = {
         'type': 'register',
         'options_json': _opts(),
@@ -90,6 +95,7 @@ def test_create_ceremony_register(client, mtls_headers):
 
 
 def test_create_ceremony_approve(client, mtls_headers):
+    """Verifies §8.3.3 — approve ceremony creation returns public URL."""
     body = {
         'type': 'approve',
         'options_json': _opts(),
@@ -164,6 +170,7 @@ def test_cancel_ceremony(client, mtls_headers):
 # ---- public browser endpoints --------------------------------------------
 
 def test_register_page_renders(client, mtls_headers):
+    """Verifies §8.3.4 — public register page renders ceremony options."""
     r = client.post('/broker/ceremony', json={
         'type': 'register', 'options_json': _opts(),
         'description': 'Register a new authenticator for alice',
@@ -187,6 +194,7 @@ def test_register_page_404_for_unknown(client):
 
 
 def test_register_respond(client, mtls_headers):
+    """Verifies §8.3.4 — public attestation POST records response + queues callback."""
     r = client.post('/broker/ceremony', json={
         'type': 'register', 'options_json': _opts(),
         'description': 'X',
@@ -234,6 +242,7 @@ def test_register_respond_idempotent(client, mtls_headers):
 
 
 def test_approve_deny_path(client, mtls_headers):
+    """Verifies §8.3.5 — public deny endpoint records denied outcome."""
     r = client.post('/broker/ceremony', json={
         'type': 'approve', 'options_json': _opts(),
         'description': 'Revoke X',
@@ -252,3 +261,122 @@ def test_landing(client):
     r = client.get('/')
     assert r.status_code == 200
     assert b'mssh-passkey' in r.data
+
+
+# ---- R-5 cross-RP isolation (§3.6 + §15.4) ------------------------------
+# Tests: §3.6, §15.4
+
+@pytest.fixture
+def app_multi_rp(tmp_path):
+    """App with two allowlisted RPs to exercise per-ceremony binding."""
+    cfg = Config(
+        front_end='apache',
+        listen=ListenConfig(bind='127.0.0.1', port=5000),
+        allowed_client_cns=['mssh-ca', 'external-tool-1'],
+        callback=CallbackConfig(),
+        rp=RPConfig(rp_id='passkey.example.com'),
+        database_path=str(tmp_path / 'multi.db'),
+        public_base_url='https://passkey.example.com',
+    )
+    app = create_app(cfg)
+    app.config['TESTING'] = True
+    return app
+
+
+@pytest.fixture
+def multi_client(app_multi_rp):
+    with app_multi_rp.test_client() as c:
+        yield c
+
+
+def test_r5_cross_rp_get_returns_404(multi_client):
+    """Verifies §3.6 — RP-A cannot read RP-B's ceremony via GET.
+
+    R-5 enforces ceremony.created_by == X-Client-CN; mismatch returns
+    404 (not 403) to keep ceremony existence opaque cross-RP.
+    """
+    # RP-A creates a ceremony.
+    r = multi_client.post('/broker/ceremony', json={
+        'type': 'approve', 'options_json': _opts(),
+        'description': 'rp-a-private',
+        'callback_url': 'https://rp-a/cb', 'ttl_seconds': 300,
+    }, headers={'X-Client-CN': 'mssh-ca'})
+    cid = r.get_json()['ceremony_id']
+
+    # RP-A reads its own — 200.
+    own = multi_client.get(f'/broker/ceremony/{cid}',
+                            headers={'X-Client-CN': 'mssh-ca'})
+    assert own.status_code == 200
+
+    # RP-B (also allowlisted) tries to read RP-A's — 404.
+    cross = multi_client.get(f'/broker/ceremony/{cid}',
+                              headers={'X-Client-CN': 'external-tool-1'})
+    assert cross.status_code == 404, \
+        'R-5 cross-RP read must return 404, not 200 or 403'
+
+
+def test_r5_cross_rp_delete_returns_404(multi_client):
+    """Verifies §3.6 — RP-A cannot cancel RP-B's ceremony via DELETE.
+
+    R-5 closes the read-any + cancel-any attack surface across
+    allowlisted RPs.
+    """
+    # RP-A creates.
+    r = multi_client.post('/broker/ceremony', json={
+        'type': 'approve', 'options_json': _opts(),
+        'description': 'rp-a-private',
+        'callback_url': 'https://rp-a/cb', 'ttl_seconds': 300,
+    }, headers={'X-Client-CN': 'mssh-ca'})
+    cid = r.get_json()['ceremony_id']
+
+    # RP-B tries to cancel — 404.
+    cross = multi_client.delete(f'/broker/ceremony/{cid}',
+                                 headers={'X-Client-CN': 'external-tool-1'})
+    assert cross.status_code == 404, \
+        'R-5 cross-RP delete must return 404'
+
+    # Ceremony untouched: RP-A can still cancel.
+    own = multi_client.delete(f'/broker/ceremony/{cid}',
+                               headers={'X-Client-CN': 'mssh-ca'})
+    assert own.status_code == 200
+    assert own.get_json()['outcome'] == 'cancelled'
+
+
+def test_r5_same_rp_get_returns_200(multi_client):
+    """Verifies §3.6 — same RP reading its own ceremony succeeds."""
+    r = multi_client.post('/broker/ceremony', json={
+        'type': 'approve', 'options_json': _opts(),
+        'description': 'rp-a',
+        'callback_url': 'https://rp-a/cb', 'ttl_seconds': 300,
+    }, headers={'X-Client-CN': 'mssh-ca'})
+    cid = r.get_json()['ceremony_id']
+
+    own = multi_client.get(f'/broker/ceremony/{cid}',
+                            headers={'X-Client-CN': 'mssh-ca'})
+    assert own.status_code == 200
+    assert own.get_json()['ceremony_id'] == cid
+
+
+def test_r5_404_indistinguishable_from_real_404(multi_client):
+    """Verifies §3.6 — cross-RP 404 looks identical to genuine-404.
+
+    Reason field stays 'not_found' for both, so a probing RP cannot
+    distinguish "exists but belongs to someone else" from "doesn't exist."
+    """
+    r = multi_client.post('/broker/ceremony', json={
+        'type': 'approve', 'options_json': _opts(),
+        'description': 'rp-a',
+        'callback_url': 'https://rp-a/cb', 'ttl_seconds': 300,
+    }, headers={'X-Client-CN': 'mssh-ca'})
+    cid = r.get_json()['ceremony_id']
+
+    # Cross-RP probe — exists but not yours.
+    cross = multi_client.get(f'/broker/ceremony/{cid}',
+                              headers={'X-Client-CN': 'external-tool-1'})
+    # Genuine 404 probe — doesn't exist at all.
+    nope = multi_client.get('/broker/ceremony/nonexistent',
+                             headers={'X-Client-CN': 'external-tool-1'})
+
+    assert cross.status_code == 404
+    assert nope.status_code == 404
+    assert cross.get_json()['reason'] == nope.get_json()['reason'] == 'not_found'

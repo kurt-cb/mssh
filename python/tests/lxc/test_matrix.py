@@ -1,5 +1,7 @@
 """Authorization-model matrix test.
 
+Tests: §1.4, §13.8 (adoption journey)
+
 For every (user, server) pair in the scenario:
 
   - From SSHRT_U1 (or another client), ssh as the user to the AsyncSSH server

@@ -1,5 +1,9 @@
 """Template store + resolver for inner-sshd config templates.
 
+Design: §4.3.12 (see design/mssh_design_v1.md) — template storage
+and resolution chain (per-server > per-group > fleet-default >
+built-in). The rendered output is consumed by msshd per §5.3.11.
+
 Templates are stored in the same ``enrollment.yaml`` as users / servers /
 policies (see [mssh.ca.enrollment.Enrollment](enrollment.py) — three
 new dict attributes: ``templates_default``, ``templates_groups``,
@@ -129,6 +133,8 @@ def get_effective_template(
     Raises ``EnrollmentError`` if ``kind`` has no built-in default
     (i.e. unknown kind).
     """
+    # §4.3.12 resolution chain: per-server > per-group > fleet-default
+    # > built-in. Consumer side is §5.3.11.
     # Per-server override.
     if server_name is not None:
         per_server = (enrollment.templates_servers.get(server_name) or {}).get(kind)

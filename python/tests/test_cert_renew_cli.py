@@ -1,4 +1,7 @@
-"""CLI tests for `mssh-admin cert renew`. Stubs the CAClient."""
+"""CLI tests for `mssh-admin cert renew`. Stubs the CAClient.
+
+Tests: §7.3.3, §13.4
+"""
 
 from __future__ import annotations
 

@@ -10,6 +10,8 @@ to route. No real machine sits there, so connect blocks.
 
 Bug #6 was closed in v0.1.0; mssh now bounds connect to 5s. This
 test verifies the fix.
+
+Tests: §6.3.3
 """
 from __future__ import annotations
 
