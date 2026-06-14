@@ -228,8 +228,10 @@ document. No edits in place.
 | **§15.14** | **WireGuard server-side registration** | 🚧 | **v1** (symmetric) |
 | **§15.15** | **Webhook / event subscription** | 🚧 | **v2** |
 | **§15.16** | **HSM / external Root key custody** | 🚧 | **v3** (already noted in §18.3) |
-| **§15.17** | **Dedicated `code-mint` intermediate** | 🚧 | **v1.x** — code-signing leaves currently chain to `auth`; per §2.3 intermediate-pinning they should chain to their own intermediate so a code-sig leaf can't be confused with admin-mTLS. ~50 LOC + tests |
-| **§15.18** | **CSR-based code-signing issuance** | 🚧 | **v1.x** — today the CA generates the keypair and returns the private key. For HSM/YubiKey-backed signing keys the operator submits an x509 CSR (public key only); the CA signs and returns just the cert. ~80 LOC + tests |
+| **§15.17** | **Dedicated `code-mint` intermediate** | 🚧 | **v0.6+** — §15.23 (v0.5.0) cert-kind markers now provide the same type-separation guarantee at the marker layer; §15.17 intermediate-pinning may be redundant. Reconsider after marker enforcement on renew lands. |
+| **§15.18** | **CSR-based code-signing issuance** | 🟡 | **v0.5.0 infra shipped** — `mssh.ca.csr` (used by §15.19 external-use) is reusable for code-sign; a thin wrapper is the remaining work. ~30 LOC + tests. |
+| **§15.22** | **Per-Root rotation + revocation + admin-web visibility** | 🚧 | **v0.6+** — v0.5.0 shipped the storage + load + mint flow. Rotation of a non-primary Root, per-Root CRL issuance, and admin-web Root listing are the v0.6 follow-up. ~200 LOC + tests. |
+| **§15.23** | **Renew-side kind-drift enforcement** | 🚧 | **v0.6+** — v0.5.0 emits kind markers on every mint but the renew path still infers kind from EKU rather than validating against the inbound cert's marker. Needs a graceful legacy bypass for v0.4.x certs without markers. ~80 LOC + tests. |
 
 ### Other items reviewed
 

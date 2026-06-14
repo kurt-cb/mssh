@@ -4480,6 +4480,108 @@ gets v1 backward-compatibility guarantees.
   submits a CSR (PKCS#10 PEM); the CA verifies the CSR signature,
   enforces the cert profile, and returns just the signed
   certificate. Composes with §15.17. Estimated: ~80 LOC + tests.
+  Update v0.5.0: the CSR infrastructure now ships in
+  `mssh.ca.csr` (used by §15.19 external-use); a code-sign
+  variant is a thin wrapper away. Marked 🟡 partial.
+
+- **§15.19 External-use certificate kind** ✅ v0.5.0 —
+  *purpose:* a generic, CSR-based leaf cert kind for uses
+  outside mssh's own runtime (device identity per IEEE 802.1AR
+  IDevID, ROM-burned firmware identity, BMC certs, IoT shadow
+  certs, etc.). Operator-defined validity (per-kind via §15.23
+  `cert_kinds:` section; default 7305 days / 20yr, cap 9125
+  days / 25yr). Indefinite-expiry sentinel `notAfter =
+  99991231235959Z` (RFC 5280 §4.1.2.5) when `never_expires:
+  true` on the request body. **CSR-only** — the operator's
+  hardware-bound key never touches the CA. Each leaf MUST pin
+  (via §15.20 marker) to an external intermediate minted with
+  `--profile <name>`. The cert's actual use case (device-mfg,
+  bmc-id, etc.) is identified by operator-supplied custom OIDs
+  from the §15.21 allowlist, not by a fixed kind name. Cert-kind
+  marker `1.3.6.1.4.1.55555.3.9` (§15.23). REST:
+  `POST /v1/admin/cert/external-use`. CLI: `mssh-admin cert
+  mint --type external-use --cn N --csr F --issuer-intermediate I
+  [--validity-days N | --never-expires] [--custom-oid OID=V] --out P`.
+
+- **§15.20 `mint-external --profile <name>`** ✅ v0.5.0 —
+  *purpose:* extend the existing §2.6 external-intermediate flow
+  with operator-named profiles. Built-ins: `generic` (default —
+  preserves v0.4.x behavior byte-identical) and `device-identity`
+  (default validity 10950 days / 30yr; sets the §15.23 intermediate-
+  purpose marker `1.3.6.1.4.1.55555.2.1` so external-use leaves
+  can pin to it). Profile name is persisted to
+  `<ca_dir>/external/<name>/profile.json` for diagnostics. Operator
+  custom OIDs (§15.21) compose with the profile — operator can
+  attach identifiers to the intermediate too.
+
+- **§15.21 Operator-allowlist custom-OID injection** ✅ v0.5.0 —
+  *purpose:* both intermediate-mint and external-use leaf-mint
+  accept a `custom_oids: [{oid|name, value, critical?}]` list in
+  the request body. CA validates each entry against an allowlist
+  declared in ca-config.yaml's `custom_oids:` section (strict
+  allowlist — empty allowlist = default-deny). Allowlist entry
+  shape: `{oid, name, encoding, max_length?, description}` with
+  encoding ∈ `{utf8, octet, integer, null, printable}`. **OID-arc
+  reservation:** `1.3.6.1.4.1.55555.[1-4999].*` is mssh-reserved
+  (hard-rejected from the allowlist regardless of YAML), and
+  `1.3.6.1.4.1.55555.[5000-65535].*` is the mssh-assigned operator
+  sub-arc (available without an IANA PEN registration). Operators
+  with their own PEN may also use it. `CAConfig.validate()`
+  refuses to start if any allowlisted OID overlaps the reserved
+  range. The `mssh-admin init` writer emits a documented
+  `custom_oids:` block with the reserved-arc reference table
+  inline.
+
+- **§15.22 Separate-Root option for external intermediates**
+  ✅ v0.5.0 *(storage + mint flow)* — *purpose:* opt-in `new_root:
+  true` (with optional `root_name: <name>`) on the external-
+  intermediate mint flow. Creates a fresh Root + signs the new
+  intermediate under it instead of the primary Root. Persisted
+  under `<ca_dir>/roots/<root-name>/{cert,key}.pem`. `mssh.ca.roots`
+  module loads all Roots at startup (primary + every non-primary).
+  Downstream consumers add only the Roots they trust. v0.5.0
+  scope intentionally limited to storage + load + mint flow;
+  per-Root rotation, revocation, and admin-web visibility are
+  v0.6+ follow-ups (in FEATURES-TODO).
+
+- **§15.23 Cert-kind markers + per-kind validity policy**
+  ✅ v0.5.0 — *purpose:* defense-in-depth + operator-configurable
+  validity. **Markers:** every leaf the CA emits carries a
+  non-critical NULL marker OID under `1.3.6.1.4.1.55555.3.*`
+  identifying the cert's kind. The CA always emits these (no
+  operator opt-out); marker is non-critical so legacy verifiers
+  ignore it (RFC 5280 §4.2). Marker assignments:
+
+  | OID | Kind |
+  |-----|------|
+  | `.3.1` | `authz-user` |
+  | `.3.2` | `authz-bypass` |
+  | `.3.3` | `server-tls` (legacy alias `tls-server`) |
+  | `.3.4` | `admin-mtls` |
+  | `.3.5` | `client-mtls` |
+  | `.3.6` | `https-user` |
+  | `.3.7` | `code-sign` |
+  | `.3.8` | `openvpn` |
+  | `.3.9` | `external-use` |
+
+  Intermediate-purpose markers under `1.3.6.1.4.1.55555.2.*`:
+  `.2.1` `OID_PURPOSE_EXTERNAL_USE_INTERMEDIATE` (set by §15.20
+  non-`generic` profiles). Future profiles take subsequent slots.
+
+  **Per-kind validity policy:** moved from hardcoded
+  `_CERT_DEFAULT_VALIDITY` / `_CERT_MAX_VALIDITY` in admin.py
+  into a `cert_kinds:` section of ca-config.yaml. Operator-set;
+  baseline fallbacks in `config.py` preserve v0.4.x behavior
+  byte-identical for configs without `cert_kinds:`. Per-kind
+  lookup falls through `per_kind[<kind>]` → section-level
+  defaults → built-in baseline. Bootstrap writer emits a
+  documented section with sensible defaults per kind (VPN
+  short, machine-identity very long, etc.).
+
+  **Renewal-side kind-drift enforcement** is a v0.6+ follow-up
+  (added to FEATURES-TODO); v0.5.0 emits markers on every mint
+  and the renew path keeps inferring kind from EKU so existing
+  v0.4.x certs continue to renew without disruption.
 
 ---
 

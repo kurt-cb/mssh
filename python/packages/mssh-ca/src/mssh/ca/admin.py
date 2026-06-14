@@ -70,6 +70,11 @@ _PERMISSIONS = {
     # to superuser since these are operator-distributed credentials
     # outside the SSH path.
     'cert.mint':        {'superuser'},
+    # §15.19 external-use cert mint (CSR-based, chains to operator's
+    # external intermediate). Restricted to superuser because external
+    # leaves carry operator identifiers; minting one wrong is hard
+    # to undo (device-burned IDevID certs especially).
+    'cert.external_use.mint': {'superuser'},
     'openvpn.issue':    {'superuser'},
     # WireGuard catalog management. Same sensitivity as openvpn —
     # the CA owns the server private key and mints per-peer
@@ -148,6 +153,16 @@ class AdminContext:
     # legacy aliases). Set in v0.2.1+ deployments; unset means
     # legacy single-signer mode. Used by intermediate.list/rotate.
     ca_dir: str = ''
+
+    # §15.23 per-kind validity policy from ca-config.yaml. When unset
+    # (default), `_validity_or_default()` falls back to the built-in
+    # v0.4.x baseline dicts in config.py — preserving v0.4.x behavior
+    # byte-identical for configs that lack a `cert_kinds:` section.
+    cert_kinds: Any = None        # CertKindsPolicy | None
+
+    # §15.21 operator-allowlisted custom OIDs. None = default-deny —
+    # any mint request that supplies custom_oids is rejected.
+    custom_oids: Any = None       # CustomOIDAllowlist | None
 
 
 def _now_iso() -> str:
@@ -248,6 +263,7 @@ def server_add(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
             tls_ca_cert=ctx.tls_ca_cert,
             validity_days=ctx.server_cert_validity_days,
             key_type=ctx.mtls_key_type,
+            kind='client-mtls',
         )
         srv = ctx.enrollment.add_server(name, mtls_subject, groups,
                                         enrolled_by=admin.name)
@@ -513,6 +529,7 @@ def admin_add(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
             tls_ca_cert=ctx.tls_ca_cert,
             validity_days=ctx.admin_cert_validity_days,
             key_type=ctx.mtls_key_type,
+            kind='admin-mtls',
         )
         new_admin = ctx.enrollment.add_admin(
             name, role, mtls_subject, enrolled_by=admin.name)
@@ -1071,7 +1088,22 @@ def external_intermediate_mint(ctx: AdminContext, admin: Admin,
     if path_length < 0 or path_length > 5:
         return _err(400, 'bad_request',
                     'path_length must be in [0, 5]')
-    validity_days = int(body.get('validity_days') or 3650)
+    # §15.20 profile flag. `generic` (default) preserves v0.4.x
+    # behavior byte-identical; named profiles (e.g. `device-identity`)
+    # bump default validity to 30yr and stamp the §15.23
+    # intermediate-purpose marker so external-use leaves can pin to it.
+    _BUILTIN_PROFILES = {
+        'generic':         {'default_validity_days': 3650},
+        'device-identity': {'default_validity_days': 10950},
+    }
+    profile = (body.get('profile') or 'generic').strip()
+    if profile not in _BUILTIN_PROFILES:
+        return _err(400, 'bad_request',
+                    f'unknown profile {profile!r}; built-ins are '
+                    f'{sorted(_BUILTIN_PROFILES)}')
+    profile_defaults = _BUILTIN_PROFILES[profile]
+    validity_days = int(
+        body.get('validity_days') or profile_defaults['default_validity_days'])
 
     if not ctx.ca_dir:
         return _err(503, 'unavailable',
@@ -1087,15 +1119,49 @@ def external_intermediate_mint(ctx: AdminContext, admin: Admin,
                     f'external intermediate {name!r} already exists at '
                     f'{target}; rotate or pick a different name')
 
-    root_cert = cert_minter.load_root_cert(ca_dir)
-    root_key = cert_minter.load_private_key(ca_dir / 'root-key.pem')
+    # §15.22 — optional `new_root: true` opts into a separate Root.
+    # The named Root is created (or re-used if it already exists) under
+    # <ca_dir>/roots/<root_name>/, and the new intermediate is signed
+    # by that Root instead of the primary one. Operator's deployment
+    # process trusts the right Root in the device's trust store.
+    new_root = bool(body.get('new_root', False))
+    root_name = (body.get('root_name') or '').strip()
+    if new_root or root_name:
+        if not root_name:
+            root_name = name   # default to intermediate's name
+        from . import roots as roots_mod
+        all_roots = roots_mod.load_all_roots(ca_dir)
+        if root_name in all_roots and root_name != 'primary':
+            root_entry = all_roots[root_name]
+        else:
+            try:
+                root_entry = roots_mod.create_new_root(
+                    ca_dir, name=root_name)
+            except ValueError as e:
+                return _err(400, 'bad_request', str(e))
+        root_cert = root_entry.cert
+        root_key = root_entry.key
+    else:
+        root_cert = cert_minter.load_root_cert(ca_dir)
+        root_key = cert_minter.load_private_key(ca_dir / 'root-key.pem')
+        root_name = 'primary'
+
     new_key, new_cert = cert_minter.issue_external_intermediate(
         name, root_key=root_key, root_cert=root_cert,
-        path_length=path_length, validity_days=validity_days)
+        path_length=path_length, validity_days=validity_days,
+        profile=profile)
 
     target.mkdir(parents=True, exist_ok=True)
     cert_pem = cert_minter.serialize_certificate(new_cert)
     (target / 'cert.pem').write_bytes(cert_pem)
+    # §15.20 — persist the profile alongside the cert so the CA knows
+    # on future loads which leaves this intermediate is allowed to sign.
+    import json as _json
+    (target / 'profile.json').write_text(_json.dumps({
+        'profile': profile,
+        'path_length': path_length,
+        'validity_days': validity_days,
+    }))
     # NOTE: we do NOT persist the private key. The external entity
     # gets it once in this response; the CA retains only the public
     # cert. This is the whole point of delegating signing authority.
@@ -1104,6 +1170,8 @@ def external_intermediate_mint(ctx: AdminContext, admin: Admin,
 
     _audit_admin(ctx, admin, 'intermediate.external.mint',
                  {'name': name, 'path_length': path_length,
+                  'profile': profile,
+                  'root_name': root_name,
                   'pubkey_fp16': fp16,
                   'serial': format(new_cert.serial_number, 'x')},
                  'ok')
@@ -1112,6 +1180,8 @@ def external_intermediate_mint(ctx: AdminContext, admin: Admin,
         'status': 'ok',
         'name': name,
         'path_length': path_length,
+        'profile': profile,
+        'root_name': root_name,
         'issuer_id': f'external-{name}:{fp16}',
         'cert_pem': cert_pem.decode('ascii'),
         'key_pem': key_pem.decode('ascii'),
@@ -1181,16 +1251,22 @@ def crl_fetch(ctx: AdminContext, admin: Admin,
 
 _CERT_TYPES = ('tls-server', 'https-user', 'code-sign')
 
-# Default per-type validity (days). Operators can override per-call via
-# body['validity_days']; the validity cap below is the hard upper bound.
+# §15.23: per-type validity resolution is now operator-configurable
+# via ca-config.yaml's `cert_kinds:` section (parsed into
+# `CertKindsPolicy` and threaded through `AdminContext.cert_kinds`).
+# When the operator's config has no `cert_kinds:` section, these
+# fall back to the built-in baseline in config.py — which mirrors
+# v0.4.x behavior byte-identical. The constants below are retained
+# only as a v0.4.x-compatible fallback path when callers pass a
+# raw AdminContext without `cert_kinds` (older tests; legacy entry
+# points). The authoritative source is `ctx.cert_kinds`.
 _CERT_DEFAULT_VALIDITY = {
     'tls-server': 90,
     'https-user': 90,
     'code-sign':  365,
     'openvpn':    90,
 }
-_CERT_MAX_VALIDITY = 825   # CAB-forum-style max for TLS server certs;
-                            # we apply it uniformly for simplicity.
+_CERT_MAX_VALIDITY = 825   # CAB-forum-style max; v0.4.x global cap.
 
 
 def _validate_san(s: str) -> str:
@@ -1220,12 +1296,25 @@ def _validate_san(s: str) -> str:
     return f'DNS:{host}'
 
 
-def _validity_or_default(body: dict, kind: str) -> tuple[int, dict | None]:
-    """Resolve validity_days from body with default + cap. Returns
-    ``(days, err_payload)`` — err_payload is None on success."""
+def _validity_or_default(ctx: AdminContext | None, body: dict,
+                         kind: str) -> tuple[int, dict | None]:
+    """Resolve validity_days from body with operator-configured default
+    + cap (§15.23). Returns ``(days, err_payload)`` — err_payload is
+    None on success.
+
+    Looks up `ctx.cert_kinds.default_for(kind)` / `cap_for(kind)` when
+    `ctx.cert_kinds` is set. Otherwise (legacy tests, no ctx) falls
+    back to the v0.4.x baseline dicts.
+    """
+    if ctx is not None and getattr(ctx, 'cert_kinds', None) is not None:
+        default = ctx.cert_kinds.default_for(kind)
+        cap = ctx.cert_kinds.cap_for(kind)
+    else:
+        default = _CERT_DEFAULT_VALIDITY.get(kind, 90)
+        cap = _CERT_MAX_VALIDITY
     raw = body.get('validity_days')
     if raw is None:
-        return _CERT_DEFAULT_VALIDITY[kind], None
+        return default, None
     try:
         days = int(raw)
     except (TypeError, ValueError):
@@ -1234,9 +1323,9 @@ def _validity_or_default(body: dict, kind: str) -> tuple[int, dict | None]:
     if days < 1:
         return 0, _err(400, 'bad_request',
                        f'validity_days must be >= 1, got {days}')[1]
-    if days > _CERT_MAX_VALIDITY:
+    if days > cap:
         return 0, _err(400, 'bad_request',
-                       f'validity_days={days} exceeds cap {_CERT_MAX_VALIDITY}')[1]
+                       f'validity_days={days} exceeds cap {cap}')[1]
     return days, None
 
 
@@ -1269,7 +1358,7 @@ def cert_mint(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
         return _err(400, 'bad_request', 'missing/invalid cn')
     cn = cn.strip()
 
-    days, err = _validity_or_default(body, cert_type)
+    days, err = _validity_or_default(ctx, body, cert_type)
     if err:
         return 400, err
 
@@ -1295,7 +1384,7 @@ def cert_mint(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
             bundle = cert_minter.issue_client_cert(
                 cn, ctx.tls_ca_key, ctx.tls_ca_cert,
                 validity_days=days, key_type=ctx.mtls_key_type,
-                crl_url=ctx.crl_url)
+                crl_url=ctx.crl_url, kind='https-user')
         else:  # code-sign
             # Code-signing certs intentionally skip CRLDP — long-lived
             # build identities + downstream timestamping authorities
@@ -1321,6 +1410,138 @@ def cert_mint(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
             'cert_pem': bundle.cert_pem.decode('ascii'),
             'key_pem': bundle.key_pem.decode('ascii'),
             'ca_cert_pem': bundle.ca_cert_pem.decode('ascii'),
+        },
+    }
+
+
+def external_use_cert_mint(ctx: AdminContext, admin: Admin,
+                            body: dict) -> tuple[int, dict]:
+    """§15.19 — mint a CSR-based external-use leaf signed by an
+    operator-named external intermediate (one minted via §15.20
+    `--profile <name>`).
+
+    Body schema::
+
+      {
+        "cn":                  "device-001",
+        "csr":                 "-----BEGIN CERTIFICATE REQUEST-----...",
+        "issuer_intermediate": "device-mfg",
+        "validity_days":       7305,                  # optional
+        "never_expires":       false,                 # optional (§15.19)
+        "custom_oids":         [{"oid": ..., "value": ...}],  # optional (§15.21)
+      }
+
+    Returns the issued leaf PEM (no private key — operator's CSR-supplied
+    key stays on-device).
+    """
+    if (err := _check('cert.external_use.mint', admin)):
+        return err
+
+    cn = (body.get('cn') or '').strip()
+    if not cn:
+        return _err(400, 'bad_request', 'missing/invalid cn')
+
+    csr_pem = body.get('csr')
+    if not csr_pem:
+        return _err(400, 'bad_request',
+                    'external-use mint requires a csr (PEM); the CA does '
+                    'not generate keys for external-use certs (§15.19)')
+
+    issuer_name = (body.get('issuer_intermediate') or '').strip()
+    if not issuer_name:
+        return _err(400, 'bad_request',
+                    'external-use mint requires issuer_intermediate '
+                    '(the name of a §15.20-minted external intermediate)')
+
+    never_expires = bool(body.get('never_expires', False))
+    custom_oids = body.get('custom_oids') or []
+
+    if not never_expires:
+        days, err = _validity_or_default(ctx, body, 'external-use')
+        if err:
+            return 400, err
+    else:
+        days = 0
+
+    if not ctx.ca_dir:
+        return _err(503, 'unavailable',
+                    'CA in legacy single-signer mode; multi-intermediate '
+                    'layout required for external-use (§15.19)')
+
+    # Load the named external intermediate from disk.
+    from pathlib import Path
+    from . import cert_minter
+    from . import csr as csr_mod
+    ca_dir = Path(ctx.ca_dir)
+    issuer_dir = ca_dir / 'external' / issuer_name
+    issuer_cert_path = issuer_dir / 'cert.pem'
+    if not issuer_cert_path.exists():
+        return _err(404, 'not_found',
+                    f'external intermediate {issuer_name!r} not found '
+                    f'(mint it first via `mssh-admin intermediate mint-external`)')
+    issuer_cert = cert_minter.load_certificate(issuer_cert_path)
+
+    # External intermediates don't persist their key CA-side per §2.6.
+    # For external-use leaves we need the operator to have provided the
+    # intermediate's key back — typically by writing it into the
+    # intermediate's directory after minting. v0.5.0 keeps this simple:
+    # if `key.pem` is present in the intermediate's dir, use it.
+    issuer_key_path = issuer_dir / 'key.pem'
+    if not issuer_key_path.exists():
+        return _err(409, 'conflict',
+                    f'external intermediate {issuer_name!r} has no key.pem '
+                    f'on disk; this CA cannot sign external-use leaves '
+                    f'under it. (The key was returned at mint time and '
+                    f'must be placed at {issuer_key_path} to enable CA-side '
+                    f'leaf issuance.)')
+    issuer_key = cert_minter.load_private_key(issuer_key_path)
+
+    # Verify + parse the CSR.
+    try:
+        csr_obj = csr_mod.load_and_verify_csr(csr_pem)
+    except csr_mod.CSRValidationError as e:
+        return _err(400, 'bad_request', f'CSR rejected: {e}')
+
+    try:
+        issued = cert_minter.issue_external_use_cert(
+            csr_obj,
+            issuer_key=issuer_key, issuer_cert=issuer_cert,
+            cn=cn,
+            validity_days=days if not never_expires else 1,
+            never_expires=never_expires,
+            custom_oids=custom_oids,
+            allowlist=ctx.custom_oids,
+            crl_url=ctx.crl_url,
+        )
+    except ValueError as e:
+        return _err(400, 'bad_request', str(e))
+    except Exception as e:
+        return _err(500, 'internal', f'cert issuance failed: {e}')
+
+    _audit_admin(ctx, admin, 'cert.external_use.mint',
+                 {'cn': cn,
+                  'issuer_intermediate': issuer_name,
+                  'never_expires': never_expires,
+                  'validity_days': days,
+                  'custom_oids': [
+                      r.get('oid') or r.get('name')
+                      for r in custom_oids if isinstance(r, dict)
+                  ]}, 'ok')
+
+    return 201, {
+        'status': 'ok',
+        'cert': {
+            'type': 'external-use',
+            'subject_cn': cn,
+            'issuer_intermediate': issuer_name,
+            'never_expires': never_expires,
+            'validity_days': (None if never_expires else days),
+            'not_valid_after': issued.not_valid_after.isoformat(),
+        },
+        'credentials': {
+            'cert_pem': issued.cert_pem.decode('ascii'),
+            'leaf_only_pem': issued.leaf_only_pem.decode('ascii'),
+            'ca_cert_pem': issued.ca_cert_pem.decode('ascii'),
         },
     }
 
@@ -1368,7 +1589,7 @@ def openvpn_issue(ctx: AdminContext, admin: Admin,
     if dev not in ('tun', 'tap'):
         return _err(400, 'bad_request', f'dev must be tun or tap, got {dev!r}')
 
-    days, err = _validity_or_default(body, 'openvpn')
+    days, err = _validity_or_default(ctx, body, 'openvpn')
     if err:
         return 400, err
 
@@ -1376,7 +1597,7 @@ def openvpn_issue(ctx: AdminContext, admin: Admin,
         bundle = cert_minter.issue_client_cert(
             cn, ctx.tls_ca_key, ctx.tls_ca_cert,
             validity_days=days, key_type=ctx.mtls_key_type,
-            crl_url=ctx.crl_url)
+            crl_url=ctx.crl_url, kind='openvpn')
     except Exception as e:
         return _err(500, 'internal', f'cert issuance failed: {e}')
 
@@ -2192,6 +2413,7 @@ def external_tool_add(ctx: AdminContext, admin: Admin,
             validity_days=ctx.admin_cert_validity_days,
             key_type=ctx.mtls_key_type,
             crl_url=ctx.crl_url,
+            kind='client-mtls',
         )
         tool = ctx.enrollment.add_external_tool(
             name=name, mtls_subject=mtls_subject,
@@ -2661,6 +2883,11 @@ def cert_renew(ctx: AdminContext, presented_cert,
     validity_days = max(1, int(round(original_validity / 86400)))
 
     # 4. Mint the new leaf via the same helper that issued it.
+    # §15.23 — the kind is inferred from the inbound cert's EKU so
+    # the renewed cert carries the same kind marker as the original.
+    # An explicit kind-drift check (rejecting renewal that would
+    # change kind) is a v0.6 follow-up — left out here so v0.4.x
+    # certs without markers don't break renewal.
     try:
         if is_server:
             bundle = cert_minter.issue_server_cert(
@@ -2682,7 +2909,8 @@ def cert_renew(ctx: AdminContext, presented_cert,
                 subject_cn, ctx.tls_ca_key, ctx.tls_ca_cert,
                 validity_days=validity_days,
                 key_type=ctx.mtls_key_type,
-                crl_url=ctx.crl_url)
+                crl_url=ctx.crl_url,
+                kind='client-mtls')
         else:
             return _err(400, 'unsupported_eku',
                          f'cannot renew cert with EKUs {sorted(eku_usages)}; '

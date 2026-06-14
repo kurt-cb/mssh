@@ -2,7 +2,7 @@
 
 Design: §14.3.2 (see design/mssh_design_v1.md) — ca-config.yaml schema
 parsing. The default-deny posture for unset/uncovered actions is the
-§13.9.7 default-deny invariant.
+§13.9.7 default-deny invariant. §15.23 cert_kinds policy.
 """
 from __future__ import annotations
 
@@ -10,6 +10,256 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+
+# §15.23 per-kind validity fallback baselines. Used when the operator's
+# ca-config.yaml has no `cert_kinds:` section (v0.4.x configs); also the
+# floor when the operator sets `cert_kinds:` without a per-kind entry
+# for a given kind. Each kind's (default, max) pair mirrors v0.4.x
+# behavior — see §15.23 for the rationale per kind.
+_FALLBACK_CERT_DEFAULT_VALIDITY = {
+    'authz-user':    1,
+    'authz-bypass':  90,
+    'server-tls':    365,
+    'admin-mtls':    365,
+    'client-mtls':   365,
+    'https-user':    90,
+    'openvpn':       90,
+    'code-sign':     365,
+    'external-use':  7305,   # 20yr; §15.19
+    # Legacy aliases still accepted by the cert-mint admin handler.
+    'tls-server':    90,
+}
+_FALLBACK_CERT_MAX_VALIDITY = {
+    'authz-user':    7,
+    'authz-bypass':  3650,
+    'server-tls':    825,
+    'admin-mtls':    825,
+    'client-mtls':   825,
+    'https-user':    825,
+    'openvpn':       365,
+    'code-sign':     1825,
+    'external-use':  9125,   # 25yr; §15.19
+    # Legacy aliases still accepted by the cert-mint admin handler.
+    'tls-server':    825,
+}
+_FALLBACK_BASE_DEFAULT = 90
+_FALLBACK_BASE_MAX = 825
+
+
+# §15.21 OID arc reservation. Operators submitting custom OIDs on cert
+# mint requests must reference OIDs declared in `custom_oids:` AND not
+# in the reserved range. The CA refuses to start if any allowlisted
+# entry overlaps the reserved range (§13.9.7 default-deny).
+#
+# RESERVED_OID_RANGES is a tuple of (prefix, low_inclusive, high_inclusive,
+# label) tuples — an OID like `<prefix>.<n>.…` is reserved when n is in
+# [low, high]. The five-arc form catches all current and future mssh
+# sub-arcs under `.1.*` through `.4999.*`.
+RESERVED_OID_RANGES = (
+    ('1.3.6.1.4.1.55555', 1, 4999, 'mssh-reserved'),
+)
+
+# OPERATOR_SUB_ARC is the mssh-assigned sub-arc available for operator
+# custom OIDs without requiring an IANA PEN registration. OIDs whose
+# fifth arc is in [5000, 65535] are guaranteed not to collide with
+# mssh-internal OIDs.
+OPERATOR_SUB_ARC = ('1.3.6.1.4.1.55555', 5000, 65535)
+
+
+_CUSTOM_OID_ENCODINGS = ('utf8', 'octet', 'integer', 'null', 'printable')
+
+
+def _check_oid_against_reserved(oid: str) -> str | None:
+    """Return None if the OID is allowed in the operator allowlist;
+    return a human-readable error message otherwise. The check matches
+    any OID whose dotted form has the reserved prefix followed by a
+    number in the reserved range.
+
+    Design: §15.21.
+    """
+    parts = oid.split('.')
+    if len(parts) < 6:
+        return None
+    for prefix, low, high, label in RESERVED_OID_RANGES:
+        prefix_parts = prefix.split('.')
+        if parts[: len(prefix_parts)] != prefix_parts:
+            continue
+        try:
+            sub = int(parts[len(prefix_parts)])
+        except (ValueError, IndexError):
+            continue
+        if low <= sub <= high:
+            sub_lo, sub_hi, _ = OPERATOR_SUB_ARC[1], OPERATOR_SUB_ARC[2], None
+            return (
+                f'OID {oid} is in the {label} range '
+                f'({prefix}.{low}-{high}.*); use {prefix}.{sub_lo}-{sub_hi}.* '
+                f'(operator sub-arc) or your own IANA PEN instead'
+            )
+    return None
+
+
+@dataclass
+class CustomOIDEntry:
+    """One operator-allowlisted X.509 extension OID (§15.21).
+
+    Operators reference an entry by either ``oid`` (dotted form) or
+    ``name`` (the human-friendly alias) on cert mint requests.
+    """
+    oid: str
+    name: str
+    encoding: str                  # one of _CUSTOM_OID_ENCODINGS
+    max_length: int | None = None  # bytes; None = unbounded
+    description: str = ''
+    critical: bool = False         # default non-critical
+
+
+@dataclass
+class CustomOIDAllowlist:
+    """§15.21 strict allowlist of operator-defined OIDs.
+
+    The CA validates each operator-submitted ``custom_oids: [...]`` list
+    on cert mint against this allowlist. Entries not on the list are
+    rejected with a clear error naming the offending OID.
+
+    A CA started with no `custom_oids:` section in ca-config.yaml gets
+    an empty allowlist — any mint request that supplies a custom OID
+    is rejected (§13.9.7 default-deny).
+    """
+    entries: dict[str, CustomOIDEntry] = field(default_factory=dict)
+    # name -> oid map for `--custom-oid name=value` reference form.
+    by_name: dict[str, str] = field(default_factory=dict)
+
+    def is_allowed(self, oid: str) -> bool:
+        return oid in self.entries
+
+    def lookup(self, oid_or_name: str) -> CustomOIDEntry | None:
+        if oid_or_name in self.entries:
+            return self.entries[oid_or_name]
+        oid = self.by_name.get(oid_or_name)
+        if oid:
+            return self.entries.get(oid)
+        return None
+
+    def validate_self(self) -> None:
+        """Raises ValueError if any allowlisted entry overlaps the
+        mssh-reserved arc or uses an unknown encoding.
+
+        Called from CAConfig.validate() at CA startup (§13.9.7
+        default-deny: refuse to start with an obviously misconfigured
+        allowlist).
+
+        Design: §15.21.
+        """
+        for oid, entry in self.entries.items():
+            err = _check_oid_against_reserved(oid)
+            if err:
+                raise ValueError(
+                    f'ca-config.yaml custom_oids: {err} (§15.21)')
+            if entry.encoding not in _CUSTOM_OID_ENCODINGS:
+                raise ValueError(
+                    f'ca-config.yaml custom_oids: entry for {oid} has '
+                    f'unknown encoding {entry.encoding!r}; '
+                    f'must be one of {_CUSTOM_OID_ENCODINGS} (§15.21)')
+            if entry.max_length is not None and entry.max_length < 1:
+                raise ValueError(
+                    f'ca-config.yaml custom_oids: entry for {oid} has '
+                    f'non-positive max_length={entry.max_length} (§15.21)')
+
+    @classmethod
+    def from_yaml_section(cls, section: list | None) -> 'CustomOIDAllowlist':
+        if not section:
+            return cls()
+        entries: dict[str, CustomOIDEntry] = {}
+        by_name: dict[str, str] = {}
+        for raw in section:
+            if not isinstance(raw, dict):
+                continue
+            oid = str(raw.get('oid') or '').strip()
+            if not oid:
+                continue
+            name = str(raw.get('name') or '').strip()
+            encoding = str(raw.get('encoding') or 'utf8').strip()
+            max_length = raw.get('max_length')
+            critical = bool(raw.get('critical', False))
+            entry = CustomOIDEntry(
+                oid=oid, name=name, encoding=encoding,
+                max_length=int(max_length) if max_length is not None else None,
+                description=str(raw.get('description') or ''),
+                critical=critical,
+            )
+            entries[oid] = entry
+            if name:
+                by_name[name] = oid
+        return cls(entries=entries, by_name=by_name)
+
+
+@dataclass
+class CertKindsPolicy:
+    """§15.23 per-kind validity policy parsed from ca-config.yaml.
+
+    Operators set per-kind defaults + caps under the ``cert_kinds:``
+    section. Each kind looked up via ``default_for()`` / ``cap_for()``
+    falls through in this order:
+
+      1. ``per_kind[<kind>][default_validity_days|max_validity_days]``
+      2. ``default_validity_days`` / ``default_max_validity_days``
+         (the operator's section-level defaults)
+      3. ``_FALLBACK_CERT_DEFAULT_VALIDITY[<kind>]`` /
+         ``_FALLBACK_CERT_MAX_VALIDITY[<kind>]`` (built-in mssh
+         baseline; matches v0.4.x behavior)
+      4. ``_FALLBACK_BASE_DEFAULT`` / ``_FALLBACK_BASE_MAX``
+         (90d / 825d ultimate floor)
+
+    Design: §15.23.
+    """
+    default_validity_days: int = _FALLBACK_BASE_DEFAULT
+    default_max_validity_days: int = _FALLBACK_BASE_MAX
+    per_kind: dict[str, dict[str, int]] = field(default_factory=dict)
+
+    def default_for(self, kind: str) -> int:
+        kpol = self.per_kind.get(kind) or {}
+        if 'default_validity_days' in kpol:
+            return int(kpol['default_validity_days'])
+        if kind in _FALLBACK_CERT_DEFAULT_VALIDITY:
+            return _FALLBACK_CERT_DEFAULT_VALIDITY[kind]
+        return self.default_validity_days
+
+    def cap_for(self, kind: str) -> int:
+        kpol = self.per_kind.get(kind) or {}
+        if 'max_validity_days' in kpol:
+            return int(kpol['max_validity_days'])
+        if kind in _FALLBACK_CERT_MAX_VALIDITY:
+            return _FALLBACK_CERT_MAX_VALIDITY[kind]
+        return self.default_max_validity_days
+
+    @classmethod
+    def from_yaml_section(cls, section: dict | None) -> 'CertKindsPolicy':
+        # When the YAML has no `cert_kinds:` section at all, the
+        # operator gets v0.4.x behavior byte-identical: the policy
+        # is constructed with section-level fallbacks, and every
+        # `default_for(kind)` / `cap_for(kind)` lookup goes through
+        # the built-in `_FALLBACK_*` dicts.
+        if not section:
+            return cls()
+        per_kind_raw = section.get('per_kind') or {}
+        per_kind: dict[str, dict[str, int]] = {}
+        for kind, kpol in per_kind_raw.items():
+            if not isinstance(kpol, dict):
+                continue
+            entry: dict[str, int] = {}
+            if 'default_validity_days' in kpol:
+                entry['default_validity_days'] = int(kpol['default_validity_days'])
+            if 'max_validity_days' in kpol:
+                entry['max_validity_days'] = int(kpol['max_validity_days'])
+            per_kind[str(kind)] = entry
+        return cls(
+            default_validity_days=int(
+                section.get('default_validity_days') or _FALLBACK_BASE_DEFAULT),
+            default_max_validity_days=int(
+                section.get('default_max_validity_days') or _FALLBACK_BASE_MAX),
+            per_kind=per_kind,
+        )
 
 
 @dataclass
@@ -79,6 +329,15 @@ class CAConfig:
     admin_2fa_protected_actions: list[str] = field(default_factory=list)
     admin_2fa_within_seconds: int = 300
 
+    # §15.23 per-kind validity policy. Empty CertKindsPolicy() means
+    # built-in v0.4.x baseline applies to every kind — operators can
+    # opt into per-kind tuning by setting `cert_kinds:` in ca-config.yaml.
+    cert_kinds: CertKindsPolicy = field(default_factory=CertKindsPolicy)
+
+    # §15.21 strict allowlist of operator-defined extension OIDs.
+    # Empty allowlist (default) = no operator OIDs accepted.
+    custom_oids: CustomOIDAllowlist = field(default_factory=CustomOIDAllowlist)
+
     @classmethod
     def load(cls, path: str | Path) -> 'CAConfig':
         # §14.3.2 ca-config.yaml parse; unset fields fall through to
@@ -135,6 +394,10 @@ class CAConfig:
                 (data.get('admin_2fa') or {}).get('protected_actions') or []),
             admin_2fa_within_seconds=int(
                 (data.get('admin_2fa') or {}).get('within_seconds') or 300),
+            cert_kinds=CertKindsPolicy.from_yaml_section(
+                data.get('cert_kinds')),
+            custom_oids=CustomOIDAllowlist.from_yaml_section(
+                data.get('custom_oids')),
         )
         return c
 
@@ -177,3 +440,7 @@ class CAConfig:
             raise ValueError(
                 f'ca-config.yaml: listen port out of range: '
                 f'{self.listen_port}')
+
+        # §15.21 — refuse to start if the operator allowlist contains
+        # OIDs in the mssh-reserved arc or an unknown encoding.
+        self.custom_oids.validate_self()

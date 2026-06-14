@@ -213,3 +213,102 @@ def test_openvpn_issue_forbidden_for_auditor(adminctx, auditor):
         'cn': 'alice', 'server_endpoint': 'vpn.example.com 1194',
     })
     assert status == 403
+
+
+# ---- §15.23 per-kind validity policy ---------------------------------------
+#
+# Verifies that ctx.cert_kinds — when set on the AdminContext — drives
+# the default + cap used by cert_mint and openvpn_issue. Without a
+# cert_kinds policy, the fallback dict at admin.py:_CERT_DEFAULT_VALIDITY
+# / _CERT_MAX_VALIDITY applies (v0.4.x behavior, exercised by the
+# above tests).
+
+from mssh.ca.config import CertKindsPolicy
+
+
+@pytest.fixture
+def adminctx_with_policy(adminctx):
+    """AdminContext that has an operator-configured cert_kinds policy
+    overriding defaults + caps for tls-server."""
+    adminctx.cert_kinds = CertKindsPolicy(per_kind={
+        'tls-server': {'default_validity_days': 7, 'max_validity_days': 14},
+        'code-sign':  {'default_validity_days': 30},   # cap unchanged
+        'openvpn':    {'max_validity_days': 30},       # default unchanged
+    })
+    return adminctx
+
+
+def test_per_kind_default_used_when_validity_days_omitted(
+        adminctx_with_policy, superuser):
+    """Verifies §15.23 — operator-set default_validity_days drives the
+    default when the request body omits validity_days."""
+    status, body = admin_handlers.cert_mint(
+        adminctx_with_policy, superuser,
+        {'type': 'tls-server', 'cn': 'short-lived.example'})
+    assert status == 201
+    assert body['cert']['validity_days'] == 7
+
+
+def test_per_kind_cap_rejects_overlong_request(
+        adminctx_with_policy, superuser):
+    """Verifies §15.23 — per-kind max_validity_days caps operator
+    requests; 15 days for tls-server is over the operator's 14-day cap."""
+    status, body = admin_handlers.cert_mint(
+        adminctx_with_policy, superuser,
+        {'type': 'tls-server', 'cn': 'over.example', 'validity_days': 15})
+    assert status == 400
+    assert '14' in body['detail']
+
+
+def test_per_kind_cap_accepts_at_cap(adminctx_with_policy, superuser):
+    """Verifies §15.23 — request exactly at the cap is accepted."""
+    status, body = admin_handlers.cert_mint(
+        adminctx_with_policy, superuser,
+        {'type': 'tls-server', 'cn': 'at-cap.example', 'validity_days': 14})
+    assert status == 201
+    assert body['cert']['validity_days'] == 14
+
+
+def test_per_kind_partial_override_falls_through_to_baseline(
+        adminctx_with_policy, superuser):
+    """Verifies §15.23 — code-sign override only sets default; cap
+    still uses the baseline (1825) so a 365-day request is fine."""
+    status, body = admin_handlers.cert_mint(
+        adminctx_with_policy, superuser,
+        {'type': 'code-sign', 'cn': 'build-x', 'validity_days': 365})
+    assert status == 201
+    assert body['cert']['validity_days'] == 365
+
+
+def test_openvpn_per_kind_cap_applies(adminctx_with_policy, superuser):
+    """Verifies §15.23 — openvpn_issue uses ctx.cert_kinds cap;
+    operator tightened to 30 days, so 31-day request is rejected."""
+    status, body = admin_handlers.openvpn_issue(
+        adminctx_with_policy, superuser,
+        {'cn': 'bob', 'server_endpoint': 'vpn.example.com 1194',
+         'validity_days': 31})
+    assert status == 400
+    assert '30' in body['detail']
+
+
+def test_no_policy_falls_back_to_v04_behavior(adminctx, superuser):
+    """Verifies §15.23 — when ctx.cert_kinds is None, behavior matches
+    v0.4.x: default 90 days, cap 825 days for tls-server."""
+    assert adminctx.cert_kinds is None
+    status, body = admin_handlers.cert_mint(
+        adminctx, superuser,
+        {'type': 'tls-server', 'cn': 'fallback.example'})
+    assert status == 201
+    assert body['cert']['validity_days'] == 90   # v0.4.x default
+    # Request right at the v0.4.x cap is accepted.
+    status, body = admin_handlers.cert_mint(
+        adminctx, superuser,
+        {'type': 'tls-server', 'cn': 'at-cap-fb.example',
+         'validity_days': 825})
+    assert status == 201
+    # One day over → rejected.
+    status, body = admin_handlers.cert_mint(
+        adminctx, superuser,
+        {'type': 'tls-server', 'cn': 'over-cap-fb.example',
+         'validity_days': 826})
+    assert status == 400

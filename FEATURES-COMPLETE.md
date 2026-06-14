@@ -8,6 +8,97 @@ Columns: `ref`, `title`, `landed-in`, `commit`, `notes`.
 
 ---
 
+## Release notes — v0.5.0 (2026-06-14)
+
+General-purpose CA features for non-SSH use cases — device identity,
+operator-defined cert kinds, cert-kind markers, and operator-configurable
+per-kind validity policy.
+
+**Headline features:**
+
+- **§15.19 External-use certificate kind** — new CSR-based generic
+  cert kind for uses outside mssh's own runtime (IDevID per IEEE
+  802.1AR, ROM-burned firmware identity, BMC certs, IoT shadow certs).
+  Default 20yr validity (operator-tunable), `never_expires: true`
+  opts into the RFC 5280 §4.1.2.5 `notAfter = 99991231235959Z`
+  sentinel for ROM-burned identifiers. The CA never sees the private
+  key — operator's TPM/secure-element key stays on-device. REST:
+  `POST /v1/admin/cert/external-use`.
+
+- **§15.20 `mint-external --profile <name>`** — extends §2.6
+  external-intermediate flow with operator-named profiles. Built-in
+  `device-identity` profile bumps validity to 30yr and stamps the
+  §15.23 intermediate-purpose marker so external-use leaves can pin
+  to it. Profile name persisted to `<ca_dir>/external/<name>/profile.json`.
+
+- **§15.21 Operator-allowlist custom OIDs** — strict allowlist in
+  ca-config.yaml's `custom_oids:` section. OID-arc split:
+  `1.3.6.1.4.1.55555.[1-4999].*` is mssh-reserved (hard-rejected
+  even if allowlisted; CA refuses to start), `1.3.6.1.4.1.55555.[5000-65535].*`
+  is the mssh-assigned operator sub-arc (no IANA PEN registration
+  needed). Five encodings supported: utf8, octet, integer, null,
+  printable. Wires into both leaf-mint and intermediate-mint.
+
+- **§15.22 `--new-root` separate-Root option** — opt-in
+  `mssh-admin intermediate mint-external --new-root <name>` creates
+  a fresh Root + intermediate together, persisted under
+  `<ca_dir>/roots/<name>/{cert,key}.pem`. New `mssh.ca.roots`
+  module loads all Roots at startup. v0.5.0 scope: storage + load
+  + mint flow. Per-Root rotation/revocation deferred to v0.6+
+  (FEATURES-TODO).
+
+- **§15.23 Cert-kind markers** — every leaf the CA emits now carries
+  a non-critical NULL marker OID under `1.3.6.1.4.1.55555.3.*`
+  identifying its kind (9 OIDs covering authz-user/authz-bypass/
+  server-tls/admin-mtls/client-mtls/https-user/code-sign/openvpn/
+  external-use). Marker is non-critical so legacy verifiers ignore
+  it per RFC 5280 §4.2. Provable cert-kind = downstream consumers
+  can do type-based enforcement.
+
+- **§15.23 Per-kind validity policy** — `cert_kinds:` section in
+  ca-config.yaml moves validity defaults + caps from hardcoded
+  globals into operator config. Per-kind lookup falls through
+  per-kind → section-level default → built-in baseline. v0.4.x
+  configs without `cert_kinds:` get baseline values byte-identical
+  to v0.4.x.
+
+- **CSR loading infrastructure** (`mssh.ca.csr`) — `load_and_verify_csr()`
+  + `extract_public_key()` shared by §15.19 external-use and the
+  pre-existing §15.18 code-signing CSR TODO. Rejects CSRs that
+  smuggle extensions (CA owns KU/EKU/SAN).
+
+- **Bootstrap config writer** (`mssh-admin init`) emits documented
+  `cert_kinds:` + `custom_oids:` sections with the reserved-arc
+  reference table inline so operators discover the conventions
+  in-file.
+
+- **`msshd-admin-web` alias removal** — the v0.4.0 deprecated alias
+  is gone. Operators must now use `mssh-admin-web` (the canonical
+  name per §14.2.7).
+
+**Test coverage:** 835 unit tests pass (up from 731 at v0.4.0;
++104 new tests across 6 new files: test_csr.py,
+test_custom_oid_allowlist.py, test_external_use_cert.py,
+test_kind_markers.py, test_ca_config_cert_kinds.py,
+test_bootstrap_init_emits_cert_kinds.py, test_new_root.py).
+
+**Deferred to v0.6+ (FEATURES-TODO):**
+
+- §15.22 per-Root rotation, per-Root revocation, admin-web Root visibility.
+- §15.23 renew-side kind-drift detection (v0.5.0 ships markers but
+  the renew validator still infers kind from EKU rather than from
+  the marker — added when v0.4.x certs naturally age out).
+- §15.17 dedicated code-mint intermediate (now arguably redundant
+  with §15.23 markers; reconsider once §15.23 enforcement lands).
+
+**To tag this release:**
+```
+git tag v0.5.0
+# wheels will then build as 0.5.0 via setuptools_scm.
+```
+
+---
+
 ## Release notes — v0.4.0 (2026-06-07)
 
 Substantial release covering the Phase 1–5 work + WireGuard dual-stack.

@@ -59,6 +59,48 @@ OID_2FA_EVIDENCE    = x509.ObjectIdentifier(f'{_OID_BASE}.7')
 OID_CA_BYPASS       = x509.ObjectIdentifier(f'{_OID_BASE}.8')
 
 
+# §15.23 intermediate-purpose marker arc (1.3.6.1.4.1.55555.2.*).
+# A non-critical NULL extension stamped on intermediates minted via
+# `mint-external --profile <name>` (§15.20). Lets external-use leaf
+# mints verify the issuer intermediate is authorized to sign them.
+_OID_PURPOSE_BASE = '1.3.6.1.4.1.55555.2'
+OID_PURPOSE_EXTERNAL_USE_INTERMEDIATE = x509.ObjectIdentifier(
+    f'{_OID_PURPOSE_BASE}.1')
+
+
+# §15.23 leaf cert-kind marker arc (1.3.6.1.4.1.55555.3.*). A
+# non-critical NULL extension stamped on every leaf the CA emits, so
+# the cert's kind is provable from the cert bytes themselves. Nine
+# markers cover every kind the CA mints today + the new external-use
+# kind (§15.19).
+_OID_KIND_BASE = '1.3.6.1.4.1.55555.3'
+OID_KIND_AUTHZ_USER    = x509.ObjectIdentifier(f'{_OID_KIND_BASE}.1')
+OID_KIND_AUTHZ_BYPASS  = x509.ObjectIdentifier(f'{_OID_KIND_BASE}.2')
+OID_KIND_SERVER_TLS    = x509.ObjectIdentifier(f'{_OID_KIND_BASE}.3')
+OID_KIND_ADMIN_MTLS    = x509.ObjectIdentifier(f'{_OID_KIND_BASE}.4')
+OID_KIND_CLIENT_MTLS   = x509.ObjectIdentifier(f'{_OID_KIND_BASE}.5')
+OID_KIND_HTTPS_USER    = x509.ObjectIdentifier(f'{_OID_KIND_BASE}.6')
+OID_KIND_CODE_SIGN     = x509.ObjectIdentifier(f'{_OID_KIND_BASE}.7')
+OID_KIND_OPENVPN       = x509.ObjectIdentifier(f'{_OID_KIND_BASE}.8')
+OID_KIND_EXTERNAL_USE  = x509.ObjectIdentifier(f'{_OID_KIND_BASE}.9')
+
+# kind name → marker OID. The kind names match the strings used by
+# admin handlers (e.g. `cert_mint` body 'type' field) plus the legacy
+# `tls-server` alias that already lands in the cert-mint API.
+KIND_MARKER = {
+    'authz-user':    OID_KIND_AUTHZ_USER,
+    'authz-bypass':  OID_KIND_AUTHZ_BYPASS,
+    'server-tls':    OID_KIND_SERVER_TLS,
+    'tls-server':    OID_KIND_SERVER_TLS,   # legacy alias
+    'admin-mtls':    OID_KIND_ADMIN_MTLS,
+    'client-mtls':   OID_KIND_CLIENT_MTLS,
+    'https-user':    OID_KIND_HTTPS_USER,
+    'code-sign':     OID_KIND_CODE_SIGN,
+    'openvpn':       OID_KIND_OPENVPN,
+    'external-use':  OID_KIND_EXTERNAL_USE,
+}
+
+
 # ---------------------------------------------------------------------------
 # Intermediate CA model
 # ---------------------------------------------------------------------------
@@ -244,8 +286,13 @@ def _issue_leaf(subject_cn: str, leaf_key,
                 server_auth: bool = False, client_auth: bool = True,
                 code_signing: bool = False,
                 sans: list[str] | None = None,
-                crl_url: str | None = None) -> x509.Certificate:
-    """Issue a leaf cert, signed by the given intermediate."""
+                crl_url: str | None = None,
+                kind: str | None = None) -> x509.Certificate:
+    """Issue a leaf cert, signed by the given intermediate.
+
+    §15.23 — when ``kind`` is set, attaches a non-critical NULL marker
+    OID from ``KIND_MARKER`` to identify the cert's kind.
+    """
     subject = x509.Name([
         x509.NameAttribute(oid.NameOID.COMMON_NAME, subject_cn),
     ])
@@ -321,6 +368,12 @@ def _issue_leaf(subject_cn: str, leaf_key,
             ]),
             critical=False,
         )
+    # §15.23 cert-kind marker. Non-critical so legacy verifiers that
+    # don't recognize the OID ignore it; CA-side mint + renew enforces
+    # type-based policy.
+    if kind is not None and kind in KIND_MARKER:
+        builder = builder.add_extension(
+            _null_ext(KIND_MARKER[kind]), critical=False)
     return builder.sign(private_key=signing.key,
                         algorithm=_sig_hash_for(signing.key))
 
@@ -462,6 +515,7 @@ def bootstrap_ca(ca_dir: str | Path, *, key_type: str = 'ec',
         tls_server_cn, tls_server_key, intermediates['host-mint'],
         server_auth=True, client_auth=False,
         sans=tls_server_sans or ['DNS:localhost', 'IP:127.0.0.1'],
+        kind='server-tls',
     )
 
     # 4. Bootstrap superuser admin cert — signed by auth.
@@ -469,6 +523,7 @@ def bootstrap_ca(ca_dir: str | Path, *, key_type: str = 'ec',
     boot_admin_cert = _issue_leaf(
         bootstrap_admin_cn, boot_admin_key, intermediates['auth'],
         server_auth=False, client_auth=True,
+        kind='admin-mtls',
     )
 
     # 5. Persist new layout.
@@ -600,7 +655,8 @@ def load_root_cert(ca_dir: str | Path) -> x509.Certificate:
 def issue_external_intermediate(name: str, *, root_key, root_cert,
                                  path_length: int = 0,
                                  key_type: str = 'ec',
-                                 validity_days: int = 3650
+                                 validity_days: int = 3650,
+                                 profile: str = 'generic',
                                  ) -> tuple[Any, x509.Certificate]:
     """Mint an external intermediate CA cert signed by root.
 
@@ -653,6 +709,13 @@ def issue_external_intermediate(name: str, *, root_key, root_cert,
                 root_key.public_key()),
             critical=False)
     )
+    # §15.20/§15.23 — non-generic profiles stamp the intermediate-
+    # purpose marker so external-use leaf mints (§15.19) can verify
+    # the issuer is authorized to sign them.
+    if profile and profile != 'generic':
+        builder = builder.add_extension(
+            _null_ext(OID_PURPOSE_EXTERNAL_USE_INTERMEDIATE),
+            critical=False)
     cert = builder.sign(private_key=root_key, algorithm=_sig_hash_for(root_key))
     return external_key, cert
 
@@ -692,6 +755,7 @@ def issue_client_cert(common_name: str,
                       key_type: str = 'ec',
                       root_cert: x509.Certificate | None = None,
                       crl_url: str | None = None,
+                      kind: str = 'client-mtls',
                       ) -> IssuedClientCert:
     """Issue a leaf mTLS CLIENT cert.
 
@@ -729,7 +793,7 @@ def issue_client_cert(common_name: str,
     cert = _issue_leaf(common_name, key, signing,
                        validity_days=validity_days,
                        server_auth=False, client_auth=True,
-                       crl_url=crl_url)
+                       crl_url=crl_url, kind=kind)
     return IssuedClientCert(
         cert_pem=(_chain_pem(cert, signing.cert) if chain_bundle
                   else serialize_certificate(cert)),
@@ -781,7 +845,8 @@ def issue_server_cert(common_name: str,
     cert = _issue_leaf(common_name, key, signing,
                        validity_days=validity_days,
                        server_auth=True, client_auth=False,
-                       sans=sans, crl_url=crl_url)
+                       sans=sans, crl_url=crl_url,
+                       kind='server-tls')
     return IssuedClientCert(
         cert_pem=(_chain_pem(cert, signing.cert) if chain_bundle
                   else serialize_certificate(cert)),
@@ -790,6 +855,128 @@ def issue_server_cert(common_name: str,
                      if root_cert is not None
                      else serialize_certificate(signing.cert)),
         subject_cn=common_name,
+    )
+
+
+@dataclass
+class IssuedExternalUseCert:
+    """Output of issue_external_use_cert (§15.19).
+
+    Unlike IssuedClientCert, no private key is returned — the
+    operator's CSR-supplied key stays on-device.
+    """
+    cert_pem: bytes                     # chain: leaf + intermediate
+    leaf_only_pem: bytes                # leaf cert alone
+    ca_cert_pem: bytes                  # the issuer intermediate cert
+    subject_cn: str
+    not_valid_after: Any                # datetime; for warnings
+
+
+# §15.19 indefinite-expiry sentinel per RFC 5280 §4.1.2.5 — used for
+# ROM-burned device identity certs that "match the lifetime of the
+# device." Standard X.509 validators treat this as a far-future date.
+_NEVER_EXPIRES = _dt.datetime(9999, 12, 31, 23, 59, 59, tzinfo=_dt.timezone.utc)
+
+
+def _intermediate_has_purpose(cert: x509.Certificate,
+                              purpose_oid: x509.ObjectIdentifier) -> bool:
+    """Verifies §15.20 — returns True iff the intermediate cert carries
+    the given purpose marker OID."""
+    try:
+        cert.extensions.get_extension_for_oid(purpose_oid)
+        return True
+    except x509.ExtensionNotFound:
+        return False
+
+
+def issue_external_use_cert(
+    csr: x509.CertificateSigningRequest, *,
+    issuer_key, issuer_cert: x509.Certificate,
+    cn: str,
+    validity_days: int,
+    never_expires: bool = False,
+    custom_oids: list[dict] | None = None,
+    allowlist=None,                      # CustomOIDAllowlist | None
+    crl_url: str | None = None,
+) -> IssuedExternalUseCert:
+    """§15.19 — issue an external-use leaf signed by an operator-named
+    external intermediate (one minted via `--profile <name>`).
+
+    The intermediate MUST carry OID_PURPOSE_EXTERNAL_USE_INTERMEDIATE
+    (§15.20 marker); otherwise the caller gets ValueError before any
+    cert is built.
+
+    The CSR supplies the public key + subject CN. The CA owns
+    KeyUsage / EKU / SAN (none) / validity / kind marker / custom OIDs.
+    """
+    if not _intermediate_has_purpose(
+            issuer_cert, OID_PURPOSE_EXTERNAL_USE_INTERMEDIATE):
+        raise ValueError(
+            'issuer intermediate lacks OID_PURPOSE_EXTERNAL_USE_INTERMEDIATE '
+            '(§15.20); mint it with --profile <name> instead of --profile generic')
+
+    public_key = csr.public_key()
+    subject = x509.Name([x509.NameAttribute(oid.NameOID.COMMON_NAME, cn)])
+
+    not_before = _dt.datetime.now(tz=_dt.timezone.utc) - _dt.timedelta(minutes=1)
+    if never_expires:
+        not_after = _NEVER_EXPIRES
+    else:
+        not_after = not_before + _dt.timedelta(days=validity_days)
+
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer_cert.subject)
+        .public_key(public_key)
+        .serial_number(int.from_bytes(secrets.token_bytes(16), 'big') | 1)
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None),
+                       critical=True)
+        .add_extension(x509.KeyUsage(
+            digital_signature=True, key_encipherment=True,
+            content_commitment=False, data_encipherment=False,
+            key_agreement=False, key_cert_sign=False,
+            crl_sign=False, encipher_only=False, decipher_only=False,
+        ), critical=True)
+        .add_extension(
+            x509.ExtendedKeyUsage([oid.ExtendedKeyUsageOID.CLIENT_AUTH]),
+            critical=False)
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(public_key),
+            critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                issuer_key.public_key()),
+            critical=False)
+    )
+    if crl_url:
+        builder = builder.add_extension(
+            x509.CRLDistributionPoints([
+                x509.DistributionPoint(
+                    full_name=[x509.UniformResourceIdentifier(crl_url)],
+                    relative_name=None, reasons=None, crl_issuer=None),
+            ]),
+            critical=False,
+        )
+    # §15.23 cert-kind marker (.3.9 external-use).
+    builder = builder.add_extension(
+        _null_ext(OID_KIND_EXTERNAL_USE), critical=False)
+    # §15.21 operator-supplied custom OIDs.
+    if custom_oids:
+        builder = attach_custom_extensions(builder, custom_oids, allowlist)
+
+    cert = builder.sign(private_key=issuer_key,
+                        algorithm=_sig_hash_for(issuer_key))
+    leaf_pem = serialize_certificate(cert)
+    chain_pem = _chain_pem(cert, issuer_cert)
+    return IssuedExternalUseCert(
+        cert_pem=chain_pem,
+        leaf_only_pem=leaf_pem,
+        ca_cert_pem=serialize_certificate(issuer_cert),
+        subject_cn=cn,
+        not_valid_after=not_after,
     )
 
 
@@ -822,7 +1009,7 @@ def issue_codesign_cert(common_name: str,
     cert = _issue_leaf(common_name, key, signing,
                        validity_days=validity_days,
                        server_auth=False, client_auth=False,
-                       code_signing=True)
+                       code_signing=True, kind='code-sign')
     return IssuedClientCert(
         cert_pem=(_chain_pem(cert, signing.cert) if chain_bundle
                   else serialize_certificate(cert)),
@@ -999,6 +1186,13 @@ def mint_authorization_cert(
         builder = builder.add_extension(
             _null_ext(OID_CA_BYPASS), critical=True)
 
+    # §15.23 cert-kind marker. Non-critical NULL — defense-in-depth so
+    # the cert's kind is provable from the bytes themselves. authz-user
+    # vs. authz-bypass distinguished by the ca_bypass flag.
+    _authz_kind = 'authz-bypass' if ca_bypass else 'authz-user'
+    builder = builder.add_extension(
+        _null_ext(KIND_MARKER[_authz_kind]), critical=False)
+
     cert = builder.sign(private_key=signing.key,
                         algorithm=_sig_hash_for(signing.key))
     return cert, serial_hex
@@ -1057,3 +1251,97 @@ def _der_int(n: int) -> bytes:
     if body[0] & 0x80:
         body = b'\x00' + body
     return _der_tag(0x02, body)
+
+
+def _der_octet(b: bytes) -> bytes:
+    return _der_tag(0x04, b)            # OCTET STRING
+
+
+def _der_printable(s: str) -> bytes:
+    # PrintableString: subset of ASCII; we don't validate here, just tag.
+    return _der_tag(0x13, s.encode('ascii'))
+
+
+def attach_custom_extensions(
+    builder: x509.CertificateBuilder,
+    requested: list[dict] | None,
+    allowlist,                          # CustomOIDAllowlist | None
+) -> x509.CertificateBuilder:
+    """§15.21 — wire operator-supplied custom OIDs onto a cert builder.
+
+    Each entry in ``requested`` is a dict ``{oid_or_name, value,
+    critical?}``. The OID is resolved against ``allowlist`` (which may
+    reference entries by either dotted OID or by ``name``); unknown
+    references raise ``ValueError``. The encoding is dispatched per
+    the allowlist entry to the ``_utf8_ext`` / ``_int_ext`` / etc.
+    helpers above. ``critical`` on the request overrides the
+    allowlist entry's default.
+
+    Returns the builder with extensions added.
+
+    Design: §15.21.
+    """
+    if not requested:
+        return builder
+    if allowlist is None:
+        raise ValueError(
+            'request supplies custom_oids but the CA has no allowlist '
+            'configured (§13.9.7 default-deny + §15.21)')
+    from . import config as _cfg
+    for raw in requested:
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f'custom_oids entry must be a dict, got {type(raw).__name__}')
+        key = (raw.get('oid') or raw.get('name') or '').strip()
+        if not key:
+            raise ValueError('custom_oids entry missing oid/name')
+        entry = allowlist.lookup(key)
+        if entry is None:
+            raise ValueError(
+                f'custom_oids: {key!r} is not in the operator allowlist '
+                f'(§15.21 strict allowlist)')
+        # Double-check: reject any reference to the mssh-reserved arc
+        # even if the allowlist somehow contains it (belt + suspenders;
+        # validate_self() should have caught at startup).
+        if _cfg._check_oid_against_reserved(entry.oid):
+            raise ValueError(
+                f'custom_oids: {entry.oid} is in the mssh-reserved arc '
+                f'and cannot be used by operators (§15.21)')
+        value = raw.get('value')
+        critical = bool(raw.get('critical', entry.critical))
+        if entry.max_length is not None:
+            if isinstance(value, (str, bytes)) and len(value) > entry.max_length:
+                raise ValueError(
+                    f'custom_oids: value for {entry.oid} exceeds '
+                    f'max_length={entry.max_length} (§15.21)')
+        oid_obj = x509.ObjectIdentifier(entry.oid)
+        if entry.encoding == 'utf8':
+            ext = _utf8_ext(oid_obj, '' if value is None else str(value))
+        elif entry.encoding == 'integer':
+            try:
+                ext = _int_ext(oid_obj, int(value))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f'custom_oids: value for {entry.oid} must be an integer '
+                    f'(encoding=integer); got {value!r}')
+        elif entry.encoding == 'null':
+            ext = _null_ext(oid_obj)
+        elif entry.encoding == 'octet':
+            if isinstance(value, str):
+                # Hex-decoded if it looks hex; otherwise treat as ascii.
+                try:
+                    value = bytes.fromhex(value)
+                except ValueError:
+                    value = value.encode('utf-8')
+            elif value is None:
+                value = b''
+            ext = x509.UnrecognizedExtension(oid_obj, _der_octet(value))
+        elif entry.encoding == 'printable':
+            ext = x509.UnrecognizedExtension(
+                oid_obj, _der_printable('' if value is None else str(value)))
+        else:
+            raise ValueError(
+                f'custom_oids: unknown encoding {entry.encoding!r} for '
+                f'{entry.oid} (§15.21)')
+        builder = builder.add_extension(ext, critical=critical)
+    return builder

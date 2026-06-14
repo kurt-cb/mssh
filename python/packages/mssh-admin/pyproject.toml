@@ -46,13 +46,10 @@ mssh-admin = "mssh.admin.main:cli"
 mssh-mcp   = "mssh.mcp.server:main"
 # Flask admin portal — operator-facing browser frontend over the CA's
 # admin API (same surface as mssh-admin CLI). §14.2.7. Requires
-# `pip install mssh-admin[web]`.
-mssh-admin-web  = "mssh.admin.web_main:main"
-# Deprecated alias: the binary was historically named msshd-admin-web,
-# which mis-implies it manages msshd. It manages mssh-ca's admin API,
-# so the canonical name is mssh-admin-web (§14.2.7). The alias is kept
-# for one release so existing systemd units don't break; remove in v0.5.
-msshd-admin-web = "mssh.admin.web_main:main"
+# `pip install mssh-admin[web]`. (The v0.4.0 deprecated alias
+# `msshd-admin-web` was removed in v0.5.0; operators must use the
+# canonical name.)
+mssh-admin-web = "mssh.admin.web_main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

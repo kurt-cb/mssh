@@ -201,6 +201,10 @@ def create_app(config: CAConfig) -> Flask:
         # parent — bootstrap_ca writes everything next to signing-cert.pem.
         ca_dir=str(Path(config.signing_cert).parent
                     if config.signing_cert else ''),
+        # §15.23 per-kind validity policy from ca-config.yaml.
+        cert_kinds=config.cert_kinds,
+        # §15.21 operator-allowlisted custom OIDs.
+        custom_oids=config.custom_oids,
     )
 
     app.config['AUTH_CTX'] = auth_ctx

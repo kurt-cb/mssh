@@ -158,6 +158,146 @@ def cli(ctx, config_path, ca_url, admin_cert, admin_key, ca_cert, output_format)
 # init (no CA call — writes config + bootstrap admin cert)
 # ---------------------------------------------------------------------------
 
+# §15.23 — per-kind validity defaults written as documented YAML so
+# operators can see + tune them in place.
+_CERT_KINDS_YAML_BLOCK = """
+
+# ============================================================================
+# §15.23 — Per-kind certificate validity policy.
+#
+# Operators tune defaults + caps per cert kind here. Each kind's lookup
+# falls through in this order:
+#   1. per_kind[<kind>][default|max]
+#   2. default_validity_days / default_max_validity_days below
+#   3. mssh built-in baseline for that kind (matches v0.4.x byte-for-byte)
+# So you can comment out per_kind entries and the CA still has a working
+# default per kind.
+# ============================================================================
+cert_kinds:
+  default_validity_days:     90
+  default_max_validity_days: 825
+
+  per_kind:
+    # Per-session authz certs — intentionally very short-lived.
+    authz-user:
+      default_validity_days: 1      # 24 hours
+      max_validity_days:     7      # 1 week ceiling
+
+    # Operator's offline bypass credential — longer-lived but bounded.
+    authz-bypass:
+      default_validity_days: 90
+      max_validity_days:     3650   # 10 years (v0.4.x cap)
+
+    # Server identifies itself to the network; rotation hygiene matters.
+    server-tls:
+      default_validity_days: 365
+      max_validity_days:     825
+
+    # Operator -> CA admin mTLS.
+    admin-mtls:
+      default_validity_days: 365
+      max_validity_days:     825
+
+    # Enrolled msshd -> CA mTLS.
+    client-mtls:
+      default_validity_days: 365
+      max_validity_days:     825
+
+    # Browser -> admin-web; shorter so revocation latency is bounded.
+    https-user:
+      default_validity_days: 90
+      max_validity_days:     825
+
+    # VPN — short-lived; CRL latency matters less when certs cycle fast.
+    openvpn:
+      default_validity_days: 90
+      max_validity_days:     365
+
+    # Code-signing certs — medium-lived.
+    code-sign:
+      default_validity_days: 365
+      max_validity_days:     1825   # 5 years
+
+    # External-use (device-identity, BMC, firmware-id, etc.) — very
+    # long lifetimes. --never-expires available for ROM-burned identifiers.
+    external-use:
+      default_validity_days: 7305   # 20 years
+      max_validity_days:     9125   # 25 years
+"""
+
+# §15.21 — operator-OID allowlist with reserved-arc commentary.
+_CUSTOM_OIDS_YAML_BLOCK = """
+
+# ============================================================================
+# §15.21 — Operator-defined X.509 extension OIDs accepted on cert mints.
+#
+# Each entry declares an OID the operator may pass via cert-mint requests
+# (`--custom-oid <oid|name>=<value>`). Requests carrying any OID NOT
+# listed below are rejected (strict allowlist; default-deny).
+#
+# OID ARCS:
+#
+#   1.3.6.1.4.1.55555.[1-4999].*   - RESERVED for mssh. Hard-rejected even
+#                                    if allowlisted; the CA refuses to start
+#                                    with a config error.
+#
+#   1.3.6.1.4.1.55555.[5000-65535].*  - OPERATOR sub-arc. Assigned by mssh
+#                                       for your own custom OIDs. Use this
+#                                       if you don't have an IANA PEN of
+#                                       your own; entries here are not
+#                                       globally unique so don't use them
+#                                       for certs verified outside your
+#                                       organization.
+#
+#   1.3.6.1.4.1.<your-PEN>.*       - Your own IANA Private Enterprise
+#                                    Number arc (https://pen.iana.org/).
+#                                    Use this if certs will be verified
+#                                    by external parties.
+#
+# Reserved mssh sub-arcs (informational; cannot be allowlisted):
+#
+#   .1.*  authz/bypass cert policy fields (§14.5)
+#     .1  OID_SOURCE_BIND     UTF8       authz: source principal
+#     .2  OID_SERVER_BIND     UTF8       authz: target server
+#     .3  OID_CHANNEL_POLICY  SEQ UTF8   authz: channel permissions
+#     .4  OID_FORCE_COMMAND   UTF8 *crit authz: forced SSH command
+#     .5  OID_ENVIRONMENT     UTF8 *crit authz: environment vars
+#     .6  OID_MAX_SESSION     INTEGER    authz: max concurrent sessions
+#     .7  OID_2FA_EVIDENCE    UTF8       authz: 2FA proof
+#     .8  OID_CA_BYPASS       NULL *crit bypass-cert marker
+#
+#   .2.*  intermediate-purpose markers (§15.20, §15.23)
+#     .1  OID_PURPOSE_EXTERNAL_USE_INTERMEDIATE  NULL
+#
+#   .3.*  leaf cert-kind markers (§15.23)
+#     .1  OID_KIND_AUTHZ_USER     .2  OID_KIND_AUTHZ_BYPASS
+#     .3  OID_KIND_SERVER_TLS     .4  OID_KIND_ADMIN_MTLS
+#     .5  OID_KIND_CLIENT_MTLS    .6  OID_KIND_HTTPS_USER
+#     .7  OID_KIND_CODE_SIGN      .8  OID_KIND_OPENVPN
+#     .9  OID_KIND_EXTERNAL_USE
+#
+# Examples below use the mssh operator sub-arc so no IANA registration
+# is needed. Uncomment + adapt for your use case.
+# ============================================================================
+custom_oids: []
+
+# Example: operator-defined OIDs for external-use device-identity certs.
+# Uncomment to enable:
+#
+# custom_oids:
+#   - oid:         1.3.6.1.4.1.55555.5001.1
+#     name:        device_oem
+#     encoding:    utf8
+#     max_length:  64
+#     description: "OEM identifier (external-use device-identity profile)"
+#
+#   - oid:         1.3.6.1.4.1.55555.5001.2
+#     name:        device_serial
+#     encoding:    utf8
+#     max_length:  128
+#     description: "Device serial number (per-unit; opaque)"
+"""
+
 @cli.command()
 @click.option('--ca-dir', required=True, type=click.Path(),
               help='Directory to write CA keys and certs into.')
@@ -197,7 +337,12 @@ def init(ca_dir, bootstrap_admin, tls_server_cn, tls_server_san):
                             'server_cert_validity_days': 365,
                             'admin_cert_validity_days': 365},
     }
-    (ca_dir / 'ca-config.yaml').write_text(yaml.safe_dump(ca_config, sort_keys=True))
+    base_yaml = yaml.safe_dump(ca_config, sort_keys=True)
+    # §15.23 cert_kinds + §15.21 custom_oids — written as documented text
+    # rather than via yaml.safe_dump so the reserved-arc commentary stays
+    # in-file for operators to discover.
+    documented = _CERT_KINDS_YAML_BLOCK + _CUSTOM_OIDS_YAML_BLOCK
+    (ca_dir / 'ca-config.yaml').write_text(base_yaml + documented)
 
     # Empty enrollment file so the CA can boot. Seed it with the bootstrap admin.
     enroll = {
