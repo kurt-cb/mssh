@@ -1195,19 +1195,47 @@ def external_intermediate_mint(ctx: AdminContext, admin: Admin,
         'path_length': path_length,
         'validity_days': validity_days,
     }))
-    # NOTE: we do NOT persist the private key. The external entity
-    # gets it once in this response; the CA retains only the public
-    # cert. This is the whole point of delegating signing authority.
     key_pem = cert_minter.serialize_private_key(new_key)
     fp16 = cert_minter.compute_pubkey_fp16(new_key.public_key())
+
+    # Retention policy:
+    #   - `profile == generic`  → v0.4.x semantics: CA does NOT persist
+    #     the key. Operator hands it to an external entity out-of-band.
+    #   - `profile != generic`  → v0.5.3: the intermediate is meant for
+    #     CA-side signing (device-identity etc.), so the CA retains a
+    #     copy at <ca_dir>/external/<name>/key.pem (mode 0600) unless
+    #     the operator opted out via `retain_key: false`.
+    # The key is ALWAYS returned in the response either way — retention
+    # doesn't preclude the operator keeping their own backup.
+    retain_key_default = (profile != 'generic')
+    retain_key = bool(body.get('retain_key', retain_key_default))
+    if retain_key:
+        import os as _os
+        key_path = target / 'key.pem'
+        key_path.write_bytes(key_pem)
+        _os.chmod(key_path, 0o600)
 
     _audit_admin(ctx, admin, 'intermediate.external.mint',
                  {'name': name, 'path_length': path_length,
                   'profile': profile,
                   'root_name': root_name,
+                  'key_retained': retain_key,
                   'pubkey_fp16': fp16,
                   'serial': format(new_cert.serial_number, 'x')},
                  'ok')
+
+    if retain_key:
+        warning = (
+            f'Private key is returned in this response AND retained on '
+            f'the CA at {target}/key.pem (mode 0600). The CA needs it '
+            f'to sign external-use leaves under this intermediate. Keep '
+            f'this response as a backup, then delete your copy — the '
+            f'authoritative key lives on the CA.')
+    else:
+        warning = (
+            'Private key is returned in this response ONLY. The CA does '
+            'NOT retain it. Deliver to the external entity over a '
+            'secure channel and store offline.')
 
     return 201, {
         'status': 'ok',
@@ -1218,10 +1246,9 @@ def external_intermediate_mint(ctx: AdminContext, admin: Admin,
         'issuer_id': f'external-{name}:{fp16}',
         'cert_pem': cert_pem.decode('ascii'),
         'key_pem': key_pem.decode('ascii'),
+        'key_retained_by_ca': retain_key,
         'serial': format(new_cert.serial_number, 'x'),
-        'warning': ('Private key is returned in this response ONLY. The '
-                    'CA does NOT retain it. Deliver to the external '
-                    'entity over a secure channel and store offline.'),
+        'warning': warning,
     }
 
 
@@ -1372,11 +1399,17 @@ def cert_mint(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
         "cn":            "common-name",
         "sans":          ["DNS:foo.example.com", "IP:10.0.0.1"]   # tls-server only
         "validity_days": 90                                       # optional
+        "csr":           "-----BEGIN CERTIFICATE REQUEST-----..."  # v0.5.3, optional
       }
 
     Returns ``{cert_pem, key_pem, ca_cert_pem, subject_cn}`` shaped
-    like server / admin add. The CLI handles output formatting (PEM
-    files for tls-server / code-sign; PKCS#12 wrap for https-user).
+    like server / admin add.
+
+    v0.5.3 CSR path: when ``csr`` is set, the CA uses the CSR's public
+    key + SANs (union with body SANs) instead of generating a keypair.
+    ``key_pem`` in the response is empty — the operator's private key
+    never touches the CA. Recommended for TLS server certs where the
+    key should stay on the target host.
     """
     if (err := _check('cert.mint', admin)):
         return err
@@ -1406,31 +1439,76 @@ def cert_mint(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
     except ValueError as e:
         return _err(400, 'bad_request', f'invalid SAN: {e}')
 
+    # v0.5.3 CSR path — accept a PKCS#10 CSR and use its public key +
+    # SANs instead of generating a keypair. Applies to any cert kind.
+    csr_pem = body.get('csr')
+    csr_public_key = None
+    if csr_pem:
+        from . import csr as csr_mod
+        try:
+            csr_obj = csr_mod.load_and_verify_csr(csr_pem)
+        except csr_mod.CSRValidationError as e:
+            return _err(400, 'bad_request', f'CSR rejected: {e}')
+        csr_public_key = csr_obj.public_key()
+        # Merge SANs from the CSR (if any) with body-supplied SANs.
+        # De-dup while preserving order.
+        try:
+            from cryptography.x509 import ExtensionNotFound
+            from cryptography.x509.oid import ExtensionOID
+            san_ext = csr_obj.extensions.get_extension_for_oid(
+                ExtensionOID.SUBJECT_ALTERNATIVE_NAME).value
+            from cryptography.x509 import DNSName, IPAddress
+            csr_sans: list[str] = []
+            for entry in san_ext:
+                if isinstance(entry, DNSName):
+                    csr_sans.append(f'DNS:{entry.value}')
+                elif isinstance(entry, IPAddress):
+                    csr_sans.append(f'IP:{entry.value}')
+            # Union w/ dedup, body SANs first (operator-explicit wins).
+            seen = set()
+            merged: list[str] = []
+            for s in sans + csr_sans:
+                if s not in seen:
+                    seen.add(s)
+                    merged.append(s)
+            sans = merged
+        except ExtensionNotFound:
+            pass
+        # SANs are only for tls-server per the schema check above; a
+        # CSR that ships SANs on a non-tls-server mint is silently OK
+        # because we just don't apply them at the leaf.
+        if cert_type != 'tls-server':
+            sans = []
+
     try:
         if cert_type == 'tls-server':
             bundle = cert_minter.issue_server_cert(
                 cn, ctx.tls_ca_key, ctx.tls_ca_cert,
                 validity_days=days, key_type=ctx.mtls_key_type,
                 sans=sans or None,
-                crl_url=ctx.crl_url)
+                crl_url=ctx.crl_url,
+                csr_public_key=csr_public_key)
         elif cert_type == 'https-user':
             bundle = cert_minter.issue_client_cert(
                 cn, ctx.tls_ca_key, ctx.tls_ca_cert,
                 validity_days=days, key_type=ctx.mtls_key_type,
-                crl_url=ctx.crl_url, kind='https-user')
+                crl_url=ctx.crl_url, kind='https-user',
+                csr_public_key=csr_public_key)
         else:  # code-sign
             # Code-signing certs intentionally skip CRLDP — long-lived
             # build identities + downstream timestamping authorities
             # typically handle revocation differently.
             bundle = cert_minter.issue_codesign_cert(
                 cn, ctx.tls_ca_key, ctx.tls_ca_cert,
-                validity_days=days, key_type=ctx.mtls_key_type)
+                validity_days=days, key_type=ctx.mtls_key_type,
+                csr_public_key=csr_public_key)
     except Exception as e:
         return _err(500, 'internal', f'cert issuance failed: {e}')
 
     _audit_admin(ctx, admin, f'cert.mint.{cert_type}',
                  {'cn': cn, 'validity_days': days,
-                  'sans': sans}, 'ok')
+                  'sans': sans,
+                  'csr_based': csr_public_key is not None}, 'ok')
 
     return 201, {
         'status': 'ok',
@@ -1438,6 +1516,8 @@ def cert_mint(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
             'type': cert_type,
             'subject_cn': cn,
             'validity_days': days,
+            'csr_based': csr_public_key is not None,
+            'sans': sans,
         },
         'credentials': {
             'cert_pem': bundle.cert_pem.decode('ascii'),

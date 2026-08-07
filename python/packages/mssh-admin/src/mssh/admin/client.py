@@ -200,19 +200,28 @@ class CAClient:
     # ---- §5 cert minting (TLS server / HTTPS user / code-signing) ----
     def cert_mint(self, cert_type: str, cn: str, *,
                   sans: list[str] | None = None,
-                  validity_days: int | None = None) -> dict[str, Any]:
+                  validity_days: int | None = None,
+                  csr_pem: str | None = None) -> dict[str, Any]:
         """Mint an X.509 leaf cert against the TLS CA hierarchy.
 
         ``cert_type`` is one of ``tls-server`` | ``https-user`` |
         ``code-sign``. ``sans`` are only valid for ``tls-server``;
         each entry must be of the form ``DNS:<name>``, ``IP:<addr>``,
         or a bare DNS name.
+
+        v0.5.3 CSR path: when ``csr_pem`` is set, the CA uses the CSR's
+        public key + SANs (union with ``sans``) instead of generating
+        a keypair. Response's ``credentials.key_pem`` is empty — the
+        operator's private key never touches the CA. Recommended for
+        TLS server certs where the key should stay on the target host.
         """
         body: dict[str, Any] = {'type': cert_type, 'cn': cn}
         if sans is not None:
             body['sans'] = list(sans)
         if validity_days is not None:
             body['validity_days'] = int(validity_days)
+        if csr_pem is not None:
+            body['csr'] = csr_pem
         return self._request('POST', '/v1/admin/cert/mint', json=body)
 
     def openvpn_issue(self, cn: str, server_endpoint: str, *,
@@ -375,6 +384,7 @@ class CAClient:
                                      profile: str = 'generic',
                                      new_root: bool = False,
                                      root_name: str | None = None,
+                                     retain_key: bool | None = None,
                                      ) -> dict[str, Any]:
         """Mint an external Intermediate CA cert (§2.6 / §15.20 / §15.22).
 
@@ -394,6 +404,13 @@ class CAClient:
                          Root at <ca_dir>/roots/<root_name>/ and sign
                          this intermediate under it
           root_name:     name for the new Root; defaults to `name`
+          retain_key:    override CA-side key retention. Defaults are:
+                         profile=generic → False (v0.4.x semantics);
+                         profile=device-identity → True (CA needs the
+                         key to sign external-use leaves). Set
+                         retain_key=False on a non-generic profile to
+                         opt into "external entity holds the key"
+                         (§2.6) even for device-identity intermediates.
         """
         body: dict[str, Any] = {
             'name': name,
@@ -406,6 +423,8 @@ class CAClient:
             body['new_root'] = True
         if root_name:
             body['root_name'] = root_name
+        if retain_key is not None:
+            body['retain_key'] = bool(retain_key)
         return self._request('POST',
                               '/v1/admin/intermediate/mint-external',
                               json=body)

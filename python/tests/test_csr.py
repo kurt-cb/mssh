@@ -109,16 +109,19 @@ def test_string_input_also_accepted():
     assert isinstance(csr, x509.CertificateSigningRequest)
 
 
-def test_csr_with_extension_rejected():
-    """Verifies §15.18 — a CSR that smuggles in a SAN extension is
-    rejected; the CA owns extensions."""
+def test_csr_with_san_extension_allowed():
+    """Verifies §15.18 (v0.5.3 bugfix) — CSR carrying a SAN extension
+    IS allowed (standard openssl req produces these). The mint path
+    may use the SANs to populate the leaf's SubjectAlternativeName."""
     key = ec.generate_private_key(ec.SECP256R1())
-    san = x509.SubjectAlternativeName([x509.DNSName('attacker.example')])
+    san = x509.SubjectAlternativeName([x509.DNSName('web.example.com')])
     pem = _csr_from(key, extensions=[(san, False)])
-    with pytest.raises(CSRValidationError) as exc:
-        load_and_verify_csr(pem)
-    assert 'disallowed extensions' in str(exc.value)
-    assert '2.5.29.17' in str(exc.value)  # SAN OID surfaced
+    csr = load_and_verify_csr(pem)  # no raise
+    # SAN survives the parse — mint path can extract it.
+    from cryptography.x509.oid import ExtensionOID
+    san_ext = csr.extensions.get_extension_for_oid(
+        ExtensionOID.SUBJECT_ALTERNATIVE_NAME).value
+    assert [str(n.value) for n in san_ext] == ['web.example.com']
 
 
 def test_csr_with_keyusage_extension_rejected():

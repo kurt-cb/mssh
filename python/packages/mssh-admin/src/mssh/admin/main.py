@@ -1103,18 +1103,27 @@ def cert_group():
 @click.option('--san', 'sans', multiple=True,
               help='SubjectAltName (tls-server only). '
                    'Forms: DNS:foo.example.com, IP:10.0.0.1, or bare host. '
-                   'Repeat for multiple.')
+                   'Repeat for multiple. Merged with any SANs from --csr.')
 @click.option('--validity-days', type=int, default=None,
               help='Cert validity in days (default per type; capped at 825).')
+@click.option('--csr', 'csr_path', default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help='Path to a PKCS#10 CSR file. When set, the CA uses '
+                   'the CSR\'s public key + merges its SANs (if any) '
+                   'with --san. The private key stays on the target '
+                   'host — no OUT-key.pem is written. Recommended for '
+                   'TLS server certs where the key must not traverse '
+                   'the network to reach the target.')
 @click.option('--out', 'out_prefix', default=None, type=click.Path(),
               help='Write outputs to OUT-cert.pem, OUT-key.pem, OUT-ca.pem. '
                    'For --type https-user also writes OUT.p12 if --p12-password '
-                   'is set. Without --out, the cert + key are printed to stdout.')
+                   'is set. Without --out, the cert + key are printed to stdout. '
+                   'With --csr, no OUT-key.pem is written.')
 @click.option('--p12-password', default=None,
               help='Password for PKCS#12 export (https-user only). '
                    'If unset, no .p12 is generated.')
 @click.pass_context
-def cert_mint_cmd(ctx, cert_type, cn, sans, validity_days, out_prefix,
+def cert_mint_cmd(ctx, cert_type, cn, sans, validity_days, csr_path, out_prefix,
                   p12_password):
     """Mint a §5 cert via the CA.
 
@@ -1147,37 +1156,57 @@ def cert_mint_cmd(ctx, cert_type, cn, sans, validity_days, out_prefix,
         click.echo('error: --p12-password is only valid for '
                    '--type https-user', err=True)
         ctx.exit(2)
+    if csr_path and p12_password:
+        click.echo('error: --p12-password bundles the CA-generated '
+                   'key into PKCS#12, which cannot happen when --csr '
+                   'is set (no key was generated CA-side)', err=True)
+        ctx.exit(2)
+
+    csr_pem: str | None = None
+    if csr_path:
+        csr_pem = Path(csr_path).read_text()
 
     c = _make_client(ctx)
     resp = _handle_call(c.cert_mint, cert_type, cn,
                         sans=list(sans) if sans else None,
-                        validity_days=validity_days)
+                        validity_days=validity_days,
+                        csr_pem=csr_pem)
     creds = resp['credentials']
+    csr_based = resp.get('cert', {}).get('csr_based', False)
     if out_prefix:
         od = Path(out_prefix)
         if od.suffix:                       # e.g. --out alice.pem.bad
             od = od.with_suffix('')
         od.parent.mkdir(parents=True, exist_ok=True)
         cert_path = od.with_name(f'{od.name}-cert.pem')
-        key_path  = od.with_name(f'{od.name}-key.pem')
         ca_path   = od.with_name(f'{od.name}-ca.pem')
         cert_path.write_text(creds['cert_pem'])
-        key_path.write_text(creds['key_pem'])
         ca_path.write_text(creds['ca_cert_pem'])
-        os.chmod(key_path, 0o600)
-        click.echo(f'wrote {cert_path}, {key_path}, {ca_path}', err=True)
-        if cert_type == 'https-user' and p12_password:
-            p12_path = od.with_name(f'{od.name}.p12')
-            _write_pkcs12(creds['cert_pem'], creds['key_pem'],
-                          friendly_name=cn,
-                          password=p12_password.encode('utf-8'),
-                          out_path=p12_path)
-            click.echo(f'wrote {p12_path} (PKCS#12, encrypted)', err=True)
+        # CSR path — CA didn't generate a key. Skip -key.pem file.
+        if csr_based:
+            click.echo(f'wrote {cert_path}, {ca_path} '
+                       f'(no key file: private key stays on target host)',
+                       err=True)
+        else:
+            key_path = od.with_name(f'{od.name}-key.pem')
+            key_path.write_text(creds['key_pem'])
+            os.chmod(key_path, 0o600)
+            click.echo(f'wrote {cert_path}, {key_path}, {ca_path}',
+                       err=True)
+            if cert_type == 'https-user' and p12_password:
+                p12_path = od.with_name(f'{od.name}.p12')
+                _write_pkcs12(creds['cert_pem'], creds['key_pem'],
+                              friendly_name=cn,
+                              password=p12_password.encode('utf-8'),
+                              out_path=p12_path)
+                click.echo(f'wrote {p12_path} (PKCS#12, encrypted)',
+                           err=True)
     else:
         click.echo('--- cert ---', err=True)
         click.echo(creds['cert_pem'])
-        click.echo('--- key ---', err=True)
-        click.echo(creds['key_pem'])
+        if not csr_based:
+            click.echo('--- key ---', err=True)
+            click.echo(creds['key_pem'])
     _output(ctx, resp['cert'])
 
 
@@ -1594,12 +1623,19 @@ def intermediate_rotate_cmd(ctx, role, force):
               help='Where to write the external intermediate cert PEM.')
 @click.option('--out-key', required=True, type=click.Path(),
               help='Where to write the external intermediate private key. '
-                   'Mode 0600. Hand off to the external entity OUT-OF-BAND; '
-                   'the CA does NOT retain a copy.')
+                   'Mode 0600. See --retain-key / --no-retain-key for '
+                   'whether the CA also keeps a copy.')
+@click.option('--retain-key/--no-retain-key', default=None,
+              help='Whether the CA retains a copy of the intermediate '
+                   "key on disk. Default depends on --profile: `generic` "
+                   "→ no retain (v0.4.x §2.6 delegation semantics); "
+                   "any other profile → retain (the CA needs the key "
+                   "to sign external-use leaves under this intermediate). "
+                   "Pass explicitly to override the default either way.")
 @click.pass_context
 def intermediate_mint_external_cmd(ctx, name, path_length, validity_days,
                                      profile, new_root, root_name,
-                                     out_cert, out_key):
+                                     out_cert, out_key, retain_key):
     """Mint an external Intermediate CA per the trust-model amendment.
 
     The external entity then runs their own signing infrastructure;
@@ -1635,11 +1671,18 @@ def intermediate_mint_external_cmd(ctx, name, path_length, validity_days,
                             validity_days=validity_days,
                             profile=profile,
                             new_root=new_root,
-                            root_name=root_name)
+                            root_name=root_name,
+                            retain_key=retain_key)
     Path(out_cert).write_text(out['cert_pem'])
     _atomic_write(Path(out_key), out['key_pem'].encode('ascii'), mode=0o600)
     click.echo(f'wrote {out_cert} (cert) and {out_key} (key, mode 0600)',
                 err=True)
+    if out.get('key_retained_by_ca'):
+        click.echo(
+            f'NOTE: CA has retained a copy of the key. `mssh-admin cert '
+            f'external-use --issuer-intermediate {out["name"]}` can now '
+            f'sign leaves under this intermediate directly — no '
+            f'operator key-placement step needed.', err=True)
     click.echo(f'WARNING: {out["warning"]}', err=True)
     _output(ctx, {
         'name': out['name'],
@@ -1647,6 +1690,7 @@ def intermediate_mint_external_cmd(ctx, name, path_length, validity_days,
         'path_length': out['path_length'],
         'profile': out.get('profile', 'generic'),
         'root_name': out.get('root_name', 'primary'),
+        'key_retained_by_ca': out.get('key_retained_by_ca', False),
         'serial': out['serial'],
     })
 

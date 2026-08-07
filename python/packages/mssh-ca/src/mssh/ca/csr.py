@@ -23,13 +23,26 @@ class CSRValidationError(ValueError):
     """Raised when a submitted CSR fails verification."""
 
 
+_CSR_ALLOWED_EXTENSIONS = frozenset({
+    # SubjectAlternativeName — routine on openssl-generated CSRs; the
+    # mint path ignores it (external-use leaves don't get SANs from
+    # the CSR — CN comes from the request body). Accepted for
+    # compatibility with standard tooling.
+    '2.5.29.17',
+})
+
+
 def load_and_verify_csr(pem_bytes: bytes | str) -> x509.CertificateSigningRequest:
     """Parse a PEM-encoded CSR and verify its self-signature.
 
     Rejects any CSR that:
       - is not parseable as PEM PKCS#10
       - has an invalid self-signature
-      - carries any X.509 extensions (the CA owns those)
+      - carries X.509 extensions other than those in
+        ``_CSR_ALLOWED_EXTENSIONS`` (currently just SubjectAltName —
+        rejects any operator attempt to smuggle KeyUsage, EKU,
+        BasicConstraints, etc., since the CA decides those at mint
+        time per the cert kind / profile).
 
     Returns the validated CSR object.
 
@@ -47,13 +60,13 @@ def load_and_verify_csr(pem_bytes: bytes | str) -> x509.CertificateSigningReques
     if not csr.is_signature_valid:
         raise CSRValidationError('CSR self-signature is invalid')
 
-    # Reject any extensions in the CSR — the operator must not dictate
-    # KeyUsage/EKU/critical extensions through the CSR. The CA decides
-    # those at mint time per the cert kind / profile.
-    if list(csr.extensions):
-        oids = ', '.join(ext.oid.dotted_string for ext in csr.extensions)
+    disallowed = [ext.oid.dotted_string for ext in csr.extensions
+                  if ext.oid.dotted_string not in _CSR_ALLOWED_EXTENSIONS]
+    if disallowed:
         raise CSRValidationError(
-            f'CSR carries disallowed extensions (CA owns these): {oids}')
+            f'CSR carries disallowed extensions (CA owns these): '
+            f'{", ".join(disallowed)}. Allowed: '
+            f'{sorted(_CSR_ALLOWED_EXTENSIONS)}')
 
     return csr
 

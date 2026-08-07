@@ -8,6 +8,70 @@ Columns: `ref`, `title`, `landed-in`, `commit`, `notes`.
 
 ---
 
+## Release notes — v0.5.3 (2026-06-14)
+
+Three fixes / additions that make the CSR + external-use flows actually
+usable end-to-end for real operators.
+
+**Headline:**
+
+- **CSR-based `cert mint` for tls-server / https-user / code-sign
+  (§15.18 v0.5.3)** — the CA now accepts an optional PKCS#10 CSR on
+  every `cert mint` call. When set: CA uses the CSR's public key +
+  merges its SANs with body-supplied SANs (de-duped) + returns the
+  signed cert with an EMPTY `key_pem`. Operator's private key never
+  traverses the network. This is the correct posture for TLS server
+  certs. CLI: `--csr <path>`; client: `csr_pem=` kwarg. When `--csr`
+  is set the CLI omits `OUT-key.pem` from the output prefix.
+
+- **CSR-loader bugfix** — v0.5.2's CSR validator rejected SANs (`OID
+  2.5.29.17`), which every openssl-generated CSR carries. Now accepts
+  SANs (they're needed anyway for the mint path); still rejects
+  KeyUsage / EKU / BasicConstraints / other operator-escalation
+  attempts.
+
+- **CA-retain intermediate key on non-generic `--profile` (§15.20
+  v0.5.3)** — `mssh-admin intermediate mint-external --profile
+  device-identity` now automatically persists a copy of the
+  intermediate key at `<ca_dir>/external/<name>/key.pem` (mode 0600).
+  The CA needs this key to sign external-use leaves under the
+  intermediate, and the v0.5.2 workflow required an operator to
+  hand-place it via `install -m 600` — friction + error-prone.
+  Preserves v0.4.x §2.6 delegation semantics for `--profile generic`
+  (still no retention). New `--no-retain-key` flag opts out even on
+  device-identity profiles for operators who want to hand off to
+  an external entity.
+
+**End-to-end SSL web cert flow (v0.5.3)** — the private key stays
+on the target host:
+
+```bash
+# On the target host:
+openssl ecparam -name prime256v1 -genkey -noout -out web.key
+openssl req -new -key web.key -subj "/CN=web.example.com" \
+    -addext "subjectAltName=DNS:web.example.com,DNS:www.example.com" \
+    -out web.csr
+
+# Submit CSR to CA:
+mssh-admin cert mint --type tls-server \
+    --cn web.example.com --csr web.csr \
+    --validity-days 365 --out web
+# → wrote web-cert.pem, web-ca.pem  (no web-key.pem — stayed on host)
+```
+
+**Test coverage:** 871 unit tests pass (up from 859 at v0.5.2; +12 new
+tests in `test_csr_cert_mint.py` covering CSR-based mint for all three
+kinds, SAN merging with de-dup, kind-marker preservation, CA-generates
+regression, corrupt-signature handling, and intermediate-key retention).
+
+**To tag this release:**
+```
+git tag v0.5.3
+git push mssh v0.5.3
+```
+
+---
+
 ## Release notes — v0.5.2 (2026-06-14)
 
 Wire-up the CLI + REST plumbing for the v0.5.0 external-use / new-Root

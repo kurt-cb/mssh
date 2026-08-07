@@ -287,12 +287,24 @@ def _issue_leaf(subject_cn: str, leaf_key,
                 code_signing: bool = False,
                 sans: list[str] | None = None,
                 crl_url: str | None = None,
-                kind: str | None = None) -> x509.Certificate:
+                kind: str | None = None,
+                public_key=None) -> x509.Certificate:
     """Issue a leaf cert, signed by the given intermediate.
 
     §15.23 — when ``kind`` is set, attaches a non-critical NULL marker
     OID from ``KIND_MARKER`` to identify the cert's kind.
+
+    v0.5.3 CSR path: when ``public_key`` is passed, that key is used
+    for the cert subject rather than deriving it from ``leaf_key``.
+    ``leaf_key`` may be ``None`` in that case — the CA never sees
+    the private key.
     """
+    if public_key is None:
+        if leaf_key is None:
+            raise TypeError(
+                '_issue_leaf needs either leaf_key (CA-generates-key path) '
+                'or public_key (CSR-based path)')
+        public_key = leaf_key.public_key()
     subject = x509.Name([
         x509.NameAttribute(oid.NameOID.COMMON_NAME, subject_cn),
     ])
@@ -327,7 +339,7 @@ def _issue_leaf(subject_cn: str, leaf_key,
         x509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(signing.cert.subject)
-        .public_key(leaf_key.public_key())
+        .public_key(public_key)
         .serial_number(int.from_bytes(secrets.token_bytes(16), 'big') | 1)
         .not_valid_before(not_before)
         .not_valid_after(not_after)
@@ -336,7 +348,7 @@ def _issue_leaf(subject_cn: str, leaf_key,
         .add_extension(ku, critical=True)
         .add_extension(x509.ExtendedKeyUsage(eku), critical=False)
         .add_extension(
-            x509.SubjectKeyIdentifier.from_public_key(leaf_key.public_key()),
+            x509.SubjectKeyIdentifier.from_public_key(public_key),
             critical=False)
         .add_extension(
             x509.AuthorityKeyIdentifier.from_issuer_public_key(
@@ -756,6 +768,7 @@ def issue_client_cert(common_name: str,
                       root_cert: x509.Certificate | None = None,
                       crl_url: str | None = None,
                       kind: str = 'client-mtls',
+                      csr_public_key=None,
                       ) -> IssuedClientCert:
     """Issue a leaf mTLS CLIENT cert.
 
@@ -789,15 +802,25 @@ def issue_client_cert(common_name: str,
         chain_bundle = False
     else:
         chain_bundle = True
-    key = generate_signing_key(key_type)
-    cert = _issue_leaf(common_name, key, signing,
-                       validity_days=validity_days,
-                       server_auth=False, client_auth=True,
-                       crl_url=crl_url, kind=kind)
+    # CSR path — don't generate a key; use the CSR's public key.
+    if csr_public_key is not None:
+        key_pem_out = b''
+        cert = _issue_leaf(common_name, None, signing,
+                           validity_days=validity_days,
+                           server_auth=False, client_auth=True,
+                           crl_url=crl_url, kind=kind,
+                           public_key=csr_public_key)
+    else:
+        key = generate_signing_key(key_type)
+        key_pem_out = serialize_private_key(key)
+        cert = _issue_leaf(common_name, key, signing,
+                           validity_days=validity_days,
+                           server_auth=False, client_auth=True,
+                           crl_url=crl_url, kind=kind)
     return IssuedClientCert(
         cert_pem=(_chain_pem(cert, signing.cert) if chain_bundle
                   else serialize_certificate(cert)),
-        key_pem=serialize_private_key(key),
+        key_pem=key_pem_out,
         ca_cert_pem=(serialize_certificate(root_cert)
                      if root_cert is not None
                      else serialize_certificate(signing.cert)),
@@ -814,6 +837,7 @@ def issue_server_cert(common_name: str,
                       sans: list[str] | None = None,
                       root_cert: x509.Certificate | None = None,
                       crl_url: str | None = None,
+                      csr_public_key=None,
                       ) -> IssuedClientCert:
     """Issue a leaf mTLS / TLS SERVER cert (EKU = serverAuth).
 
@@ -841,16 +865,28 @@ def issue_server_cert(common_name: str,
         chain_bundle = False
     else:
         chain_bundle = True
-    key = generate_signing_key(key_type)
-    cert = _issue_leaf(common_name, key, signing,
-                       validity_days=validity_days,
-                       server_auth=True, client_auth=False,
-                       sans=sans, crl_url=crl_url,
-                       kind='server-tls')
+    # CSR path — don't generate a key; use the CSR's public key.
+    # Response's key_pem is empty (operator's private key stays off-CA).
+    if csr_public_key is not None:
+        key_pem_out = b''
+        cert = _issue_leaf(common_name, None, signing,
+                           validity_days=validity_days,
+                           server_auth=True, client_auth=False,
+                           sans=sans, crl_url=crl_url,
+                           kind='server-tls',
+                           public_key=csr_public_key)
+    else:
+        key = generate_signing_key(key_type)
+        key_pem_out = serialize_private_key(key)
+        cert = _issue_leaf(common_name, key, signing,
+                           validity_days=validity_days,
+                           server_auth=True, client_auth=False,
+                           sans=sans, crl_url=crl_url,
+                           kind='server-tls')
     return IssuedClientCert(
         cert_pem=(_chain_pem(cert, signing.cert) if chain_bundle
                   else serialize_certificate(cert)),
-        key_pem=serialize_private_key(key),
+        key_pem=key_pem_out,
         ca_cert_pem=(serialize_certificate(root_cert)
                      if root_cert is not None
                      else serialize_certificate(signing.cert)),
@@ -987,6 +1023,7 @@ def issue_codesign_cert(common_name: str,
                         validity_days: int = 365,
                         key_type: str = 'ec',
                         root_cert: x509.Certificate | None = None,
+                        csr_public_key=None,
                         ) -> IssuedClientCert:
     """Issue a leaf code-signing cert (EKU = codeSigning).
 
@@ -1005,15 +1042,25 @@ def issue_codesign_cert(common_name: str,
         chain_bundle = False
     else:
         chain_bundle = True
-    key = generate_signing_key(key_type)
-    cert = _issue_leaf(common_name, key, signing,
-                       validity_days=validity_days,
-                       server_auth=False, client_auth=False,
-                       code_signing=True, kind='code-sign')
+    # CSR path — don't generate a key; use the CSR's public key.
+    if csr_public_key is not None:
+        key_pem_out = b''
+        cert = _issue_leaf(common_name, None, signing,
+                           validity_days=validity_days,
+                           server_auth=False, client_auth=False,
+                           code_signing=True, kind='code-sign',
+                           public_key=csr_public_key)
+    else:
+        key = generate_signing_key(key_type)
+        key_pem_out = serialize_private_key(key)
+        cert = _issue_leaf(common_name, key, signing,
+                           validity_days=validity_days,
+                           server_auth=False, client_auth=False,
+                           code_signing=True, kind='code-sign')
     return IssuedClientCert(
         cert_pem=(_chain_pem(cert, signing.cert) if chain_bundle
                   else serialize_certificate(cert)),
-        key_pem=serialize_private_key(key),
+        key_pem=key_pem_out,
         ca_cert_pem=(serialize_certificate(root_cert)
                      if root_cert is not None
                      else serialize_certificate(signing.cert)),
