@@ -1,0 +1,56 @@
+name: Release
+
+# Cut a GitHub Release with the six wheel artifacts attached whenever
+# an annotated tag matching v*.*.* is pushed. Wheels are built inside
+# the runner so the release contents are reproducible from the tag.
+#
+# Operators consume the release via:
+#
+#   BASE=https://github.com/kurt-cb/mssh/releases/download/v0.5.1
+#   pip install $BASE/mssh_common-0.5.1-py3-none-any.whl \
+#               $BASE/mssh_ca-0.5.1-py3-none-any.whl
+#
+# See scripts/install-from-github.sh for the wrapper one-liner.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write   # required to create the release + upload assets
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # setuptools_scm derives the wheel version from git — needs
+          # the full history + tag refs, not the default shallow clone.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build
+
+      - name: Build six wheels
+        run: make pkg
+
+      - name: List wheel artifacts
+        run: ls -lh dist/
+
+      - name: Create GitHub Release + attach wheels
+        uses: softprops/action-gh-release@v2
+        with:
+          # Attach every wheel produced by `make pkg`. Filenames carry
+          # the tag version via setuptools_scm.
+          files: dist/*.whl
+          # Autogenerate the "what's changed since last tag" section;
+          # operators still get the hand-written release notes via
+          # FEATURES-COMPLETE.md in the repo.
+          generate_release_notes: true
+          fail_on_unmatched_files: true
