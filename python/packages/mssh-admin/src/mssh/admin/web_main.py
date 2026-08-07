@@ -35,12 +35,12 @@ def main() -> int:
     args = p.parse_args()
 
     try:
-        client = _ca_client_from_config(args.config)
+        client, web_config = _ca_client_from_config(args.config)
     except Exception as e:
         sys.stderr.write(f'error: {e}\n')
         return 2
 
-    app = create_app(client, dev_mode=args.dev)
+    app = create_app(client, dev_mode=args.dev, web_config=web_config)
 
     if args.host not in ('127.0.0.1', 'localhost', '::1'):
         sys.stderr.write(

@@ -164,6 +164,18 @@ class AdminContext:
     # any mint request that supplies custom_oids is rejected.
     custom_oids: Any = None       # CustomOIDAllowlist | None
 
+    # R-10 §14.3.6 / R-8 supplement — operator-tunable MCP capability
+    # allow-list, from ca-config.yaml::mcp.capability_allow_list.
+    # When None, _check() falls back to the built-in
+    # DEFAULT_MCP_ALLOWED_ACTIONS (v0.4.0 behavior). When set, the
+    # frozenset overrides the default entirely so operators can both
+    # narrow (drop a default-allowed action) and broaden (add a
+    # read-only action). Bypass / mutating / destructive actions
+    # remain refused at the CA edge regardless of this setting —
+    # because the operator's frozenset is only the *positive* MCP
+    # allow-list; non-listed actions are still default-deny.
+    mcp_allow_list: Any = None    # frozenset[str] | None
+
 
 def _now_iso() -> str:
     return _dt.datetime.now(tz=_dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -197,6 +209,11 @@ def _check(action: str, admin: Admin,
     # actions like bypass-cert mint, admin.add, cert.revoke etc.
     # remain refused by the CA even if the MCP-side allow-list is
     # tampered with. Audit tag: §12.4.2 (origin: mcp in audit records).
+    #
+    # R-10 §14.3.6 — the effective allow-list is the module-level
+    # MCP_ALLOWED_ACTIONS frozenset, which server.py replaces at boot
+    # if the operator set `mcp.capability_allow_list` in ca-config.yaml.
+    # Tests can call set_mcp_allow_list() directly.
     if origin is None:
         # Inside a Flask request context, pull from g.client_origin
         # (set by server.py's _attach_caller before-request hook).
@@ -221,24 +238,40 @@ def _check(action: str, admin: Admin,
     return None
 
 
-# §12.4.3 CA-side capability allow-list. MCP-origin calls are refused
-# for any action NOT in this set, even if the admin's role would allow
-# it. The MCP-side TOOL_REGISTRY (mssh-admin/mcp/tools.py) is the
-# primary gate; this is defense in depth. Strict subset of mssh-admin;
-# all bypass/mutating/destructive actions are excluded per §12.2.
-MCP_ALLOWED_ACTIONS = frozenset({
-    'server.list',
-    'user.list',
-    'admin.list',
-    'audit.read',
-    'crl.read',
-    'intermediate.list',
-    'intermediate.external.list',
-    'external_tool.list',
-    'policy.read',                  # forward-compat; not currently a separate action
-    'template.list',
-    'template.show',
-})
+def set_mcp_allow_list(allow_list: frozenset[str] | None) -> None:
+    """R-10 §14.3.6 — install the operator-supplied MCP capability
+    allow-list as the active set used by ``_check()``.
+
+    Called at server boot by ``server.py`` after CAConfig is loaded.
+    Passing ``None`` restores the built-in default
+    (``DEFAULT_MCP_ALLOWED_ACTIONS`` from config.py).
+
+    Tests can call this directly to override or reset.
+    """
+    from . import config as _cfg
+    global MCP_ALLOWED_ACTIONS
+    if allow_list is None:
+        MCP_ALLOWED_ACTIONS = _cfg.DEFAULT_MCP_ALLOWED_ACTIONS
+    else:
+        MCP_ALLOWED_ACTIONS = frozenset(allow_list)
+
+
+# §12.4.3 / R-10 §14.3.6 — CA-side capability allow-list. MCP-origin
+# calls are refused for any action NOT in this set, even if the admin's
+# role would allow it. The MCP-side TOOL_REGISTRY (mssh-admin/mcp/
+# tools.py) is the primary gate; this is defense in depth.
+#
+# In v0.4.0 this was a hard-coded frozenset; in v0.5.1 it's mutable
+# state initialized to the built-in default in config.py, replaced at
+# server boot by server.py when the operator has set
+# `mcp.capability_allow_list` in ca-config.yaml. Tests can call
+# set_mcp_allow_list() to install a custom list. The strict subset
+# guarantee (bypass / mutating / destructive actions remain refused)
+# comes from the default — operators who broaden the list to include
+# such actions void that guarantee for those specific actions, but
+# the underlying RBAC check (`role_permits`) still applies.
+from . import config as _config
+MCP_ALLOWED_ACTIONS = _config.DEFAULT_MCP_ALLOWED_ACTIONS
 
 
 def _err(status: int, reason: str, detail: str) -> tuple[int, dict]:

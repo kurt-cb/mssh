@@ -205,7 +205,17 @@ def create_app(config: CAConfig) -> Flask:
         cert_kinds=config.cert_kinds,
         # §15.21 operator-allowlisted custom OIDs.
         custom_oids=config.custom_oids,
+        # R-10 §14.3.6 — operator MCP capability allow-list (echoed
+        # onto the context for diagnostics; the live gating uses the
+        # module-level MCP_ALLOWED_ACTIONS installed below).
+        mcp_allow_list=(config.mcp.capability_allow_list
+                         if config.mcp.capability_allow_list is not None
+                         else None),
     )
+
+    # R-10 §14.3.6 — install operator's MCP allow-list (or restore the
+    # built-in default if the operator's config has no `mcp:` section).
+    admin_handlers.set_mcp_allow_list(config.mcp.capability_allow_list)
 
     app.config['AUTH_CTX'] = auth_ctx
     app.config['ADMIN_CTX'] = admin_ctx

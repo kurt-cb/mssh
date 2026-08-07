@@ -262,6 +262,163 @@ class CertKindsPolicy:
         )
 
 
+# R-8 supplement / R-10 §14.3.6 — default MCP capability allow-list.
+# Lives here (not in admin.py) so the operator's `mcp.capability_allow_list`
+# in ca-config.yaml can override it. When ca-config has no `mcp:` block,
+# this default is what `admin.py::_check` consults — preserving v0.4.0
+# behavior byte-identical. Strict subset of mssh-admin; all
+# bypass/mutating/destructive actions are excluded per §12.2.
+DEFAULT_MCP_ALLOWED_ACTIONS: frozenset[str] = frozenset({
+    'server.list',
+    'user.list',
+    'admin.list',
+    'audit.read',
+    'crl.read',
+    'intermediate.list',
+    'intermediate.external.list',
+    'external_tool.list',
+    'policy.read',
+    'template.list',
+    'template.show',
+})
+
+
+@dataclass
+class MCPPolicy:
+    """§12.4.3 / R-10 §14.3.6 / R-8 supplement — operator-tunable
+    MCP-origin call gating, parsed from ``ca-config.yaml::mcp:``.
+
+    ``enabled`` is informational at the CA edge (the CA refuses MCP
+    calls outside ``capability_allow_list`` regardless); the MCP server
+    itself reads it. ``capability_allow_list`` overrides the built-in
+    ``DEFAULT_MCP_ALLOWED_ACTIONS`` set; when None, the default applies
+    (v0.4.0 behavior preserved).
+    """
+    enabled: bool = False
+    capability_allow_list: frozenset[str] | None = None
+
+    @classmethod
+    def from_yaml_section(cls, section: dict | None) -> 'MCPPolicy':
+        if not section:
+            return cls()
+        actions = section.get('capability_allow_list')
+        allow: frozenset[str] | None
+        if actions is None:
+            allow = None
+        else:
+            allow = frozenset(str(a) for a in actions)
+        return cls(
+            enabled=bool(section.get('enabled', False)),
+            capability_allow_list=allow,
+        )
+
+    def effective_allow_list(self) -> frozenset[str]:
+        """Returns the active allow-list — operator's override if set,
+        otherwise the built-in default. Always non-empty."""
+        return self.capability_allow_list \
+               if self.capability_allow_list is not None \
+               else DEFAULT_MCP_ALLOWED_ACTIONS
+
+
+@dataclass
+class AuditRotationPolicy:
+    """R-8 supplement — operator-tunable audit log rotation knobs.
+
+    Parsed from ``ca-config.yaml::audit.rotation:``. v0.5.1 ships the
+    plumbing; enforcement (size-based + count-based file rolls) is the
+    next sub-commit. Operators can populate the YAML now without
+    breaking anything; the audit writer ignores the fields until the
+    enforcement lands.
+    """
+    max_bytes: int = 0          # 0 = no size cap
+    keep_files: int = 0         # 0 = no retention cap
+
+    @classmethod
+    def from_yaml_section(cls, section: dict | None) -> 'AuditRotationPolicy':
+        if not section:
+            return cls()
+        return cls(
+            max_bytes=int(section.get('max_bytes') or 0),
+            keep_files=int(section.get('keep_files') or 0),
+        )
+
+
+@dataclass
+class AuditIntegrityPolicy:
+    """R-8 supplement — operator-tunable audit hash-chain knobs.
+
+    Parsed from ``ca-config.yaml::audit.integrity:``. The chain is
+    always on in v0.5.x (§13.9.6 ships unconditional); these knobs
+    expose the operator-facing tuning surface. ``signed_checkpoints``
+    is reserved for the v0.6+ signed-checkpoint extension to the
+    hash chain. ``checkpoint_interval_seconds`` controls how often
+    checkpoint records get written when that feature lands.
+    """
+    signed_checkpoints: bool = False
+    checkpoint_interval_seconds: int = 0
+
+    @classmethod
+    def from_yaml_section(cls, section: dict | None) -> 'AuditIntegrityPolicy':
+        if not section:
+            return cls()
+        return cls(
+            signed_checkpoints=bool(section.get('signed_checkpoints', False)),
+            checkpoint_interval_seconds=int(
+                section.get('checkpoint_interval_seconds') or 0),
+        )
+
+
+@dataclass
+class RateLimitsPolicy:
+    """R-8 supplement — operator-tunable per-endpoint rate limits.
+
+    Parsed from ``ca-config.yaml::ratelimits:``. Each entry maps an
+    action / endpoint name to ``{calls_per_minute: int}``. v0.5.1
+    ships the plumbing; enforcement is a v0.6+ follow-up at the
+    Flask route layer.
+
+    Shape::
+
+        ratelimits:
+          authorize:        {calls_per_minute: 600}
+          intermediate.rotate: {calls_per_minute: 5}
+    """
+    per_endpoint: dict[str, dict[str, int]] = field(default_factory=dict)
+
+    @classmethod
+    def from_yaml_section(cls, section: dict | None) -> 'RateLimitsPolicy':
+        if not section:
+            return cls()
+        out: dict[str, dict[str, int]] = {}
+        for endpoint, raw in section.items():
+            if not isinstance(raw, dict):
+                continue
+            entry: dict[str, int] = {}
+            if 'calls_per_minute' in raw:
+                entry['calls_per_minute'] = int(raw['calls_per_minute'])
+            if entry:
+                out[str(endpoint)] = entry
+        return cls(per_endpoint=out)
+
+
+@dataclass
+class TemplatesPolicy:
+    """R-8 supplement — operator-tunable templates directory.
+
+    Parsed from ``ca-config.yaml::templates::builtin_dir``. When set,
+    overrides the location of built-in template definitions (default:
+    `<package>/templates/builtin/`). Empty string = use the package
+    default — preserves v0.4.x behavior.
+    """
+    builtin_dir: str = ''
+
+    @classmethod
+    def from_yaml_section(cls, section: dict | None) -> 'TemplatesPolicy':
+        if not section:
+            return cls()
+        return cls(builtin_dir=str(section.get('builtin_dir') or ''))
+
+
 @dataclass
 class CAConfig:
     listen_host: str = '127.0.0.1'
@@ -338,6 +495,28 @@ class CAConfig:
     # Empty allowlist (default) = no operator OIDs accepted.
     custom_oids: CustomOIDAllowlist = field(default_factory=CustomOIDAllowlist)
 
+    # R-10 §14.3.6 / R-8 supplement — MCP gating policy (capability
+    # allow-list + enabled flag) from `ca-config.yaml::mcp:`. When
+    # the section is absent, the built-in DEFAULT_MCP_ALLOWED_ACTIONS
+    # applies — v0.4.0 behavior preserved byte-identical.
+    mcp: MCPPolicy = field(default_factory=MCPPolicy)
+
+    # R-8 supplement — audit log rotation + integrity policy. Plumbing
+    # only in v0.5.1; enforcement (size-based rolls, signed checkpoints)
+    # lands incrementally. Operators can populate the YAML without
+    # breaking anything.
+    audit_rotation: AuditRotationPolicy = field(
+        default_factory=AuditRotationPolicy)
+    audit_integrity: AuditIntegrityPolicy = field(
+        default_factory=AuditIntegrityPolicy)
+
+    # R-8 supplement — per-endpoint rate-limit caps. Plumbing only;
+    # Flask-route enforcement is a v0.6+ follow-up.
+    ratelimits: RateLimitsPolicy = field(default_factory=RateLimitsPolicy)
+
+    # R-8 supplement — operator-tunable templates directory.
+    templates: TemplatesPolicy = field(default_factory=TemplatesPolicy)
+
     @classmethod
     def load(cls, path: str | Path) -> 'CAConfig':
         # §14.3.2 ca-config.yaml parse; unset fields fall through to
@@ -398,6 +577,16 @@ class CAConfig:
                 data.get('cert_kinds')),
             custom_oids=CustomOIDAllowlist.from_yaml_section(
                 data.get('custom_oids')),
+            # R-10 §14.3.6 / R-8 supplement.
+            mcp=MCPPolicy.from_yaml_section(data.get('mcp')),
+            audit_rotation=AuditRotationPolicy.from_yaml_section(
+                (data.get('audit') or {}).get('rotation')),
+            audit_integrity=AuditIntegrityPolicy.from_yaml_section(
+                (data.get('audit') or {}).get('integrity')),
+            ratelimits=RateLimitsPolicy.from_yaml_section(
+                data.get('ratelimits')),
+            templates=TemplatesPolicy.from_yaml_section(
+                data.get('templates')),
         )
         return c
 

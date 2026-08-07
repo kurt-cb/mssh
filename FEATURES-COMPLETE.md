@@ -8,6 +8,72 @@ Columns: `ref`, `title`, `landed-in`, `commit`, `notes`.
 
 ---
 
+## Release notes — v0.5.1 (2026-06-14)
+
+Phase 1 reconciliation closure — landed the R-8 supplement + R-10 §14.3.5
++ R-10 §14.3.6 pieces that were deferred from v0.4.0. Phase 1 is now
+fully closed.
+
+**Headline:**
+
+- **R-10 §14.3.5 mssh-admin-web YAML config loader** — `WebConfig.load()`
+  now supports both the flat `key: value` legacy form (shared with the
+  CLI) and the structured YAML form with `ca:` / `flask:` /
+  `apache_integration:` blocks. New fields:
+  - `flask.secret_key_file` — bytes installed as Flask `SECRET_KEY` (for
+    §11.3.3 mutating-CRUD forward-compat).
+  - `apache_integration.trusted_client_cn_header` — when set, the
+    operator-CN identity is read from this header instead of relying on
+    the mssh-mediated tunnel marker. `caller_cn_from_request()` helper
+    threads through `flask.current_app.config['CALLER_CN_HEADER']`.
+
+- **R-10 §14.3.6 MCP capability allow-list from `ca-config.yaml`** —
+  `MCP_ALLOWED_ACTIONS` in `mssh.ca.admin` is now backed by
+  `DEFAULT_MCP_ALLOWED_ACTIONS` in `mssh.ca.config` and replaced at
+  server boot when the operator sets `mcp.capability_allow_list` in
+  ca-config. `set_mcp_allow_list(frozenset | None)` API lets tests
+  + the boot path install or reset the active list. The v0.4.0
+  default behavior is preserved byte-identical when the YAML has no
+  `mcp:` block.
+
+- **R-8 supplement — new ca-config.yaml sections parsed:**
+  - `mcp:` block — `enabled` flag + `capability_allow_list` (composes
+    with R-10 §14.3.6).
+  - `audit.rotation` — `max_bytes` + `keep_files` (plumbing; enforcement
+    is a v0.6+ follow-up at the AuditLog writer).
+  - `audit.integrity` — `signed_checkpoints` + `checkpoint_interval_seconds`
+    (plumbing for the v0.6+ signed-checkpoint extension of the §13.9.6
+    hash chain; the chain itself is always-on).
+  - `ratelimits.*` — per-endpoint `{calls_per_minute}` dict (plumbing;
+    Flask-route enforcement is a v0.6+ follow-up).
+  - `templates.builtin_dir` — operator-tunable path override for the
+    built-in template set.
+
+  All five new sections are optional and absent-section default-deny
+  behavior matches v0.4.x byte-identical.
+
+- **Phase 1 reconciliation: ✅ closed.** Every §14 wire/disk contract
+  is the v1 baseline. `test_design_xref.py` enforces it on every
+  commit. FEATURES-TODO's R-1..R-10 plan collapsed to a one-line
+  outcome ledger.
+
+**Test coverage:** 851 unit tests pass (up from 835 at v0.5.0; +16 new
+tests in `test_r8_r10_config_parsers.py`).
+
+**Other:**
+
+- FEATURES-TODO.md normalized to a three-state convention
+  (⚪ not started / 🚧 in progress / ✅ done) and rid of stale rows
+  for items that shipped in v0.4.0 / v0.5.0.
+
+**To tag this release:**
+```
+git tag v0.5.1
+# wheels will then build as 0.5.1 via setuptools_scm.
+```
+
+---
+
 ## Release notes — v0.5.0 (2026-06-14)
 
 General-purpose CA features for non-SSH use cases — device identity,
