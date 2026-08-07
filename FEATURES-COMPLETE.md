@@ -8,6 +8,57 @@ Columns: `ref`, `title`, `landed-in`, `commit`, `notes`.
 
 ---
 
+## Release notes — v0.5.2 (2026-06-14)
+
+Wire-up the CLI + REST plumbing for the v0.5.0 external-use / new-Root
+/ profile features that landed at the admin-handler level but were
+never exposed to operators.
+
+**Headline:**
+
+- **CLI: `mssh-admin cert external-use`** — new subcommand that
+  submits a CSR to the CA for signing. Flags: `--cn`, `--csr <path>`,
+  `--issuer-intermediate <name>`, `--validity-days N` |
+  `--never-expires`, `--custom-oid NAME=VALUE` (repeatable), `--out
+  <prefix>`. Writes `<prefix>-cert.pem` (leaf+chain), `<prefix>-leaf.pem`
+  (leaf only), `<prefix>-ca.pem` (issuer intermediate). No key file —
+  operator's CSR-supplied key stays on-device.
+
+- **CLI: `mssh-admin intermediate mint-external`** grew three v0.5.0
+  flags that were shipped in the admin handler but not the CLI:
+  `--profile {generic|device-identity}`, `--new-root`, `--root <name>`.
+  Composable — e.g. `--profile device-identity --new-root --root
+  mfg-pki` creates a fresh Root + a device-identity intermediate under
+  it in one shot.
+
+- **REST**: `POST /v1/admin/cert/external-use` registered in
+  `server.py`. Body matches the admin handler contract from v0.5.0.
+
+- **Client**: `CAClient.cert_external_use_mint(cn, csr_pem,
+  issuer_intermediate, ...)` + `CAClient.intermediate_mint_external`
+  now accepts `profile`, `new_root`, `root_name`.
+
+- **GitHub Actions release workflow** (`.github/workflows/release.yml`)
+  — cuts a GitHub Release with the six wheels attached on every
+  `v*.*.*` tag push. `scripts/install-from-github.sh` operator wrapper
+  for `pip install`-ing wheels straight from a GitHub Release.
+
+**Fixes the gap:** in v0.5.1, an operator could not actually mint an
+external-use leaf without hitting the Python API directly — no CLI
+verb, no REST route, no client method. v0.5.2 closes that.
+
+**Test coverage:** 859 unit tests pass (up from 851 at v0.5.1; +8 new
+tests in `test_external_use_cli.py` covering the client method + CLI
+flag surface + REST route registration).
+
+**To tag this release:**
+```
+git tag v0.5.2
+git push mssh v0.5.2   # triggers the release workflow
+```
+
+---
+
 ## Release notes — v0.5.1 (2026-06-14)
 
 Phase 1 reconciliation closure — landed the R-8 supplement + R-10 §14.3.5

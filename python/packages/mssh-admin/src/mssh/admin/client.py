@@ -371,16 +371,81 @@ class CAClient:
 
     def intermediate_mint_external(self, name: str, *,
                                      path_length: int = 0,
-                                     validity_days: int = 3650
+                                     validity_days: int | None = None,
+                                     profile: str = 'generic',
+                                     new_root: bool = False,
+                                     root_name: str | None = None,
                                      ) -> dict[str, Any]:
-        """Mint an external Intermediate CA cert. The response carries
-        the cert + key — operator hands the key to the external entity
-        OUT OF BAND. The CA retains only the public cert."""
+        """Mint an external Intermediate CA cert (§2.6 / §15.20 / §15.22).
+
+        The response carries the cert + key — operator hands the key to
+        the external entity OUT OF BAND. The CA retains only the public
+        cert (plus `profile.json` when `profile != generic`).
+
+        Args:
+          name:          short identifier; becomes Organization= in cert
+          path_length:   sub-CA depth (0 = leaves only)
+          validity_days: overrides profile default (3650 for generic,
+                         10950 for device-identity)
+          profile:       'generic' (v0.4.x behavior) or 'device-identity'
+                         (§15.20 — stamps §15.23 intermediate-purpose
+                         marker so external-use leaves can pin to it)
+          new_root:      opt into §15.22 separate-Root: create a fresh
+                         Root at <ca_dir>/roots/<root_name>/ and sign
+                         this intermediate under it
+          root_name:     name for the new Root; defaults to `name`
+        """
+        body: dict[str, Any] = {
+            'name': name,
+            'path_length': int(path_length),
+            'profile': profile,
+        }
+        if validity_days is not None:
+            body['validity_days'] = int(validity_days)
+        if new_root:
+            body['new_root'] = True
+        if root_name:
+            body['root_name'] = root_name
         return self._request('POST',
                               '/v1/admin/intermediate/mint-external',
-                              json={'name': name,
-                                    'path_length': int(path_length),
-                                    'validity_days': int(validity_days)})
+                              json=body)
+
+    def cert_external_use_mint(self, *, cn: str, csr_pem: str,
+                                issuer_intermediate: str,
+                                validity_days: int | None = None,
+                                never_expires: bool = False,
+                                custom_oids: list[dict] | None = None,
+                                ) -> dict[str, Any]:
+        """§15.19 — mint an external-use leaf from a CSR.
+
+        The CA verifies the CSR's self-signature, checks the issuer
+        intermediate carries the §15.20 purpose marker, and returns
+        the signed leaf. Operator's private key never touches the CA.
+
+        Args:
+          cn:                  Common Name on the leaf
+          csr_pem:             PKCS#10 PEM string
+          issuer_intermediate: name of a `mint-external --profile`
+                               intermediate on this CA
+          validity_days:       overrides ca-config `cert_kinds.external-use`
+          never_expires:       set notAfter to RFC 5280 §4.1.2.5 sentinel
+          custom_oids:         [{oid|name, value, critical?}] from the
+                               ca-config `custom_oids:` allowlist
+        """
+        body: dict[str, Any] = {
+            'cn': cn,
+            'csr': csr_pem,
+            'issuer_intermediate': issuer_intermediate,
+        }
+        if validity_days is not None:
+            body['validity_days'] = int(validity_days)
+        if never_expires:
+            body['never_expires'] = True
+        if custom_oids:
+            body['custom_oids'] = custom_oids
+        return self._request('POST',
+                              '/v1/admin/cert/external-use',
+                              json=body)
 
     def intermediate_list_external(self) -> dict[str, Any]:
         """List external Intermediate CAs previously minted."""

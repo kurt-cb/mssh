@@ -1208,6 +1208,120 @@ def _write_pkcs12(cert_pem: str, key_pem: str, *,
     os.chmod(out_path, 0o600)
 
 
+@cert_group.command('external-use')
+@click.option('--cn', required=True,
+              help='Common Name on the leaf cert.')
+@click.option('--csr', 'csr_path', required=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help='Path to a PKCS#10 CSR file (PEM). The CA verifies '
+                   'the CSR self-signature and extracts the public key. '
+                   'The operator\'s private key never touches the CA.')
+@click.option('--issuer-intermediate', required=True,
+              help='Name of the external intermediate that will sign '
+                   'this leaf. Must have been minted via '
+                   '`mssh-admin intermediate mint-external --profile <name>` '
+                   '(non-generic profile stamps the §15.20 purpose marker).')
+@click.option('--validity-days', type=int, default=None,
+              help='Cert validity in days (overrides ca-config '
+                   'cert_kinds.external-use.default_validity_days; '
+                   'default 7305 = 20yr; cap 9125 = 25yr). Mutually '
+                   'exclusive with --never-expires.')
+@click.option('--never-expires', is_flag=True, default=False,
+              help='§15.19 — set notAfter to the RFC 5280 §4.1.2.5 '
+                   'sentinel (99991231235959Z) for ROM-burned device '
+                   'identity certs. Mutually exclusive with --validity-days.')
+@click.option('--custom-oid', 'custom_oids', multiple=True,
+              help='Operator-defined custom OIDs to attach, from the '
+                   '§15.21 ca-config allowlist. Form: `NAME=VALUE` or '
+                   '`OID=VALUE`. Repeat for multiple.')
+@click.option('--out', 'out_prefix', required=True, type=click.Path(),
+              help='Write outputs to OUT-cert.pem (leaf+chain) + '
+                   'OUT-leaf.pem (leaf only) + OUT-ca.pem (issuer '
+                   'intermediate). No key is written — operator\'s CSR '
+                   'private key stays on-device.')
+@click.pass_context
+def cert_external_use_cmd(ctx, cn, csr_path, issuer_intermediate,
+                          validity_days, never_expires,
+                          custom_oids, out_prefix):
+    """§15.19 — mint a CSR-based external-use leaf.
+
+    The CA never sees the private key. Prereqs:
+
+    \b
+      1. An external intermediate must exist with a non-generic profile:
+             mssh-admin intermediate mint-external \\
+                 --name device-mfg --profile device-identity \\
+                 --out-cert device-mfg.crt --out-key device-mfg.key
+         And the intermediate's key.pem must be placed at
+         <ca_dir>/external/device-mfg/key.pem (mode 0600) for the CA
+         to sign external-use leaves under it.
+      2. Any --custom-oid names/OIDs referenced must be declared in
+         the CA's ca-config.yaml `custom_oids:` allowlist.
+
+    Example — device-identity CSR:
+
+    \b
+      openssl ecparam -name prime256v1 -genkey -noout -out dev.key
+      openssl req -new -key dev.key -subj "/CN=device-0001" -out dev.csr
+      mssh-admin cert external-use \\
+          --cn device-0001 --csr dev.csr \\
+          --issuer-intermediate device-mfg \\
+          --validity-days 7305 \\
+          --custom-oid device_oem=acme \\
+          --out device-0001
+    """
+    # §7.3.1 CLI tree; §15.19 external-use kind
+    if validity_days is not None and never_expires:
+        click.echo('error: --validity-days and --never-expires are '
+                   'mutually exclusive', err=True)
+        ctx.exit(2)
+
+    # Parse `--custom-oid NAME=VALUE` args into the request-body shape.
+    coids: list[dict] = []
+    for spec in custom_oids:
+        if '=' not in spec:
+            click.echo(f'error: --custom-oid must be NAME=VALUE '
+                       f'(got: {spec!r})', err=True)
+            ctx.exit(2)
+        key, _, value = spec.partition('=')
+        entry: dict = {'value': value}
+        # Ambiguity: could be an OID (dotted digits) or a name (alpha).
+        if all(part.isdigit() for part in key.split('.')):
+            entry['oid'] = key
+        else:
+            entry['name'] = key
+        coids.append(entry)
+
+    csr_pem = Path(csr_path).read_text()
+
+    c = _make_client(ctx)
+    resp = _handle_call(c.cert_external_use_mint,
+                        cn=cn, csr_pem=csr_pem,
+                        issuer_intermediate=issuer_intermediate,
+                        validity_days=validity_days,
+                        never_expires=never_expires,
+                        custom_oids=coids or None)
+    creds = resp['credentials']
+    od = Path(out_prefix)
+    if od.suffix:
+        od = od.with_suffix('')
+    od.parent.mkdir(parents=True, exist_ok=True)
+    (od.with_name(f'{od.name}-cert.pem')).write_text(creds['cert_pem'])
+    (od.with_name(f'{od.name}-leaf.pem')).write_text(creds['leaf_only_pem'])
+    (od.with_name(f'{od.name}-ca.pem')).write_text(creds['ca_cert_pem'])
+    click.echo(f'wrote {od.name}-cert.pem (leaf+chain), '
+               f'{od.name}-leaf.pem (leaf only), '
+               f'{od.name}-ca.pem (issuer intermediate)', err=True)
+    _output(ctx, {
+        'type': resp['cert']['type'],
+        'subject_cn': resp['cert']['subject_cn'],
+        'issuer_intermediate': resp['cert']['issuer_intermediate'],
+        'never_expires': resp['cert']['never_expires'],
+        'validity_days': resp['cert']['validity_days'],
+        'not_valid_after': resp['cert']['not_valid_after'],
+    })
+
+
 @cert_group.command('renew')
 @click.option('--cert', 'cert_path', required=True, type=click.Path(),
               help='Path to the cert being renewed. Used as the mTLS '
@@ -1455,8 +1569,27 @@ def intermediate_rotate_cmd(ctx, role, force):
 @click.option('--path-length', type=int, default=0,
               help='Sub-CA path length (default 0 = the external entity '
                    'can mint only leaves, no further sub-CAs).')
-@click.option('--validity-days', type=int, default=3650,
-              help='Cert validity. Defaults to 10 years.')
+@click.option('--validity-days', type=int, default=None,
+              help='Cert validity. Defaults per profile: 3650 for generic, '
+                   '10950 (30yr) for device-identity.')
+@click.option('--profile',
+              type=click.Choice(['generic', 'device-identity']),
+              default='generic',
+              help='§15.20 profile. `generic` = v0.4.x behavior. '
+                   '`device-identity` stamps the §15.23 intermediate-'
+                   'purpose marker so external-use leaves (§15.19) can '
+                   'pin to it as their issuer, and bumps the default '
+                   'validity to 30 years.')
+@click.option('--new-root', is_flag=True, default=False,
+              help='§15.22 opt-in — create a fresh Root and sign this '
+                   'intermediate under it (default: sign under the '
+                   "primary Root). The new Root is persisted under "
+                   "<ca_dir>/roots/<root-name>/{cert,key}.pem.")
+@click.option('--root', 'root_name', default=None,
+              help='Name for the new Root created with --new-root. '
+                   'Defaults to the intermediate name. Reusing an '
+                   'existing non-primary Root name signs under that '
+                   'existing Root instead of creating a new one.')
 @click.option('--out-cert', required=True, type=click.Path(),
               help='Where to write the external intermediate cert PEM.')
 @click.option('--out-key', required=True, type=click.Path(),
@@ -1465,24 +1598,44 @@ def intermediate_rotate_cmd(ctx, role, force):
                    'the CA does NOT retain a copy.')
 @click.pass_context
 def intermediate_mint_external_cmd(ctx, name, path_length, validity_days,
+                                     profile, new_root, root_name,
                                      out_cert, out_key):
     """Mint an external Intermediate CA per the trust-model amendment.
 
     The external entity then runs their own signing infrastructure;
-    leaves they sign chain back to mssh-root, but mssh validators do
-    NOT trust external CAs for any auth decision — the chain
-    terminates without a trust anchor.
+    leaves they sign chain back to mssh-root (or a --new-root),
+    but mssh validators do NOT trust external CAs for any auth
+    decision — the chain terminates without a trust anchor.
 
-    Example:
-        mssh-admin intermediate mint-external \\
-            --name partner-corp --path-length 1 \\
-            --out-cert partner-corp.crt --out-key partner-corp.key
+    Examples:
+
+      \b
+      # v0.4.x default — sign under primary Root, generic intermediate:
+      mssh-admin intermediate mint-external \\
+          --name partner-corp --path-length 1 \\
+          --out-cert partner-corp.crt --out-key partner-corp.key
+
+      \b
+      # v0.5.0 device-identity — for external-use (§15.19) leaves:
+      mssh-admin intermediate mint-external \\
+          --name device-mfg --profile device-identity \\
+          --out-cert device-mfg.crt --out-key device-mfg.key
+
+      \b
+      # v0.5.0 separate-Root manufacturing PKI:
+      mssh-admin intermediate mint-external \\
+          --name device-mfg --profile device-identity \\
+          --new-root --root mfg-pki \\
+          --out-cert device-mfg.crt --out-key device-mfg.key
     """
-    # §7.3.4 PKI ceremony helpers; per §2.5
+    # §7.3.4 PKI ceremony helpers; §2.5 rotation semantics; §15.20/§15.22
     c = _make_client(ctx)
     out = _handle_2fa_call(c, c.intermediate_mint_external, name,
                             path_length=path_length,
-                            validity_days=validity_days)
+                            validity_days=validity_days,
+                            profile=profile,
+                            new_root=new_root,
+                            root_name=root_name)
     Path(out_cert).write_text(out['cert_pem'])
     _atomic_write(Path(out_key), out['key_pem'].encode('ascii'), mode=0o600)
     click.echo(f'wrote {out_cert} (cert) and {out_key} (key, mode 0600)',
@@ -1492,6 +1645,8 @@ def intermediate_mint_external_cmd(ctx, name, path_length, validity_days,
         'name': out['name'],
         'issuer_id': out['issuer_id'],
         'path_length': out['path_length'],
+        'profile': out.get('profile', 'generic'),
+        'root_name': out.get('root_name', 'primary'),
         'serial': out['serial'],
     })
 

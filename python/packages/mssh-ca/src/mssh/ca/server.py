@@ -490,6 +490,19 @@ def register_routes(app: Flask) -> None:
             app.config['ADMIN_CTX'], adm, body)
         return jsonify(payload), status
 
+    # §15.19 external-use cert mint — CSR-based, signed by an
+    # operator-named external intermediate (must have been minted with
+    # `--profile <name>` per §15.20).
+    @app.post('/v1/admin/cert/external-use')
+    def _cert_external_use_mint():
+        adm, err = _admin_or_401()
+        if err:
+            return err
+        body = request.get_json(silent=True) or {}
+        status, payload = admin_handlers.external_use_cert_mint(
+            app.config['ADMIN_CTX'], adm, body)
+        return jsonify(payload), status
+
     @app.post('/v1/admin/openvpn/issue')
     def _openvpn_issue():
         adm, err = _admin_or_401()
