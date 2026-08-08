@@ -8,6 +8,68 @@ Columns: `ref`, `title`, `landed-in`, `commit`, `notes`.
 
 ---
 
+## Release notes — v0.5.5 (2026-08-08)
+
+**Backward-compat correction to v0.5.4.**
+
+v0.5.4 changed the default behavior of `IssuedClientCert.cert_pem`
+from leaf-only (legacy) to leaf+intermediate. That was a breaking
+default change — any operator script that concatenated `cert_pem +
+ca_cert_pem` to build a fullchain suddenly got a duplicated
+intermediate. v0.5.5 reverts the default and makes fullchain
+strictly opt-in.
+
+**Changes:**
+
+- `IssuedClientCert.cert_pem` — reverted to v0.5.3 semantics
+  (leaf-only in the legacy positional signing path — which is every
+  admin.py callsite in production).
+- `IssuedClientCert.full_chain_pem` — new field, always populated
+  with the leaf + issuing intermediate. Reach for this when you know
+  you need a TLS-handshake-ready fullchain and don't want to concat.
+- `IssuedClientCert.leaf_only_pem` — the field added in v0.5.4 is
+  gone. `cert_pem` IS the leaf-only in the legacy path, so a
+  separate field would be redundant.
+- Admin responses' `credentials` dict now carries both `cert_pem`
+  (v0.5.3 shape) and `full_chain_pem` (new).
+- CLI `cert mint` gains `--fullchain` flag. Without it, the v0.5.3
+  file layout is preserved byte-identical: `OUT-cert.pem` = leaf,
+  `OUT-ca.pem` = intermediate, `OUT-key.pem` = key. With
+  `--fullchain`, `OUT-cert.pem` = leaf + intermediate — no need to
+  `cat OUT-cert.pem OUT-ca.pem > fullchain.pem` afterward.
+- No `OUT-leaf.pem` file (v0.5.4 added it, v0.5.5 drops it — the
+  default `OUT-cert.pem` IS the leaf).
+
+**Operator recipe for a TLS web cert (v0.5.5):**
+
+```bash
+mssh-admin cert mint --type tls-server \
+    --cn web.example.com --csr web.csr \
+    --fullchain --out web
+# → wrote web-cert.pem (fullchain), web-ca.pem — no key file
+```
+
+**Operator recipe preserving v0.5.3 workflow (no code change needed):**
+
+```bash
+mssh-admin cert mint --type tls-server --cn web.example.com \
+    --san DNS:web.example.com --out web
+cat web-cert.pem web-ca.pem > web-fullchain.pem   # unchanged concat
+```
+
+**Test coverage:** 881 unit tests pass (up 1 from v0.5.4; +10 revamped
+tests in `test_fullchain_output.py` for the opt-in semantics: default
+leaf-only, --fullchain switches to chain, full_chain_pem field
+invariants, per-handler surfacing, CLI help text).
+
+**To tag this release:**
+```
+git tag v0.5.5
+git push mssh v0.5.5
+```
+
+---
+
 ## Release notes — v0.5.4 (2026-08-08)
 
 **Systemic bugfix: emitted certs now carry the fullchain.**
