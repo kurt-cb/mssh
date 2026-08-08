@@ -1173,36 +1173,53 @@ def cert_mint_cmd(ctx, cert_type, cn, sans, validity_days, csr_path, out_prefix,
                         csr_pem=csr_pem)
     creds = resp['credentials']
     csr_based = resp.get('cert', {}).get('csr_based', False)
+    # v0.5.4 output layout matches `cert external-use`:
+    #   OUT-cert.pem  = leaf + issuing intermediate (the "fullchain"
+    #                   that TLS servers must present in the handshake)
+    #   OUT-leaf.pem  = leaf on its own (for openssl inspection,
+    #                   PKCS#12 wrap, callers building their own chain)
+    #   OUT-ca.pem    = issuing intermediate on its own
+    #   OUT-key.pem   = private key (mode 0600) — CA-generated path only;
+    #                   omitted when --csr supplied the public key
+    leaf_only_pem = creds.get('leaf_only_pem', creds['cert_pem'])
     if out_prefix:
         od = Path(out_prefix)
         if od.suffix:                       # e.g. --out alice.pem.bad
             od = od.with_suffix('')
         od.parent.mkdir(parents=True, exist_ok=True)
         cert_path = od.with_name(f'{od.name}-cert.pem')
+        leaf_path = od.with_name(f'{od.name}-leaf.pem')
         ca_path   = od.with_name(f'{od.name}-ca.pem')
-        cert_path.write_text(creds['cert_pem'])
-        ca_path.write_text(creds['ca_cert_pem'])
+        cert_path.write_text(creds['cert_pem'])           # fullchain
+        leaf_path.write_text(leaf_only_pem)               # leaf only
+        ca_path.write_text(creds['ca_cert_pem'])          # intermediate
+        written = f'{cert_path} (fullchain), {leaf_path} (leaf), {ca_path} (ca)'
         # CSR path — CA didn't generate a key. Skip -key.pem file.
         if csr_based:
-            click.echo(f'wrote {cert_path}, {ca_path} '
-                       f'(no key file: private key stays on target host)',
-                       err=True)
+            click.echo(
+                f'wrote {written} — no key file '
+                f'(private key stays on target host)',
+                err=True)
         else:
             key_path = od.with_name(f'{od.name}-key.pem')
             key_path.write_text(creds['key_pem'])
             os.chmod(key_path, 0o600)
-            click.echo(f'wrote {cert_path}, {key_path}, {ca_path}',
+            click.echo(f'wrote {written}, {key_path} (key, mode 0600)',
                        err=True)
             if cert_type == 'https-user' and p12_password:
                 p12_path = od.with_name(f'{od.name}.p12')
-                _write_pkcs12(creds['cert_pem'], creds['key_pem'],
+                # PKCS#12 uses the leaf, not the chain — the P12
+                # spec expects one cert entry (the leaf); the chain
+                # cert(s) go in the `cas` field which cryptography's
+                # helper accepts separately.
+                _write_pkcs12(leaf_only_pem, creds['key_pem'],
                               friendly_name=cn,
                               password=p12_password.encode('utf-8'),
                               out_path=p12_path)
                 click.echo(f'wrote {p12_path} (PKCS#12, encrypted)',
                            err=True)
     else:
-        click.echo('--- cert ---', err=True)
+        click.echo('--- cert (fullchain) ---', err=True)
         click.echo(creds['cert_pem'])
         if not csr_based:
             click.echo('--- key ---', err=True)

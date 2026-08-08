@@ -8,6 +8,65 @@ Columns: `ref`, `title`, `landed-in`, `commit`, `notes`.
 
 ---
 
+## Release notes — v0.5.4 (2026-08-08)
+
+**Systemic bugfix: emitted certs now carry the fullchain.**
+
+Before this release, every issue-cert path in the CA (`cert mint` for
+tls-server / https-user / code-sign, `server add`, `admin add`,
+`openvpn issue`, `cert renew`, `external-tool add`) returned `cert_pem`
+as **leaf-only** whenever it took the legacy positional signing path
+in `admin.py` — which was every call site in production. A TLS server
+handed the resulting `cert.pem` presented only its leaf in the
+handshake; clients that trusted just the root failed the handshake
+with a "bad certificate" alert, when the actual problem was missing
+intermediate — precisely the kind of misdirection that ate two days
+of debugging for a real operator.
+
+**Fix:** `IssuedClientCert.cert_pem` is now **always** the leaf +
+issuing intermediate (fullchain, TLS-handshake-ready). A new
+`leaf_only_pem` field carries the leaf on its own for callers that
+need it (openssl inspection, PKCS#12 wrap, custom chain assembly).
+
+**CLI output layout matches `cert external-use`:**
+
+```
+mssh-admin cert mint --type tls-server --cn web.example.com \
+    --san DNS:web.example.com --out web
+# → wrote web-cert.pem (fullchain), web-leaf.pem (leaf),
+#   web-ca.pem (ca), web-key.pem (key, mode 0600)
+```
+
+With `--csr`, `web-key.pem` is omitted (private key stays on target
+host).
+
+Response body change (API): all admin handlers that build
+`credentials` from an `IssuedClientCert` bundle now include a
+`leaf_only_pem` field. Existing consumers reading `cert_pem` see the
+fullchain instead of leaf-only — which is what TLS servers actually
+need in the handshake.
+
+Backwards compat: any operator scripts that concatenated
+`cert_pem + ca_cert_pem` to build a fullchain now get a duplicated
+intermediate; drop the concat step (or switch to `leaf_only_pem`
+if leaf-only is what they wanted). PKCS#12 (`.p12`) export uses
+the new `leaf_only_pem` internally — PKCS#12's schema expects one
+cert entry for the leaf and `cas=` for the chain.
+
+**Test coverage:** 880 unit tests pass (up from 871 at v0.5.3;
++9 new tests in `test_fullchain_output.py` covering dataclass shape,
+signature-verifies-against-issuer, ca_cert_pem = 2nd cert in fullchain
+invariant, per-handler leaf_only_pem presence, and CLI four-file
+layout for both CA-generated-key and CSR-based paths).
+
+**To tag this release:**
+```
+git tag v0.5.4
+git push mssh v0.5.4
+```
+
+---
+
 ## Release notes — v0.5.3 (2026-06-14)
 
 Three fixes / additions that make the CSR + external-use flows actually

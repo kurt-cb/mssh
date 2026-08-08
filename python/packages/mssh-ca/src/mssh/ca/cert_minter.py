@@ -753,9 +753,18 @@ def load_external_intermediates(ca_dir: str | Path) -> dict[str, x509.Certificat
 
 @dataclass
 class IssuedClientCert:
-    cert_pem: bytes                     # leaf + intermediate chain
+    # v0.5.4: `cert_pem` is ALWAYS the leaf + issuing intermediate
+    # (the "fullchain" that TLS servers must present in the handshake).
+    # `leaf_only_pem` is the leaf on its own — needed by openssl-based
+    # inspection, PKCS#12 wrap, and callers that build their own
+    # chains. Before v0.5.4 the legacy positional path silently
+    # emitted leaf-only in cert_pem; that misdirection ate two days
+    # of debugging for a real operator (missing-intermediate failures
+    # surfacing as "bad certificate" TLS alerts).
+    cert_pem: bytes                     # leaf + issuing intermediate (fullchain)
+    leaf_only_pem: bytes                # leaf cert on its own
     key_pem: bytes
-    ca_cert_pem: bytes                  # the root cert
+    ca_cert_pem: bytes                  # issuing intermediate (or root if supplied)
     subject_cn: str
 
 
@@ -817,9 +826,12 @@ def issue_client_cert(common_name: str,
                            validity_days=validity_days,
                            server_auth=False, client_auth=True,
                            crl_url=crl_url, kind=kind)
+    # v0.5.4: cert_pem is ALWAYS the fullchain (leaf + issuing
+    # intermediate). Legacy positional path used to emit leaf-only
+    # which caused TLS handshake failures at the server side.
     return IssuedClientCert(
-        cert_pem=(_chain_pem(cert, signing.cert) if chain_bundle
-                  else serialize_certificate(cert)),
+        cert_pem=_chain_pem(cert, signing.cert),
+        leaf_only_pem=serialize_certificate(cert),
         key_pem=key_pem_out,
         ca_cert_pem=(serialize_certificate(root_cert)
                      if root_cert is not None
@@ -883,9 +895,10 @@ def issue_server_cert(common_name: str,
                            server_auth=True, client_auth=False,
                            sans=sans, crl_url=crl_url,
                            kind='server-tls')
+    # v0.5.4: cert_pem is ALWAYS the fullchain.
     return IssuedClientCert(
-        cert_pem=(_chain_pem(cert, signing.cert) if chain_bundle
-                  else serialize_certificate(cert)),
+        cert_pem=_chain_pem(cert, signing.cert),
+        leaf_only_pem=serialize_certificate(cert),
         key_pem=key_pem_out,
         ca_cert_pem=(serialize_certificate(root_cert)
                      if root_cert is not None
@@ -1057,9 +1070,10 @@ def issue_codesign_cert(common_name: str,
                            validity_days=validity_days,
                            server_auth=False, client_auth=False,
                            code_signing=True, kind='code-sign')
+    # v0.5.4: cert_pem is ALWAYS the fullchain.
     return IssuedClientCert(
-        cert_pem=(_chain_pem(cert, signing.cert) if chain_bundle
-                  else serialize_certificate(cert)),
+        cert_pem=_chain_pem(cert, signing.cert),
+        leaf_only_pem=serialize_certificate(cert),
         key_pem=key_pem_out,
         ca_cert_pem=(serialize_certificate(root_cert)
                      if root_cert is not None
