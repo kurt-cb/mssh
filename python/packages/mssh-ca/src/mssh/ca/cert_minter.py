@@ -464,11 +464,23 @@ def _self_signed(subject_cn: str, key, validity_days: int = 3650,
     return builder.sign(private_key=key, algorithm=_sig_hash_for(key))
 
 
+def _default_root_cn() -> str:
+    """v0.5.6 — default Root CA Common Name derived from hostname
+    (`<hostname> Root CA`). Operator-overridable via `--root-cn` on
+    `mssh-admin init` or `root_cn=` in `bootstrap_ca()`. Pre-v0.5.6
+    the CN was hard-coded 'mssh-root', which made every mssh CA look
+    like every other one in an audit log or trust-store listing."""
+    import socket
+    hostname = socket.gethostname() or 'mssh'
+    return f'{hostname} Root CA'
+
+
 def bootstrap_ca(ca_dir: str | Path, *, key_type: str = 'ec',
                  mtls_key_type: str = 'ec',
                  bootstrap_admin_cn: str = 'bootstrap-admin',
                  tls_server_cn: str = 'mssh-ca',
-                 tls_server_sans: list[str] | None = None
+                 tls_server_sans: list[str] | None = None,
+                 root_cn: str | None = None,
                  ) -> BootstrapArtifacts:
     """First-time init: create the CA's root + 4 named intermediates,
     the CA's TLS server cert, and a bootstrap superuser admin cert.
@@ -507,9 +519,15 @@ def bootstrap_ca(ca_dir: str | Path, *, key_type: str = 'ec',
     ca_dir.mkdir(parents=True, exist_ok=True)
     (ca_dir / 'intermediates').mkdir(exist_ok=True)
 
-    # 1. Root: self-signed, ~20-year validity.
+    # 1. Root: self-signed, ~20-year validity. CN is operator-supplied
+    # (via `--root-cn` on init) or derived from hostname — pre-v0.5.6
+    # every mssh CA got the identical CN "mssh-root", which made every
+    # CA look like every other in a trust-store listing or audit log.
     root_key = generate_signing_key(key_type)
-    root_cert = _self_signed_root('mssh-root', root_key)
+    effective_root_cn = (root_cn or _default_root_cn()).strip()
+    if not effective_root_cn:
+        raise ValueError('root_cn must be a non-empty string')
+    root_cert = _self_signed_root(effective_root_cn, root_key)
 
     # 2. Four named intermediates, all signed by root, ~10-year validity.
     intermediates: dict[str, Intermediate] = {}

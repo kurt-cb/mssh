@@ -1331,13 +1331,84 @@ _CERT_DEFAULT_VALIDITY = {
 _CERT_MAX_VALIDITY = 825   # CAB-forum-style max; v0.4.x global cap.
 
 
-def _validate_san(s: str) -> str:
+def _validate_dns_label(label: str) -> str | None:
+    """v0.5.6 — RFC 1035 §2.3.1 hostname label rules.
+
+    A label:
+      * is 1-63 octets long
+      * starts with a letter or digit (letter-only per strict RFC 952,
+        digit allowed per RFC 1123)
+      * contains only letters, digits, and hyphens
+      * does not end with a hyphen
+      * (relaxed) underscores are technically NOT valid per RFC 1035
+        but widely used in service records / internal names — we
+        accept them silently
+
+    Returns None if valid; returns a human-readable error string
+    otherwise (caller decides warn vs fail).
+    """
+    if not label:
+        return 'empty DNS label'
+    if len(label) > 63:
+        return f'DNS label too long ({len(label)} > 63): {label!r}'
+    # Wildcard label — allowed for TLS SANs but only as the leftmost
+    # label and only as a single '*'.
+    if label == '*':
+        return None
+    if not (label[0].isalnum() or label[0] == '_'):
+        return f'DNS label must start with a letter/digit: {label!r}'
+    if label[-1] == '-':
+        return f'DNS label may not end with a hyphen: {label!r}'
+    for ch in label:
+        if not (ch.isalnum() or ch in ('-', '_')):
+            return (f'DNS label contains invalid character {ch!r}: '
+                    f'{label!r}')
+    return None
+
+
+def _validate_dns_name(name: str) -> tuple[str | None, list[str]]:
+    """v0.5.6 — RFC 1035 DNS name validation.
+
+    Returns ``(error, warnings)``. ``error`` is None on success;
+    warnings are non-fatal shape observations (single-label,
+    wildcard placement, length approaching cap, etc.). Callers
+    typically fail on error and log warnings.
+    """
+    warnings: list[str] = []
+    if not name:
+        return ('empty DNS name', warnings)
+    if len(name) > 253:
+        return (f'DNS name too long ({len(name)} > 253): {name!r}',
+                warnings)
+    labels = name.split('.')
+    for label in labels:
+        err = _validate_dns_label(label)
+        if err:
+            return (err, warnings)
+    # Wildcard must be leftmost only.
+    for label in labels[1:]:
+        if '*' in label:
+            return (f'wildcard `*` only allowed as leftmost label: '
+                    f'{name!r}', warnings)
+    if len(labels) == 1:
+        warnings.append(
+            f'DNS name {name!r} is a single label (no dot). Modern '
+            f'browsers (Chrome, Firefox) require Fully-Qualified '
+            f'Domain Names in SANs and reject bare hostnames with '
+            f'ERR_CERT_COMMON_NAME_INVALID. Consider adding the '
+            f'domain suffix (e.g. `{name}.local`) or using an IP '
+            f'SAN if this cert is for a locally-addressed service.')
+    return (None, warnings)
+
+
+def _validate_san(s: str) -> tuple[str, list[str]]:
     """Normalize and validate a single SAN string.
 
     Accepts ``DNS:<name>``, ``IP:<addr>``, or a bare DNS name (no
     prefix → treated as DNS). Raises ValueError on malformed input.
-    Returns the normalized form (always with a ``DNS:`` / ``IP:``
-    prefix) for downstream consumers.
+    Returns ``(normalized, warnings)`` — normalized always carries
+    the ``DNS:`` / ``IP:`` prefix; warnings are non-fatal shape
+    observations (bare-hostname will-fail-in-browser, etc.).
     """
     s = s.strip()
     if not s:
@@ -1345,17 +1416,52 @@ def _validate_san(s: str) -> str:
     if s.startswith('IP:'):
         import ipaddress
         ipaddress.ip_address(s[3:])  # raises ValueError if bad
-        return s
+        return s, []
     if s.startswith('DNS:'):
         host = s[4:]
-        if not host or any(c in host for c in ' \t\n\r"\''):
-            raise ValueError(f'invalid DNS SAN {host!r}')
-        return s
-    # bare hostname
-    host = s
-    if any(c in host for c in ' \t\n\r"\''):
-        raise ValueError(f'invalid DNS SAN {host!r}')
-    return f'DNS:{host}'
+    else:
+        host = s
+    err, warnings = _validate_dns_name(host)
+    if err:
+        raise ValueError(f'invalid DNS SAN: {err}')
+    return f'DNS:{host}', warnings
+
+
+def _validate_cn(cn: str, cert_type: str) -> list[str]:
+    """v0.5.6 — validate the Common Name for a cert-mint request.
+
+    For hostname-bearing kinds (`tls-server`, `https-user` maybe) the
+    CN should look like a DNS name; for identity-only kinds (`code-sign`,
+    `openvpn`) the CN is a free-form label and only needs to be
+    printable non-empty ASCII/UTF-8.
+
+    Returns warnings (non-fatal). Raises ValueError on hard failures.
+    """
+    if not cn or not cn.strip():
+        raise ValueError('empty Common Name')
+    if any(ord(ch) < 0x20 for ch in cn):
+        raise ValueError(
+            f'Common Name contains control characters: {cn!r}')
+    if len(cn.encode('utf-8')) > 64:
+        # RFC 5280 §A.1 upper bound on CN.
+        raise ValueError(
+            f'Common Name too long ({len(cn.encode("utf-8"))} bytes > 64): '
+            f'{cn!r}')
+    warnings: list[str] = []
+    if cert_type == 'tls-server':
+        err, dns_warnings = _validate_dns_name(cn)
+        if err:
+            # For tls-server the CN typically IS a hostname; a hard
+            # DNS-invalid CN is almost certainly a mistake, but stop
+            # short of failing since it's legacy-compatible to have a
+            # non-DNS CN and rely on SANs. Warn instead.
+            warnings.append(
+                f'Common Name is not a valid DNS name ({err}). '
+                f'Modern browsers ignore the CN and require the URL '
+                f'hostname to match a DNS SAN — supply --san entries.')
+        else:
+            warnings.extend(dns_warnings)
+    return warnings
 
 
 def _validity_or_default(ctx: AdminContext | None, body: dict,
@@ -1430,6 +1536,14 @@ def cert_mint(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
     if err:
         return 400, err
 
+    # v0.5.6 CN validation. Warnings are collected + surfaced in the
+    # response; hard errors return 400.
+    warnings: list[str] = []
+    try:
+        warnings.extend(_validate_cn(cn, cert_type))
+    except ValueError as e:
+        return _err(400, 'bad_request', f'invalid cn: {e}')
+
     sans_raw = body.get('sans') or []
     if cert_type != 'tls-server' and sans_raw:
         return _err(400, 'bad_request',
@@ -1437,9 +1551,26 @@ def cert_mint(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
     if not isinstance(sans_raw, list):
         return _err(400, 'bad_request', 'sans must be a list')
     try:
-        sans = [_validate_san(s) for s in sans_raw]
+        san_pairs = [_validate_san(s) for s in sans_raw]
+        sans = [normalized for normalized, _ in san_pairs]
+        for _, w in san_pairs:
+            warnings.extend(w)
     except ValueError as e:
         return _err(400, 'bad_request', f'invalid SAN: {e}')
+
+    # v0.5.6 — for tls-server, warn if no DNS SAN was supplied.
+    # Modern browsers ignore the CN entirely; without a DNS SAN they
+    # will fail with ERR_CERT_COMMON_NAME_INVALID even if the CN
+    # matches the URL hostname.
+    if cert_type == 'tls-server':
+        dns_sans = [s for s in sans if s.startswith('DNS:')]
+        if not dns_sans:
+            warnings.append(
+                'no DNS SAN supplied — modern browsers require a DNS '
+                'SubjectAltName matching the URL hostname. Add '
+                '`--san DNS:<hostname>` for each name/URL the client '
+                'will use to reach this server, or the browser will '
+                'reject the cert with ERR_CERT_COMMON_NAME_INVALID.')
 
     # v0.5.3 CSR path — accept a PKCS#10 CSR and use its public key +
     # SANs instead of generating a keypair. Applies to any cert kind.
@@ -1521,6 +1652,7 @@ def cert_mint(ctx: AdminContext, admin: Admin, body: dict) -> tuple[int, dict]:
             'csr_based': csr_public_key is not None,
             'sans': sans,
         },
+        'warnings': warnings,           # v0.5.6 — surfaced by the CLI
         'credentials': {
             'cert_pem': bundle.cert_pem.decode('ascii'),
             'full_chain_pem': bundle.full_chain_pem.decode('ascii'),

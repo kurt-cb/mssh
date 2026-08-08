@@ -308,7 +308,13 @@ custom_oids: []
 @click.option('--tls-server-san', multiple=True,
               help='SubjectAltName for the CA\'s TLS server cert (repeatable). '
                    'Default: DNS:localhost, IP:127.0.0.1.')
-def init(ca_dir, bootstrap_admin, tls_server_cn, tls_server_san):
+@click.option('--root-cn', default=None,
+              help='CN for the self-signed Root CA. Default: '
+                   '`<hostname> Root CA` (derived at init from '
+                   'socket.gethostname()). Set to something recognizable '
+                   'so operators can distinguish this CA from others '
+                   'in a trust-store listing or audit log.')
+def init(ca_dir, bootstrap_admin, tls_server_cn, tls_server_san, root_cn):
     """Initialize a fresh CA: signing key + bootstrap admin cert."""
     # §7.3.1 CLI command tree (full enum in §14.2.2)
     ca_dir = Path(ca_dir)
@@ -318,6 +324,7 @@ def init(ca_dir, bootstrap_admin, tls_server_cn, tls_server_san):
     artifacts = bootstrap_ca(
         ca_dir, bootstrap_admin_cn=bootstrap_admin,
         tls_server_cn=tls_server_cn, tls_server_sans=sans,
+        root_cn=root_cn,
     )
 
     # Drop a default ca-config.yaml so the user can run the server immediately.
@@ -1185,6 +1192,12 @@ def cert_mint_cmd(ctx, cert_type, cn, sans, validity_days, csr_path,
                         csr_pem=csr_pem)
     creds = resp['credentials']
     csr_based = resp.get('cert', {}).get('csr_based', False)
+    # v0.5.6 — surface CN/SAN validation warnings from the CA. The
+    # mint SUCCEEDED (else we'd have returned earlier via _handle_call);
+    # warnings just flag operator-facing issues the browser or a
+    # downstream verifier will run into.
+    for w in resp.get('warnings') or []:
+        click.echo(f'WARNING: {w}', err=True)
     # File layout matches v0.5.3 (backward compat). --fullchain opts
     # into leaf+intermediate in OUT-cert.pem (skips the operator's
     # `cat OUT-cert.pem OUT-ca.pem > fullchain.pem` step).

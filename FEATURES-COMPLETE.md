@@ -8,6 +8,75 @@ Columns: `ref`, `title`, `landed-in`, `commit`, `notes`.
 
 ---
 
+## Release notes — v0.5.6 (2026-08-08)
+
+Two operator-facing improvements. Both non-breaking.
+
+**1. Root CA CN is now configurable / hostname-derived.**
+
+Pre-v0.5.6 every mssh CA got the identical hard-coded Root CN
+`mssh-root`, which made it hard to distinguish one CA's Root from
+another in a trust-store listing or an audit log. New defaults:
+
+- `bootstrap_ca(root_cn=None)` — defaults to `<hostname> Root CA`
+  (from `socket.gethostname()`). Operator-supplied `root_cn`
+  overrides.
+- `mssh-admin init --root-cn "ACME Root CA"` — CLI flag surfaces
+  it. Without the flag, `<hostname> Root CA` is used.
+
+The Root cert's Organization stays `mssh` (unchanged; still useful
+to identify the emitting software).
+
+**2. CN + SAN validation with warnings.**
+
+`cert_mint` now validates the CN and each SAN against RFC 1035
+hostname rules. Two failure modes:
+
+- **Hard errors (400 bad_request):** empty CN, control chars in CN,
+  CN over 64 bytes, invalid SAN characters, wildcard in a non-
+  leftmost SAN label.
+- **Warnings (mint succeeds, warning surfaced in response +
+  echoed by CLI):**
+  - Single-label DNS name (like `kg-di-dev`) — modern browsers
+    reject bare hostnames in SANs with `ERR_CERT_COMMON_NAME_INVALID`.
+    Add the domain suffix (`kg-di-dev.local`) or use an IP SAN.
+  - `tls-server` mint with no DNS SAN at all — same failure mode;
+    modern browsers ignore CN entirely.
+  - Non-DNS CN on a `tls-server` mint.
+
+Warnings surface in the mint response's new `warnings: [...]` field
+and the `mssh-admin cert mint` CLI echoes each one to stderr with a
+`WARNING:` prefix. Non-DNS-shaped CNs on non-TLS kinds (`code-sign`,
+`openvpn`) get no complaint — the CN is a free-form identifier
+there.
+
+**About the `ERR_CERT_COMMON_NAME_INVALID` a real operator hit:**
+
+Chrome and Firefox stopped honoring the CN as a hostname source
+around 2017. They require the URL hostname to match a `DNS:` entry
+in the SubjectAltName extension (per RFC 6125 §6.4.4). For a bare
+hostname like `kg-di-dev` — even with the exact same value in the
+CN and a SAN — Chromium's cert verifier requires the SAN's DNS name
+to look like an FQDN (labels separated by at least one dot). This
+is not something the CA can fix — it's a browser policy — but v0.5.6
+now warns at mint time so operators aren't debugging TLS handshakes
+after deploy.
+
+**Test coverage:** 916 unit tests pass (up from 881 at v0.5.5;
++35 new tests in `test_root_cn_and_cn_validation.py` covering
+`_default_root_cn`, `bootstrap_ca(root_cn=...)`, RFC 1035 label +
+name validation happy + sad paths, wildcard placement, SAN
+normalization, CN validation per cert kind, and end-to-end
+warning surfacing).
+
+**To tag this release:**
+```
+git tag v0.5.6
+git push mssh v0.5.6
+```
+
+---
+
 ## Release notes — v0.5.5 (2026-08-08)
 
 **Backward-compat correction to v0.5.4.**
