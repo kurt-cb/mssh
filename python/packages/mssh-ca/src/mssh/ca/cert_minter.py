@@ -465,14 +465,22 @@ def _self_signed(subject_cn: str, key, validity_days: int = 3650,
 
 
 def _default_root_cn() -> str:
-    """v0.5.6 — default Root CA Common Name derived from hostname
-    (`<hostname> Root CA`). Operator-overridable via `--root-cn` on
-    `mssh-admin init` or `root_cn=` in `bootstrap_ca()`. Pre-v0.5.6
-    the CN was hard-coded 'mssh-root', which made every mssh CA look
-    like every other one in an audit log or trust-store listing."""
+    """v0.5.7 — placeholder Root CA Common Name for callers that don't
+    supply one. Deliberately obvious and unfit-for-production so an
+    operator seeing it in a trust-store listing or audit log knows
+    something skipped the required config step. `mssh-admin init`
+    REQUIRES `--root-cn` and does not fall back to this; the
+    programmatic `bootstrap_ca()` API keeps this default so tests +
+    embedded uses don't have to synthesize a name every time.
+
+    Pre-v0.5.6 the CN was hard-coded 'mssh-root'. v0.5.6 shifted the
+    default to '<hostname> Root CA' — legible but still easy to accept
+    silently. v0.5.7 makes it obviously-placeholder ('Unspecified cert
+    from host <hostname>') and forces operators through --root-cn at
+    init time."""
     import socket
-    hostname = socket.gethostname() or 'mssh'
-    return f'{hostname} Root CA'
+    hostname = socket.gethostname() or 'unknown'
+    return f'Unspecified cert from host {hostname}'
 
 
 def bootstrap_ca(ca_dir: str | Path, *, key_type: str = 'ec',

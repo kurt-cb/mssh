@@ -8,6 +8,43 @@ Columns: `ref`, `title`, `landed-in`, `commit`, `notes`.
 
 ---
 
+## Release notes — v0.5.7 (2026-08-10)
+
+**Root CN is now mandatory config on `mssh-admin init`.**
+
+v0.5.6 introduced a `<hostname> Root CA` default. That was still too
+easy to accept silently — an operator running `mssh-admin init`
+without thinking about the CA identity ended up with `fedora Root CA`
+or similar in every trust store, and later couldn't easily tell one
+CA from another.
+
+**v0.5.7 makes `--root-cn` REQUIRED** on the CLI. Attempting to run
+init without it fails with `Missing option '--root-cn'` from click.
+The help text steers operators toward concrete names ("ACME Root CA",
+"internal.example.com Root", etc.).
+
+The programmatic `bootstrap_ca()` Python API still accepts a
+`root_cn=None` default for tests + embedded uses, but the fallback CN
+is now **`Unspecified cert from host <hostname>`** — deliberately
+placeholder-looking so anyone finding it in a real trust store knows
+the required config step was skipped. Pre-v0.5.7: `mssh-root` (bad —
+looks legit) → `<hostname> Root CA` (still too legit) → **`Unspecified
+cert from host <hostname>`** (obviously placeholder).
+
+**Test coverage:** 918 unit tests pass (up from 916 at v0.5.6; +2
+tests in `test_root_cn_and_cn_validation.py` covering the CLI
+required-flag error path and the happy-path with an operator CN.
+Existing test that checked the v0.5.6 hostname default updated for
+the new placeholder wording).
+
+**To tag this release:**
+```
+git tag v0.5.7
+git push mssh v0.5.7
+```
+
+---
+
 ## Release notes — v0.5.6 (2026-08-08)
 
 Two operator-facing improvements. Both non-breaking.

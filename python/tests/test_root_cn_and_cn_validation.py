@@ -46,12 +46,16 @@ def _root_cn_of(cert: x509.Certificate) -> str:
         NameOID.COMMON_NAME)[0].value
 
 
-def test_bootstrap_ca_default_root_cn_uses_hostname(tmp_path):
-    """Verifies §2.2 v0.5.6 — default Root CN is '<hostname> Root CA'."""
+def test_bootstrap_ca_default_root_cn_is_placeholder(tmp_path):
+    """Verifies §2.2 v0.5.7 — programmatic bootstrap_ca() without
+    root_cn produces an obviously-placeholder CN so an operator
+    seeing it in a trust store knows the required config step was
+    skipped."""
     ca_dir = tmp_path / 'ca'
     cert_minter.bootstrap_ca(ca_dir)
     root_cert = cert_minter.load_certificate(ca_dir / 'root-cert.pem')
-    assert _root_cn_of(root_cert) == f'{socket.gethostname()} Root CA'
+    assert _root_cn_of(root_cert) == \
+        f'Unspecified cert from host {socket.gethostname()}'
 
 
 def test_bootstrap_ca_custom_root_cn_honored(tmp_path):
@@ -71,9 +75,42 @@ def test_bootstrap_ca_empty_root_cn_rejected(tmp_path):
 
 
 def test_default_root_cn_helper():
-    """Verifies §2.2 v0.5.6 — _default_root_cn returns
-    '<hostname> Root CA'."""
-    assert cert_minter._default_root_cn() == f'{socket.gethostname()} Root CA'
+    """Verifies §2.2 v0.5.7 — _default_root_cn returns the obvious
+    placeholder 'Unspecified cert from host <hostname>'."""
+    assert cert_minter._default_root_cn() == \
+        f'Unspecified cert from host {socket.gethostname()}'
+
+
+def test_cli_init_requires_root_cn(tmp_path):
+    """Verifies §7.3.1 / v0.5.7 — `mssh-admin init` refuses to run
+    without --root-cn (click surfaces 'Missing option'), so operators
+    can't accidentally ship a CA with a generic default CN."""
+    from click.testing import CliRunner
+    from mssh.admin import main as admin_main
+    runner = CliRunner()
+    res = runner.invoke(admin_main.cli, [
+        'init', '--ca-dir', str(tmp_path / 'ca'),
+        '--bootstrap-admin', 'boot',
+    ])
+    assert res.exit_code != 0
+    assert '--root-cn' in res.output or 'root-cn' in res.output
+
+
+def test_cli_init_accepts_root_cn(tmp_path):
+    """Verifies §7.3.1 / v0.5.7 — with --root-cn, init succeeds and
+    the operator's CN lands on the Root cert."""
+    from click.testing import CliRunner
+    from mssh.admin import main as admin_main
+    runner = CliRunner()
+    ca_dir = tmp_path / 'ca'
+    res = runner.invoke(admin_main.cli, [
+        'init', '--ca-dir', str(ca_dir),
+        '--bootstrap-admin', 'boot',
+        '--root-cn', 'ACME Widgets Root CA',
+    ])
+    assert res.exit_code == 0, res.output
+    root_cert = cert_minter.load_certificate(ca_dir / 'root-cert.pem')
+    assert _root_cn_of(root_cert) == 'ACME Widgets Root CA'
 
 
 # ---- DNS label validation ----------------------------------------------

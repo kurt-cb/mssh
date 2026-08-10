@@ -308,12 +308,12 @@ custom_oids: []
 @click.option('--tls-server-san', multiple=True,
               help='SubjectAltName for the CA\'s TLS server cert (repeatable). '
                    'Default: DNS:localhost, IP:127.0.0.1.')
-@click.option('--root-cn', default=None,
-              help='CN for the self-signed Root CA. Default: '
-                   '`<hostname> Root CA` (derived at init from '
-                   'socket.gethostname()). Set to something recognizable '
-                   'so operators can distinguish this CA from others '
-                   'in a trust-store listing or audit log.')
+@click.option('--root-cn', required=True,
+              help='CN for the self-signed Root CA. REQUIRED — this is '
+                   'how operators and trust-store consumers distinguish '
+                   'one CA from another; there is no sensible default. '
+                   'Pick something concrete and recognizable, e.g. '
+                   '"ACME Root CA" or "internal.example.com Root".')
 def init(ca_dir, bootstrap_admin, tls_server_cn, tls_server_san, root_cn):
     """Initialize a fresh CA: signing key + bootstrap admin cert."""
     # §7.3.1 CLI command tree (full enum in §14.2.2)

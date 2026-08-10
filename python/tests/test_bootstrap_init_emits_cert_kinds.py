@@ -30,6 +30,7 @@ def init_ca(tmp_path):
     res = runner.invoke(admin_main.cli, [
         'init', '--ca-dir', str(ca_dir),
         '--bootstrap-admin', 'boot',
+        '--root-cn', 'Test CA (init fixture)',
     ])
     assert res.exit_code == 0, res.output
     return ca_dir / 'ca-config.yaml'
